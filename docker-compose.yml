@@ -1,0 +1,22 @@
+version: '3.8'
+
+services:
+  gobard:
+    build: .
+    container_name: gobard
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      # Mount cache directory to persist downloaded music
+      - ./cache:/app/cache
+    # No ports needed for Discord bot
+    environment:
+      # Override cache directory to use mounted volume
+      - CACHE_DIR=/app/cache
+    healthcheck:
+      test: ["CMD", "pgrep", "gobard"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s

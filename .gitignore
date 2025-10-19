@@ -25,3 +25,19 @@ go.work.sum
 # env file
 .env
 
+# Cache directory
+cache/
+
+# Binary
+gobard
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
