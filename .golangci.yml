@@ -1,0 +1,143 @@
+run:
+  timeout: 5m
+  skip-dirs:
+    - vendor
+    - .git
+  build-tags:
+    - integration
+
+output:
+  format: colored-line-number
+
+linters:
+  enable:
+    # Error handling
+    - errcheck           # Checks unchecked errors
+    - nilerr            # Finds nil error assignments
+    - nilnil            # Checks nil nil comparisons
+
+    # Code quality
+    - govet              # Go vet
+    - ineffassign        # Detects unused assignments
+    - unused             # Checks unused constants, variables, functions
+    - deadcode           # Finds unused code
+    - varcheck           # Finds unused variables and constants
+
+    # Naming
+    - stylecheck         # Checks style issues
+    - revive             # Drop-in replacement for golint
+
+    # Security
+    - gosec              # Security scanner
+
+    # Formatting
+    - gofmt              # gofmt checker
+    - goimports          # goimports checker
+    - gci                # Sorts imports
+
+    # Complexity
+    - gocyclo            # Cyclomatic complexity
+    - nestif             # Finds deeply nested if statements
+
+    # Performance
+    - prealloc           # Finds slice declarations that could be pre-allocated
+
+    # Other
+    - misspell           # Finds misspelled English words
+    - unconvert          # Removes unnecessary type conversions
+    - unparam            # Reports unused function parameters
+
+linters-settings:
+  errcheck:
+    check-type-assertions: true
+    check-blank: true
+
+  gocyclo:
+    min-complexity: 15
+
+  gosec:
+    severity: medium
+    confidence: medium
+    # Exclude certain rules if needed
+    # excludes:
+    #   - G101
+
+  revive:
+    ignore-generated-header: true
+    severity: warning
+    rules:
+      - name: blank-imports
+      - name: context-as-argument
+      - name: context-keys-type
+      - name: error-naming
+      - name: error-return
+      - name: error-strings
+      - name: errorf
+      - name: exported
+        disabled: true  # Too strict for this project
+      - name: if-return
+      - name: increment-decrement
+      - name: indent-error-flow
+      - name: package-comments
+        disabled: true  # Allow packages without comments
+      - name: range
+      - name: receiver-naming
+      - name: time-naming
+      - name: unexported-return
+      - name: unreachable-code
+      - name: unused-parameter
+        disabled: true  # Too strict
+      - name: var-declaration
+      - name: var-naming
+
+  goimports:
+    local-prefixes: github.com/GrainedLotus515/gobard
+
+  govet:
+    check-shadowing: true
+    check-unreachable: false
+    check-append: true
+    check-assign: true
+    check-atomic: true
+    check-bool-compare: true
+    check-builds: true
+    check-composites: true
+    check-copylocks: true
+    check-httpresponse: true
+    check-locks: true
+    check-nilfunc: true
+    check-printf: true
+    check-rangeloops: true
+    check-shift: true
+    check-sigchanyels: true
+    check-tests: true
+    check-unmarshal: true
+    check-unreachable: true
+    check-unsafeptr: true
+    check-unusedresult: true
+
+issues:
+  exclude-rules:
+    # Allow unused parameters in interface implementations
+    - linters: [unused]
+      source: "func.*\\(.*\\).*implements"
+
+    # Allow underscores in test filenames
+    - linters: [revive]
+      path: _test\.go
+
+    # Allow error variables named 'err' in defer
+    - linters: [revive]
+      text: "var-naming: func parameter"
+      source: "defer"
+
+  exclude-generated: true
+  exclude-case-sensitive: false
+  max-issues-per-linter: 0
+  max-same-issues: 0
+
+severity:
+  default-severity: error
+  rules:
+    - linters: [revive]
+      severity: warning

@@ -1,5 +1,9 @@
 # GoBard 🎧
 
+[![Build Status](https://git.grainedlotus.com/GrainedLotus515/GoBard/actions/workflows/go-test.yml/badge.svg)](https://git.grainedlotus.com/GrainedLotus515/GoBard/actions)
+[![Docker Build](https://git.grainedlotus.com/GrainedLotus515/GoBard/actions/workflows/docker-build.yml/badge.svg)](https://git.grainedlotus.com/GrainedLotus515/GoBard/actions)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
 A self-hosted Discord music bot written in Go with simplicity and reliability in mind. GoBard is a feature-complete recreation of [Muse](https://github.com/museofficial/muse) with full feature parity.
 
 ## Features
@@ -308,9 +312,43 @@ GoBard provides feature parity with Muse while being written in Go:
 | Multi-Guild | ✅ | ✅ |
 | Docker Support | ✅ | ✅ |
 
+## CI/CD Pipeline
+
+GoBard uses Gitea Actions for continuous integration and deployment:
+
+### Automated Checks
+
+Every push and pull request triggers:
+- ✅ **Go Tests** - Tests on Go 1.24 and 1.25
+- ✅ **Code Linting** - golangci-lint with strict checks
+- ✅ **Security Scanning** - Trivy vulnerability detection
+- ✅ **Docker Build** - Multi-platform image builds
+- 📦 **Image Publishing** - Automatic registry push on main/tags
+
+### Docker Images
+
+Pre-built Docker images are available from:
+```bash
+docker pull git.grainedlotus.com/grainedlotus515/gobard:latest
+docker pull git.grainedlotus.com/grainedlotus515/gobard:main
+docker pull git.grainedlotus.com/grainedlotus515/gobard:v1.0.0  # Release versions
+```
+
+### Setup Instructions
+
+See [Gitea Actions Setup Guide](docs/GITEA_ACTIONS_SETUP.md) for detailed configuration.
+
+For CI/CD documentation, see [CI/CD Pipeline Documentation](docs/CI_CD.md).
+
 ## Contributing
 
 Contributions are welcome! Please feel free to submit a Pull Request.
+
+All pull requests require:
+- ✅ Passing tests (Go 1.24 and 1.25)
+- ✅ No linting errors
+- ✅ Code formatting compliance
+- ✅ Successful Docker build
 
 ## License
 
