@@ -20,6 +20,7 @@ type GuildPlayer struct {
 	// Playback state
 	Playing         bool
 	Paused          bool
+	LoopRunning     bool // Track if playLoop goroutine is running
 	CurrentPosition time.Duration
 	Volume          int
 
@@ -353,6 +354,20 @@ func (p *GuildPlayer) Disconnect() error {
 	}
 
 	return nil
+}
+
+// IsLoopRunning safely checks if the playback loop is running
+func (p *GuildPlayer) IsLoopRunning() bool {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.LoopRunning
+}
+
+// SetLoopRunning safely sets the playback loop running state
+func (p *GuildPlayer) SetLoopRunning(running bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.LoopRunning = running
 }
 
 // streamToVoice streams audio data to Discord voice connection

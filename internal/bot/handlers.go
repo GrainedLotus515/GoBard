@@ -63,8 +63,9 @@ func (b *Bot) handlePlay(s *discordgo.Session, i *discordgo.InteractionCreate) e
 		p.Queue.Add(track)
 	}
 
-	// Start playing if not already playing
-	if !p.Playing {
+	// Start playing if playback loop is not already running
+	if !p.IsLoopRunning() {
+		p.SetLoopRunning(true)
 		go b.playLoop(i.GuildID)
 	}
 
@@ -186,6 +187,11 @@ func (b *Bot) playLoop(guildID string) {
 	logger.Debug("Starting playback loop", "guild", guildID)
 	p := b.PlayerManager.GetPlayer(guildID)
 
+	// Ensure we log when the loop ends
+	defer func() {
+		logger.Debug("Playback loop ended", "guild", guildID)
+	}()
+
 	for {
 		track := p.Queue.Current()
 		if track == nil {
@@ -194,8 +200,23 @@ func (b *Bot) playLoop(guildID string) {
 				// Queue is empty, wait and disconnect
 				logger.PlaybackQueueEmpty()
 				time.Sleep(b.Config.WaitAfterQueueEmpty)
-				p.Disconnect()
-				return
+
+				// Check again after waiting - a track might have been added during the wait
+				track = p.Queue.Current()
+				if track == nil {
+					track = p.Queue.Next()
+				}
+
+				// If still no track, disconnect and exit
+				if track == nil {
+					// Clear LoopRunning flag BEFORE disconnecting to allow new songs to start a new loop
+					p.SetLoopRunning(false)
+					p.Disconnect()
+					return
+				}
+
+				// Track was added during wait, continue to play it
+				logger.Debug("Track added during wait, resuming playback")
 			}
 		}
 
