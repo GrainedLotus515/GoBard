@@ -4,13 +4,13 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/GrainedLotus515/gobard/internal/cache"
+	"github.com/GrainedLotus515/gobard/internal/config"
+	"github.com/GrainedLotus515/gobard/internal/logger"
+	"github.com/GrainedLotus515/gobard/internal/player"
+	"github.com/GrainedLotus515/gobard/internal/spotify"
+	"github.com/GrainedLotus515/gobard/internal/youtube"
 	"github.com/bwmarrin/discordgo"
-	"github.com/lotus/gobard/internal/cache"
-	"github.com/lotus/gobard/internal/config"
-	"github.com/lotus/gobard/internal/logger"
-	"github.com/lotus/gobard/internal/player"
-	"github.com/lotus/gobard/internal/spotify"
-	"github.com/lotus/gobard/internal/youtube"
 )
 
 // Bot represents the Discord bot

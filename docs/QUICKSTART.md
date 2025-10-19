@@ -53,8 +53,8 @@ sudo pacman -S yt-dlp    # Arch Linux
 ### 1. Clone and Install
 
 ```bash
-git clone https://github.com/lotus/gobard.git
-cd gobard
+git clone https://git.grainedlotus.com/GrainedLotus515/GoBard.git
+cd GoBard
 go mod download
 ```
 

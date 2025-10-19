@@ -7,8 +7,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/GrainedLotus515/gobard/internal/logger"
 	"github.com/bwmarrin/discordgo"
-	"github.com/lotus/gobard/internal/logger"
 )
 
 // GuildPlayer manages playback for a single guild

@@ -13,7 +13,7 @@ Thank you for considering contributing to GoBard! This document provides guideli
 
 ### Reporting Bugs
 
-Before creating bug reports, please check existing issues to avoid duplicates. When creating a bug report, include:
+Before creating bug reports, please check [existing issues](https://git.grainedlotus.com/GrainedLotus515/GoBard/issues) to avoid duplicates. When creating a bug report, include:
 
 - **Clear title and description**
 - **Steps to reproduce** the issue
@@ -23,7 +23,7 @@ Before creating bug reports, please check existing issues to avoid duplicates. W
 
 ### Suggesting Enhancements
 
-Enhancement suggestions are tracked as GitHub issues. When creating an enhancement suggestion, include:
+Enhancement suggestions are tracked as [Gitea issues](https://git.grainedlotus.com/GrainedLotus515/GoBard/issues). When creating an enhancement suggestion, include:
 
 - **Clear title and description**
 - **Use case** - why would this be useful?
@@ -49,8 +49,8 @@ Enhancement suggestions are tracked as GitHub issues. When creating an enhanceme
 
 2. **Clone your fork:**
    ```bash
-   git clone https://github.com/YOUR_USERNAME/gobard.git
-   cd gobard
+   git clone https://git.grainedlotus.com/YOUR_USERNAME/GoBard.git
+   cd GoBard
    ```
 
 3. **Install Go dependencies:**

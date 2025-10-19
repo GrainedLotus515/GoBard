@@ -7,8 +7,8 @@ import (
 	"os/exec"
 	"sync"
 
+	"github.com/GrainedLotus515/gobard/internal/logger"
 	"github.com/hraban/opus"
-	"github.com/lotus/gobard/internal/logger"
 )
 
 // CustomEncoder handles audio encoding using FFmpeg + libopus

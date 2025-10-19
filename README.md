@@ -122,8 +122,8 @@ sudo pacman -S yt-dlp
 
 1. **Clone the repository:**
 ```bash
-git clone https://github.com/lotus/gobard.git
-cd gobard
+git clone https://git.grainedlotus.com/GrainedLotus515/GoBard.git
+cd GoBard
 ```
 
 2. **Install dependencies:**
@@ -326,7 +326,7 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 ## Support
 
 If you encounter any issues or have questions:
-- Open an issue on GitHub
+- Open an issue on [Gitea](https://git.grainedlotus.com/GrainedLotus515/GoBard/issues)
 - Check existing issues for solutions
 
 ---

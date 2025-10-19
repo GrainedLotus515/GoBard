@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/lotus/gobard/internal/player"
+	"github.com/GrainedLotus515/gobard/internal/player"
 )
 
 // Client handles YouTube operations

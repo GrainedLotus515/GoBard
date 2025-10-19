@@ -3,8 +3,8 @@ package bot
 import (
 	"fmt"
 
+	"github.com/GrainedLotus515/gobard/internal/logger"
 	"github.com/bwmarrin/discordgo"
-	"github.com/lotus/gobard/internal/logger"
 )
 
 // registerCommands registers all slash commands

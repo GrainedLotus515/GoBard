@@ -6,7 +6,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/lotus/gobard/internal/player"
+	"github.com/GrainedLotus515/gobard/internal/player"
 	"github.com/zmb3/spotify/v2"
 	spotifyauth "github.com/zmb3/spotify/v2/auth"
 	"golang.org/x/oauth2/clientcredentials"

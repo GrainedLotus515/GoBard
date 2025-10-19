@@ -7,12 +7,12 @@ import (
 	"strings"
 	"time"
 
+	"github.com/GrainedLotus515/gobard/internal/cache"
+	"github.com/GrainedLotus515/gobard/internal/logger"
+	"github.com/GrainedLotus515/gobard/internal/player"
+	"github.com/GrainedLotus515/gobard/internal/spotify"
+	"github.com/GrainedLotus515/gobard/internal/youtube"
 	"github.com/bwmarrin/discordgo"
-	"github.com/lotus/gobard/internal/cache"
-	"github.com/lotus/gobard/internal/logger"
-	"github.com/lotus/gobard/internal/player"
-	"github.com/lotus/gobard/internal/spotify"
-	"github.com/lotus/gobard/internal/youtube"
 )
 
 // handlePlay handles the play command
