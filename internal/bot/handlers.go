@@ -254,8 +254,13 @@ func (b *Bot) playLoop(guildID string) {
 			continue
 		}
 
-		// Move to next track
-		p.Queue.Next()
+		// Move to next track - exit loop if queue is empty
+		if p.Queue.Next() == nil {
+			logger.Info("Queue finished, ending playback loop")
+			p.SetLoopRunning(false)
+			p.Disconnect()
+			return
+		}
 	}
 }
 

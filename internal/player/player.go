@@ -114,6 +114,12 @@ func (p *GuildPlayer) Play() error {
 	p.Playing = true
 	p.Paused = false
 
+	// Drain any stale completion signal
+	select {
+	case <-p.doneChan:
+	default:
+	}
+
 	// Start playback in goroutine
 	go p.playTrack(track)
 
@@ -177,6 +183,16 @@ func (p *GuildPlayer) playTrack(track *Track) {
 
 	frameCount := 0
 	for {
+		// Check for pause
+		p.mu.RLock()
+		paused := p.Paused
+		p.mu.RUnlock()
+
+		if paused {
+			time.Sleep(100 * time.Millisecond)
+			continue
+		}
+
 		// Check for stop signal
 		select {
 		case <-p.stopChan:
@@ -233,7 +249,11 @@ func (p *GuildPlayer) playTrack(track *Track) {
 
 // WaitForCompletion waits for the current track to finish
 func (p *GuildPlayer) WaitForCompletion() {
-	<-p.doneChan
+	select {
+	case <-p.doneChan:
+	case <-time.After(3 * time.Hour): // Max track length safety
+		logger.Info("Track completion timeout reached, continuing")
+	}
 }
 
 // Pause pauses playback
@@ -282,14 +302,21 @@ func (p *GuildPlayer) Stop() {
 func (p *GuildPlayer) Skip() *Track {
 	p.Stop()
 
-	p.mu.Lock()
-	defer p.mu.Unlock()
+	p.mu.RLock()
+	defer p.mu.RUnlock()
 
-	return p.Queue.Next()
+	// Return what will play next (peek without advancing)
+	if p.Queue.CurrentIndex+1 < len(p.Queue.Tracks) {
+		return p.Queue.Tracks[p.Queue.CurrentIndex+1]
+	}
+	return nil
 }
 
 // Seek seeks to a position in the current track
 func (p *GuildPlayer) Seek(position time.Duration) error {
+	// Stop current playback first to prevent duplicate streams
+	p.Stop()
+
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
@@ -305,9 +332,9 @@ func (p *GuildPlayer) Seek(position time.Duration) error {
 	p.CurrentPosition = position
 
 	// Restart playback from new position
-	if p.Playing {
-		go p.playTrack(track)
-	}
+	p.Playing = true
+	p.Paused = false
+	go p.playTrack(track)
 
 	return nil
 }

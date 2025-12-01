@@ -32,6 +32,12 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - `docker-compose up -d` - Run with docker-compose
 - `make docker-build` - Build Docker image using Makefile
 - `make docker-run` - Run with docker-compose
+- `make docker-logs` - Show Docker container logs
+- `make docker-stop` - Stop Docker container
+
+### Development Tools
+- `make install-tools` - Install yt-dlp and check FFmpeg availability
+- `make help` - Show all available Makefile targets
 
 ## Architecture
 
@@ -52,9 +58,11 @@ GoBard is a Discord music bot written in Go with a modular architecture:
 
 **Player System (`internal/player/`)**
 - `player.go` - Guild-specific music player management with concurrent playback
-- `track.go` - Track metadata and state management
-- `ffmpeg_encoder.go` - FFmpeg integration for audio processing
-- Supports seeking, looping, volume control, and queue management
+- `track.go` - Track metadata and state management with thread-safe queue operations
+- `ffmpeg_encoder.go` - Cached file audio encoding using FFmpeg
+- `streaming_encoder.go` - Real-time streaming encoding (yt-dlp → FFmpeg → Opus)
+- Dual encoding strategy: cached files use CustomEncoder, live streams use StreamingEncoder
+- Supports seeking, looping, volume control, and queue management with proper state synchronization
 
 **Music Sources**
 - `internal/youtube/` - YouTube integration using yt-dlp
@@ -62,8 +70,10 @@ GoBard is a Discord music bot written in Go with a modular architecture:
 - Support for playlists, albums, and direct URLs
 
 **Caching (`internal/cache/`)**
-- Local file caching with configurable size limits
-- Manages downloaded audio files for performance
+- Local file caching with configurable size limits using GetOrCreate() pattern
+- Thread-safe cache operations with LRU eviction
+- Background download system for performance optimization
+- Cache.GetOrCreate() uses double-checked locking to prevent race conditions
 
 **Configuration (`internal/config/`)**
 - Environment-based configuration management
@@ -73,9 +83,11 @@ GoBard is a Discord music bot written in Go with a modular architecture:
 ### Key Architectural Patterns
 
 **Concurrent Player Management**
-- Each Discord guild has an isolated player instance
-- Goroutines handle playback loops and voice connection management
-- Thread-safe queue operations and state management
+- Each Discord guild has an isolated player instance with dedicated goroutines
+- Main playLoop handles queue advancement and track transitions
+- Separate playTrack goroutines handle individual track playback with proper stop signaling
+- Thread-safe queue operations with RWMutex protection
+- Critical playback state synchronization prevents infinite loops and duplicate streams
 
 **Service-Oriented Design**
 - Each major component (YouTube, Spotify, Cache) is a separate service
@@ -84,8 +96,27 @@ GoBard is a Discord music bot written in Go with a modular architecture:
 
 **External Tool Integration**
 - FFmpeg for audio encoding/decoding and volume normalization
-- yt-dlp for YouTube video extraction and metadata
-- Discord voice API for real-time audio streaming
+- yt-dlp for YouTube video extraction and direct stream URL resolution
+- Discord voice API for real-time Opus audio streaming
+- Two-tier encoding: cached files (FFmpeg) vs live streams (yt-dlp → FFmpeg → Opus)
+
+## Critical Implementation Patterns
+
+**Playback State Management**
+- Always check `p.Queue.Next()` return value in playLoop to prevent infinite loops when queue ends
+- Use `p.Stop()` before starting new playback in seek operations to prevent duplicate streams
+- Skip operations should only stop playback, letting playLoop handle queue advancement
+- Pause/resume requires checking `p.Paused` flag in the frame-sending loop
+
+**Channel Safety**
+- Drain `doneChan` before starting new playback to prevent blocking
+- Use timeout protection in `WaitForCompletion()` for safety
+- Employ proper stop signaling through `stopChan` in playback goroutines
+
+**Thread Safety**
+- Queue operations use RWMutex for concurrent access
+- Player state modifications require proper mutex locking
+- Cache operations use double-checked locking pattern in `GetOrCreate()`
 
 ## Environment Configuration
 
