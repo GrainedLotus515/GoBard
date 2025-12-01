@@ -24,17 +24,13 @@ RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o gobard ./cmd/goba
 # Runtime stage
 FROM alpine:latest
 
-# Install runtime dependencies including voice libraries
+# Install runtime dependencies including voice libraries and yt-dlp from Alpine repos
 RUN apk add --no-cache \
     ffmpeg \
-    python3 \
-    py3-pip \
+    yt-dlp \
     ca-certificates \
     opus \
     libsodium
-
-# Install yt-dlp
-RUN pip3 install --no-cache-dir yt-dlp
 
 # Create non-root user
 RUN addgroup -g 1000 gobard && \
