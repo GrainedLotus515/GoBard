@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os/exec"
+	"strings"
 	"sync"
 
 	"github.com/GrainedLotus515/gobard/internal/logger"
@@ -12,9 +13,8 @@ import (
 )
 
 // StreamingEncoder handles streaming audio encoding using yt-dlp + FFmpeg + libopus
-// It pipes yt-dlp stdout directly to FFmpeg stdin for immediate playback
+// It uses a two-step process: yt-dlp gets the direct URL, then FFmpeg streams from it
 type StreamingEncoder struct {
-	ytdlpCmd    *exec.Cmd
 	ffmpegCmd   *exec.Cmd
 	opusEncoder *opus.Encoder
 	frameSize   int
@@ -27,46 +27,55 @@ type StreamingEncoder struct {
 }
 
 // NewStreamingEncoder creates a new streaming audio encoder
-// It streams audio directly from yt-dlp to FFmpeg to Opus without downloading
+// It uses yt-dlp to get the direct stream URL, then FFmpeg streams from that URL
 func NewStreamingEncoder(url string, sampleRate, channels int) (*StreamingEncoder, error) {
 	frameSize := 960 // 20ms at 48kHz
 	if sampleRate != 48000 {
 		frameSize = (sampleRate * 20) / 1000
 	}
 
-	// yt-dlp command to stream audio to stdout
+	// Step 1: Get direct stream URL from yt-dlp (blocking call, ~1-2 seconds)
+	logger.Info("Getting stream URL from yt-dlp")
 	ytdlpCmd := exec.Command(
 		"yt-dlp",
 		"-f", "bestaudio",
-		"-o", "-", // Output to stdout
-		"--no-part",      // Don't use .part files
-		"--no-cache-dir", // Don't cache
-		"--quiet",        // Suppress output
-		"--no-warnings",  // Suppress warnings
+		"-g", // Get URL only
+		"--no-warnings",
 		url,
 	)
 
-	// FFmpeg command to convert audio to PCM s16le
+	var ytdlpStderr bytes.Buffer
+	ytdlpCmd.Stderr = &ytdlpStderr
+
+	urlOutput, err := ytdlpCmd.Output()
+	if err != nil {
+		logger.Error("yt-dlp command failed", "stderr", ytdlpStderr.String())
+		return nil, fmt.Errorf("failed to get stream URL: %w", err)
+	}
+
+	streamURL := strings.TrimSpace(string(urlOutput))
+	if streamURL == "" {
+		return nil, fmt.Errorf("yt-dlp returned empty stream URL")
+	}
+
+	logger.Info("Got stream URL, starting FFmpeg", "url_length", len(streamURL))
+
+	// Step 2: FFmpeg streams directly from the URL (FFmpeg handles HTTP natively)
 	ffmpegCmd := exec.Command(
 		"ffmpeg",
-		"-i", "pipe:0", // Read from stdin
+		"-reconnect", "1",
+		"-reconnect_streamed", "1",
+		"-reconnect_delay_max", "5",
+		"-i", streamURL, // Direct URL instead of pipe:0
 		"-f", "s16le",
 		"-ar", fmt.Sprintf("%d", sampleRate),
 		"-ac", fmt.Sprintf("%d", channels),
-		"-loglevel", "quiet", // Suppress FFmpeg output
+		"-loglevel", "error", // Only show errors
 		"pipe:1", // Output to stdout
 	)
 
-	// Capture stderr to suppress output
-	var ytdlpStderr, ffmpegStderr bytes.Buffer
-	ytdlpCmd.Stderr = &ytdlpStderr
+	var ffmpegStderr bytes.Buffer
 	ffmpegCmd.Stderr = &ffmpegStderr
-
-	// Get stdout from yt-dlp
-	ytdlpStdout, err := ytdlpCmd.StdoutPipe()
-	if err != nil {
-		return nil, fmt.Errorf("failed to create yt-dlp stdout pipe: %w", err)
-	}
 
 	// Get stdout from FFmpeg
 	ffmpegStdout, err := ffmpegCmd.StdoutPipe()
@@ -74,18 +83,8 @@ func NewStreamingEncoder(url string, sampleRate, channels int) (*StreamingEncode
 		return nil, fmt.Errorf("failed to create ffmpeg stdout pipe: %w", err)
 	}
 
-	// Connect yt-dlp stdout to FFmpeg stdin
-	ffmpegCmd.Stdin = ytdlpStdout
-
-	// Start yt-dlp
-	if err := ytdlpCmd.Start(); err != nil {
-		logger.Error("yt-dlp command failed", "stderr", ytdlpStderr.String())
-		return nil, fmt.Errorf("failed to start yt-dlp: %w", err)
-	}
-
 	// Start FFmpeg
 	if err := ffmpegCmd.Start(); err != nil {
-		ytdlpCmd.Process.Kill()
 		logger.Error("FFmpeg command failed", "stderr", ffmpegStderr.String())
 		return nil, fmt.Errorf("failed to start ffmpeg: %w", err)
 	}
@@ -93,7 +92,6 @@ func NewStreamingEncoder(url string, sampleRate, channels int) (*StreamingEncode
 	// Create Opus encoder
 	opusEnc, err := opus.NewEncoder(sampleRate, channels, opus.AppAudio)
 	if err != nil {
-		ytdlpCmd.Process.Kill()
 		ffmpegCmd.Process.Kill()
 		return nil, fmt.Errorf("failed to create opus encoder: %w", err)
 	}
@@ -102,7 +100,6 @@ func NewStreamingEncoder(url string, sampleRate, channels int) (*StreamingEncode
 	opusEnc.SetBitrate(128000)
 
 	encoder := &StreamingEncoder{
-		ytdlpCmd:    ytdlpCmd,
 		ffmpegCmd:   ffmpegCmd,
 		opusEncoder: opusEnc,
 		frameSize:   frameSize,
@@ -131,7 +128,6 @@ func (e *StreamingEncoder) encodeLoop(reader io.Reader) {
 	for {
 		select {
 		case <-e.stopChan:
-			e.ytdlpCmd.Process.Kill()
 			e.ffmpegCmd.Process.Kill()
 			return
 		default:
@@ -140,7 +136,10 @@ func (e *StreamingEncoder) encodeLoop(reader io.Reader) {
 		// Read PCM data from FFmpeg
 		n, err := reader.Read(pcmBuffer)
 		if err != nil {
-			if err != io.EOF {
+			// Handle both EOF and unexpected EOF as end of stream
+			if err == io.EOF || err == io.ErrUnexpectedEOF {
+				logger.Info("Stream ended")
+			} else {
 				logger.Error("FFmpeg read error", "err", err)
 			}
 			return
@@ -160,18 +159,17 @@ func (e *StreamingEncoder) encodeLoop(reader io.Reader) {
 		for i := 0; i+samplesPerFrame <= n/2; i += samplesPerFrame {
 			frameData := pcmSamples[i : i+samplesPerFrame]
 			opusFrameBuffer := make([]byte, 4000)
-			n, err := e.opusEncoder.Encode(frameData, opusFrameBuffer)
+			opusBytes, err := e.opusEncoder.Encode(frameData, opusFrameBuffer)
 			if err != nil {
 				logger.Error("Opus encoding error", "err", err)
 				return
 			}
 
 			// Send only the encoded bytes
-			opusFrame := opusFrameBuffer[:n]
+			opusFrame := opusFrameBuffer[:opusBytes]
 			select {
 			case e.frameChan <- opusFrame:
 			case <-e.stopChan:
-				e.ytdlpCmd.Process.Kill()
 				e.ffmpegCmd.Process.Kill()
 				return
 			}
@@ -205,15 +203,11 @@ func (e *StreamingEncoder) Cleanup() error {
 	default:
 	}
 
-	// Kill both processes
-	if e.ytdlpCmd.Process != nil {
-		e.ytdlpCmd.Process.Kill()
-	}
+	// Kill FFmpeg process
 	if e.ffmpegCmd.Process != nil {
 		e.ffmpegCmd.Process.Kill()
 	}
 
-	// Wait for processes to exit
-	e.ytdlpCmd.Wait()
+	// Wait for process to exit
 	return e.ffmpegCmd.Wait()
 }
