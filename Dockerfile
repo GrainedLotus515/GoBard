@@ -5,9 +5,11 @@ FROM golang:1.25-alpine AS builder
 RUN apk add --no-cache \
     git \
     opus-dev \
+    opusfile-dev \
     libsodium-dev \
     gcc \
-    musl-dev
+    musl-dev \
+    pkgconfig
 
 WORKDIR /app
 
@@ -18,18 +20,19 @@ RUN go mod download
 # Copy source code
 COPY . .
 
-# Build the application
-RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o gobard ./cmd/gobard
+# Build the application with CGO enabled for opus support
+RUN CGO_ENABLED=1 GOOS=linux go build -o gobard ./cmd/gobard
 
 # Runtime stage
 FROM alpine:latest
 
-# Install runtime dependencies including voice libraries and yt-dlp from Alpine repos
+# Install runtime dependencies including voice libraries and yt-dlp
 RUN apk add --no-cache \
     ffmpeg \
     yt-dlp \
     ca-certificates \
     opus \
+    opusfile \
     libsodium
 
 # Create non-root user
