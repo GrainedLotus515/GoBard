@@ -1,6 +1,7 @@
 package player
 
 import (
+	"sync"
 	"time"
 )
 
@@ -33,6 +34,7 @@ type Queue struct {
 	CurrentIndex int
 	Loop         bool
 	Shuffle      bool
+	mu           sync.RWMutex
 }
 
 // NewQueue creates a new empty queue
@@ -47,12 +49,18 @@ func NewQueue() *Queue {
 
 // Add adds a track to the queue
 func (q *Queue) Add(track *Track) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
 	q.Tracks = append(q.Tracks, track)
 }
 
 // Next moves to the next track in the queue
 func (q *Queue) Next() *Track {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+
 	if len(q.Tracks) == 0 {
+		q.CurrentIndex = -1
 		return nil
 	}
 
@@ -63,6 +71,8 @@ func (q *Queue) Next() *Track {
 
 	q.CurrentIndex++
 	if q.CurrentIndex >= len(q.Tracks) {
+		// Reset index so new tracks can be picked up
+		q.CurrentIndex = -1
 		return nil
 	}
 
@@ -71,6 +81,9 @@ func (q *Queue) Next() *Track {
 
 // Current returns the current track
 func (q *Queue) Current() *Track {
+	q.mu.RLock()
+	defer q.mu.RUnlock()
+
 	if q.CurrentIndex < 0 || q.CurrentIndex >= len(q.Tracks) {
 		return nil
 	}
@@ -79,6 +92,9 @@ func (q *Queue) Current() *Track {
 
 // Clear removes all tracks from the queue except the current one
 func (q *Queue) Clear() {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+
 	if q.CurrentIndex >= 0 && q.CurrentIndex < len(q.Tracks) {
 		current := q.Tracks[q.CurrentIndex]
 		q.Tracks = []*Track{current}
@@ -91,12 +107,18 @@ func (q *Queue) Clear() {
 
 // ClearAll removes all tracks from the queue including the current one
 func (q *Queue) ClearAll() {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+
 	q.Tracks = make([]*Track, 0)
 	q.CurrentIndex = -1
 }
 
 // Remove removes a track at the specified index
 func (q *Queue) Remove(index int) bool {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+
 	if index < 0 || index >= len(q.Tracks) {
 		return false
 	}
@@ -113,6 +135,9 @@ func (q *Queue) Remove(index int) bool {
 
 // Move moves a track from one position to another
 func (q *Queue) Move(from, to int) bool {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+
 	if from < 0 || from >= len(q.Tracks) || to < 0 || to >= len(q.Tracks) {
 		return false
 	}
@@ -137,10 +162,14 @@ func (q *Queue) Move(from, to int) bool {
 
 // IsEmpty returns true if the queue is empty
 func (q *Queue) IsEmpty() bool {
+	q.mu.RLock()
+	defer q.mu.RUnlock()
 	return len(q.Tracks) == 0
 }
 
 // Length returns the number of tracks in the queue
 func (q *Queue) Length() int {
+	q.mu.RLock()
+	defer q.mu.RUnlock()
 	return len(q.Tracks)
 }
