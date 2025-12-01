@@ -197,26 +197,14 @@ func (b *Bot) playLoop(guildID string) {
 		if track == nil {
 			track = p.Queue.Next()
 			if track == nil {
-				// Queue is empty, wait and disconnect
+				// Queue is empty, disconnect immediately to prevent stale voice connections
+				// Discord automatically disconnects idle connections after ~2 minutes
+				// Instead of waiting and risking a dead connection, disconnect now
+				// so a fresh connection can be created when new songs are added
 				logger.PlaybackQueueEmpty()
-				time.Sleep(b.Config.WaitAfterQueueEmpty)
-
-				// Check again after waiting - a track might have been added during the wait
-				track = p.Queue.Current()
-				if track == nil {
-					track = p.Queue.Next()
-				}
-
-				// If still no track, disconnect and exit
-				if track == nil {
-					// Clear LoopRunning flag BEFORE disconnecting to allow new songs to start a new loop
-					p.SetLoopRunning(false)
-					p.Disconnect()
-					return
-				}
-
-				// Track was added during wait, continue to play it
-				logger.Debug("Track added during wait, resuming playback")
+				p.SetLoopRunning(false)
+				p.Disconnect()
+				return
 			}
 		}
 
