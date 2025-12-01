@@ -11,6 +11,12 @@ import (
 	"github.com/bwmarrin/discordgo"
 )
 
+// EncoderInterface defines the interface for audio encoders
+type EncoderInterface interface {
+	OpusFrame() ([]byte, error)
+	Cleanup() error
+}
+
 // GuildPlayer manages playback for a single guild
 type GuildPlayer struct {
 	GuildID         string
@@ -32,7 +38,7 @@ type GuildPlayer struct {
 	// Encoder
 	stopChan chan bool
 	doneChan chan bool
-	encoder  *CustomEncoder
+	encoder  EncoderInterface
 
 	mu sync.RWMutex
 }
@@ -127,18 +133,22 @@ func (p *GuildPlayer) playTrack(track *Track) {
 	vc := p.VoiceConnection
 	p.mu.Unlock()
 
-	// Determine source (local file or URL)
-	source := track.URL
+	// Create appropriate encoder based on whether we have a cached file
+	var encoder EncoderInterface
+	var err error
+
 	if track.LocalPath != "" {
-		source = track.LocalPath
-		logger.Info("Using cached file", "path", source)
+		// Use cached file
+		logger.Info("Using cached file", "path", track.LocalPath)
+		logger.PlaybackEncodingStart(track.LocalPath)
+		encoder, err = NewCustomEncoder(track.LocalPath, 48000, 2)
 	} else {
-		logger.Info("Streaming from URL", "url", source)
+		// Stream directly from URL
+		logger.Info("Streaming from URL", "url", track.URL)
+		logger.PlaybackEncodingStart(track.URL)
+		encoder, err = NewStreamingEncoder(track.URL, 48000, 2)
 	}
 
-	// Create custom encoder (FFmpeg + libopus)
-	logger.PlaybackEncodingStart(source)
-	encoder, err := NewCustomEncoder(source, 48000, 2)
 	if err != nil {
 		logger.PlaybackEncodingError(err)
 		p.mu.Lock()

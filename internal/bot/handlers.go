@@ -210,22 +210,30 @@ func (b *Bot) playLoop(guildID string) {
 
 		logger.Info("Processing track", "title", track.Title)
 
-		// Get or cache the track
+		// Check if track is already cached
 		cacheKey := cache.GenerateKey(track.URL)
-		logger.PlaybackDownloading(track.Title)
-		trackPath, err := b.Cache.GetOrCreate(cacheKey, func(path string) error {
-			return b.YouTube.Download(track.URL, path)
-		})
+		if cachedPath, exists := b.Cache.Get(cacheKey); exists {
+			// Use cached file
+			logger.PlaybackCached(cachedPath)
+			track.LocalPath = cachedPath
+		} else {
+			// Not cached - stream immediately and download in background
+			logger.Info("Track not cached, streaming and downloading in background")
+			track.LocalPath = "" // Empty path triggers streaming encoder
 
-		if err != nil {
-			// Skip to next track on error
-			logger.Error("Error downloading track", "title", track.Title, "err", err)
-			p.Queue.Next()
-			continue
+			// Start background download for future plays
+			go func(url, key string) {
+				logger.PlaybackDownloading(track.Title)
+				_, err := b.Cache.GetOrCreate(key, func(path string) error {
+					return b.YouTube.Download(url, path)
+				})
+				if err != nil {
+					logger.Error("Background download failed", "title", track.Title, "err", err)
+				} else {
+					logger.Info("Background download completed", "title", track.Title)
+				}
+			}(track.URL, cacheKey)
 		}
-
-		logger.PlaybackCached(trackPath)
-		track.LocalPath = trackPath
 
 		// Play the track
 		logger.Info("Starting playback")
