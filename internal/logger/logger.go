@@ -8,7 +8,7 @@ import (
 
 var Logger *log.Logger
 
-func Init() {
+func init() {
 	Logger = log.New(os.Stderr)
 	Logger.SetLevel(log.DebugLevel)
 	Logger.SetReportCaller(false)
@@ -172,4 +172,8 @@ func Warn(msg string, keyvals ...interface{}) {
 
 func Error(msg string, keyvals ...interface{}) {
 	Logger.Error(msg, keyvals...)
+}
+
+func Fatal(msg string, keyvals ...interface{}) {
+	Logger.Fatal(msg, keyvals...)
 }

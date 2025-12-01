@@ -28,8 +28,8 @@ go.work.sum
 # Cache directory (downloaded audio files only, not the cache code)
 /cache/
 
-# Binary
-gobard
+# Binary (only in root, not cmd/gobard/)
+/gobard
 
 # IDE
 .idea/
