@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"os"
@@ -56,8 +57,9 @@ func main() {
 			s.ChannelMessageSend(m.ChannelID, "Attempting to join voice...")
 			log.Printf("Joining voice channel %s", channelID)
 
-			// Try to join
-			vc, err := s.ChannelVoiceJoin(m.GuildID, channelID, false, false)
+			// Try to join with context
+			ctx := context.Background()
+			vc, err := s.ChannelVoiceJoin(ctx, m.GuildID, channelID, false, false)
 			if err != nil {
 				log.Printf("Error joining voice: %v", err)
 				s.ChannelMessageSend(m.ChannelID, fmt.Sprintf("❌ Failed to join: %v", err))
@@ -70,8 +72,8 @@ func main() {
 			// Wait a bit
 			time.Sleep(5 * time.Second)
 
-			// Disconnect
-			vc.Disconnect()
+			// Disconnect with context
+			vc.Disconnect(ctx)
 			s.ChannelMessageSend(m.ChannelID, "Disconnected from voice")
 		}
 	})
