@@ -202,6 +202,7 @@ func (b *Bot) playLoop(guildID string) {
 				// Instead of waiting and risking a dead connection, disconnect now
 				// so a fresh connection can be created when new songs are added
 				logger.PlaybackQueueEmpty()
+				p.Queue.ClearAll() // Clear all tracks when queue is empty
 				p.SetLoopRunning(false)
 				p.Disconnect()
 				return
@@ -254,13 +255,17 @@ func (b *Bot) playLoop(guildID string) {
 			continue
 		}
 
-		// Move to next track - exit loop if queue is empty
-		if p.Queue.Next() == nil {
+		// Check if there are more tracks without advancing
+		if p.Queue.Peek() == nil {
 			logger.Info("Queue finished, ending playback loop")
+			p.Queue.ClearAll() // Clear all tracks when queue finishes
 			p.SetLoopRunning(false)
 			p.Disconnect()
 			return
 		}
+
+		// Advance to next track
+		p.Queue.Next()
 	}
 }
 

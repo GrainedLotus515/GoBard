@@ -74,18 +74,19 @@ func NewStreamingEncoder(url string, sampleRate, channels int) (*StreamingEncode
 		"pipe:1", // Output to stdout
 	)
 
-	var ffmpegStderr bytes.Buffer
-	ffmpegCmd.Stderr = &ffmpegStderr
-
-	// Get stdout from FFmpeg
+	// Get stdout and stderr from FFmpeg
 	ffmpegStdout, err := ffmpegCmd.StdoutPipe()
 	if err != nil {
 		return nil, fmt.Errorf("failed to create ffmpeg stdout pipe: %w", err)
 	}
 
+	ffmpegStderr, err := ffmpegCmd.StderrPipe()
+	if err != nil {
+		return nil, fmt.Errorf("failed to create ffmpeg stderr pipe: %w", err)
+	}
+
 	// Start FFmpeg
 	if err := ffmpegCmd.Start(); err != nil {
-		logger.Error("FFmpeg command failed", "stderr", ffmpegStderr.String())
 		return nil, fmt.Errorf("failed to start ffmpeg: %w", err)
 	}
 
@@ -110,24 +111,45 @@ func NewStreamingEncoder(url string, sampleRate, channels int) (*StreamingEncode
 		stopChan:    make(chan bool, 1),
 	}
 
+	// Start stderr monitoring goroutine
+	go encoder.monitorFFmpegErrors(ffmpegStderr)
+
 	// Start the encoding goroutine
 	go encoder.encodeLoop(ffmpegStdout)
 
 	return encoder, nil
 }
 
+// monitorFFmpegErrors reads and logs FFmpeg stderr output
+func (e *StreamingEncoder) monitorFFmpegErrors(stderr io.Reader) {
+	buf := make([]byte, 4096)
+	for {
+		n, err := stderr.Read(buf)
+		if n > 0 {
+			logger.Error("FFmpeg error", "output", string(buf[:n]))
+		}
+		if err != nil {
+			return
+		}
+	}
+}
+
 // encodeLoop reads PCM data from FFmpeg and encodes to Opus frames
 func (e *StreamingEncoder) encodeLoop(reader io.Reader) {
 	defer close(e.frameChan)
+
+	logger.Info("Starting encode loop")
 
 	// PCM buffer: frameSize samples * channels * 2 bytes per sample
 	pcmBufferSize := e.frameSize * e.channels * 2
 	pcmBuffer := make([]byte, pcmBufferSize)
 	pcmSamples := make([]int16, e.frameSize*e.channels)
 
+	frameCount := 0
 	for {
 		select {
 		case <-e.stopChan:
+			logger.Info("Encode loop stopped by signal", "frames_encoded", frameCount)
 			e.ffmpegCmd.Process.Kill()
 			return
 		default:
@@ -138,15 +160,19 @@ func (e *StreamingEncoder) encodeLoop(reader io.Reader) {
 		if err != nil {
 			// Handle both EOF and unexpected EOF as end of stream
 			if err == io.EOF || err == io.ErrUnexpectedEOF {
-				logger.Info("Stream ended")
+				logger.Info("Stream ended normally", "frames_encoded", frameCount)
 			} else {
-				logger.Error("FFmpeg read error", "err", err)
+				logger.Error("FFmpeg read error", "err", err, "frames_encoded", frameCount)
 			}
 			return
 		}
 
 		if n == 0 {
 			continue
+		}
+
+		if frameCount == 0 {
+			logger.Info("First PCM data received", "bytes", n)
 		}
 
 		// Convert bytes to int16 samples
@@ -161,7 +187,7 @@ func (e *StreamingEncoder) encodeLoop(reader io.Reader) {
 			opusFrameBuffer := make([]byte, 4000)
 			opusBytes, err := e.opusEncoder.Encode(frameData, opusFrameBuffer)
 			if err != nil {
-				logger.Error("Opus encoding error", "err", err)
+				logger.Error("Opus encoding error", "err", err, "frames_encoded", frameCount)
 				return
 			}
 
@@ -169,7 +195,12 @@ func (e *StreamingEncoder) encodeLoop(reader io.Reader) {
 			opusFrame := opusFrameBuffer[:opusBytes]
 			select {
 			case e.frameChan <- opusFrame:
+				frameCount++
+				if frameCount%500 == 0 {
+					logger.Info("Streaming progress", "frames_encoded", frameCount)
+				}
 			case <-e.stopChan:
+				logger.Info("Encode loop stopped while sending frame", "frames_encoded", frameCount)
 				e.ffmpegCmd.Process.Kill()
 				return
 			}

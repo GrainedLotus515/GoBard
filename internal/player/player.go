@@ -120,6 +120,12 @@ func (p *GuildPlayer) Play() error {
 	default:
 	}
 
+	// Drain any stale stop signal from previous playback
+	select {
+	case <-p.stopChan:
+	default:
+	}
+
 	// Start playback in goroutine
 	go p.playTrack(track)
 
@@ -129,6 +135,14 @@ func (p *GuildPlayer) Play() error {
 // playTrack handles the actual playback of a track
 func (p *GuildPlayer) playTrack(track *Track) {
 	logger.PlaybackStart(track.Title)
+
+	// Ensure completion is always signaled, regardless of exit path
+	defer func() {
+		select {
+		case p.doneChan <- true:
+		default:
+		}
+	}()
 
 	p.mu.Lock()
 	if p.VoiceConnection == nil {
@@ -190,6 +204,14 @@ func (p *GuildPlayer) playTrack(track *Track) {
 
 		if paused {
 			time.Sleep(100 * time.Millisecond)
+			// Check for stop during pause
+			select {
+			case <-p.stopChan:
+				logger.PlaybackStopped(frameCount)
+				vc.Speaking(false)
+				return
+			default:
+			}
 			continue
 		}
 
@@ -238,12 +260,6 @@ func (p *GuildPlayer) playTrack(track *Track) {
 		p.encoder = nil
 	}
 	p.Playing = false
-
-	// Signal completion
-	select {
-	case p.doneChan <- true:
-	default:
-	}
 	p.mu.Unlock()
 }
 
@@ -302,14 +318,9 @@ func (p *GuildPlayer) Stop() {
 func (p *GuildPlayer) Skip() *Track {
 	p.Stop()
 
-	p.mu.RLock()
-	defer p.mu.RUnlock()
-
 	// Return what will play next (peek without advancing)
-	if p.Queue.CurrentIndex+1 < len(p.Queue.Tracks) {
-		return p.Queue.Tracks[p.Queue.CurrentIndex+1]
-	}
-	return nil
+	// Note: The playLoop will handle actually advancing the queue
+	return p.Queue.Peek()
 }
 
 // Seek seeks to a position in the current track

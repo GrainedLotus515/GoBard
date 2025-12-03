@@ -173,3 +173,20 @@ func (q *Queue) Length() int {
 	defer q.mu.RUnlock()
 	return len(q.Tracks)
 }
+
+// Peek returns the next track without advancing the queue
+func (q *Queue) Peek() *Track {
+	q.mu.RLock()
+	defer q.mu.RUnlock()
+
+	if len(q.Tracks) == 0 {
+		return nil
+	}
+
+	nextIndex := q.CurrentIndex + 1
+	if nextIndex >= len(q.Tracks) {
+		return nil
+	}
+
+	return q.Tracks[nextIndex]
+}

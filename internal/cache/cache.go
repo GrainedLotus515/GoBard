@@ -139,17 +139,10 @@ func (c *Cache) GetOrCreate(key string, create func(path string) error) (string,
 		return path, nil
 	}
 
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	// Double-check after acquiring lock
-	if entry, exists := c.entries[key]; exists {
-		return entry.Path, nil
-	}
-
 	destPath := filepath.Join(c.dir, key)
 
-	// Create the file
+	// Create the file WITHOUT holding the lock
+	// This allows other cache operations to proceed during download
 	if err := create(destPath); err != nil {
 		return "", fmt.Errorf("failed to create cached file: %w", err)
 	}
@@ -162,6 +155,17 @@ func (c *Cache) GetOrCreate(key string, create func(path string) error) (string,
 	}
 
 	size := info.Size()
+
+	// NOW acquire lock only for registration
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	// Check if another goroutine already created this entry while we were downloading
+	if entry, exists := c.entries[key]; exists {
+		// Remove our duplicate download
+		os.Remove(destPath)
+		return entry.Path, nil
+	}
 
 	// Evict if necessary
 	currentSize := c.getCurrentSize()
