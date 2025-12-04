@@ -4,242 +4,236 @@
 [![Docker Build](https://git.grainedlotus.com/GrainedLotus515/GoBard/actions/workflows/docker-build.yml/badge.svg)](https://git.grainedlotus.com/GrainedLotus515/GoBard/actions)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-A self-hosted Discord music bot written in Go with simplicity and reliability in mind. GoBard is a feature-complete recreation of [Muse](https://github.com/museofficial/muse) with full feature parity.
+> **GoBard** is a fully self‑hosted Discord music bot written in Go.  
+>  It is a feature‑complete recreation of [Muse](https://github.com/museofficial/muse) that prioritises simplicity, reliability, and performance.
+
+---
+
+## Table of Contents
+
+- [Why GoBard?](#why-gobard)
+- [Features](#features)
+- [Architecture Overview](#architecture-overview)
+- [Getting Started](#getting-started)
+  - [Prerequisites](#prerequisites)
+  - [Installation](#installation)
+    - [Native Build](#native-build)
+    - [Docker](#docker)
+    - [Docker Compose](#docker-compose)
+- [Configuration](#configuration)
+  - [Environment Variables](#environment-variables)
+  - [Cache Settings](#cache-settings)
+  - [Command Registration](#command-registration)
+  - [Playback Settings](#playback-settings)
+- [Commands](#commands)
+- [Project Structure](#project-structure)
+- [Development](#development)
+  - [Building](#building)
+  - [Testing](#testing)
+  - [Linting](#linting)
+- [Troubleshooting](#troubleshooting)
+- [Comparison with Muse](#comparison-with-muse)
+- [CI/CD Pipeline](#ci-cd-pipeline)
+- [Contributing](#contributing)
+- [License](#license)
+
+---
+
+## Why GoBard?
+
+| Aspect | GoBard | Muse |
+|--------|--------|------|
+| Language | Go (concurrent, compiled) | TypeScript (interpreted) |
+| Performance | High, low memory overhead | Moderate |
+| Deployment | Easy binary or Docker image | Node.js environment |
+| Runtime Safety | Strong typing, race detector | Dynamic typing |
+| Community | Growing Go ecosystem | Mature JavaScript ecosystem |
+| **Result** | A lightweight, scalable Discord bot | A feature‑rich but heavier bot |
+
+---
 
 ## Features
 
-✨ **Core Features:**
-- 🎵 Play music from YouTube, Spotify, and direct URLs
-- 📺 Support for livestreams
-- ⏩ Seek within songs and videos
-- 💾 Local caching for improved performance (configurable limit)
-- 🔀 Queue management (shuffle, move, remove)
-- 🔂 Loop individual tracks
-- 🎚️ Volume control with normalization
-- 🔇 Automatic volume reduction when users speak
+- 🎵 **Universal Music Support** – Play from YouTube, Spotify, or any direct audio URL.
+- 📺 **Live‑streaming** – Stream live videos with low latency.
+- ⏩ **Seeking** – Fast‑forward or rewind with `/seek` and `/fseek`.
+- 🔄 **Queue Management** – Shuffle, move, remove, clear, and loop tracks.
+- 🎚️ **Dynamic Volume** – Set volume 0–100, auto‑normalize, and duck when users speak.
+- 💾 **Local Caching** – Store audio files on disk with configurable size limit.
+- 🔍 **SponsorBlock** – Skip non‑music segments automatically.
+- 🚫 **No Vote‑to‑Skip** – Direct control for a smoother experience.
+- 🌐 **Full Discord Integration** – Slash commands, component interactions, and global registration.
+- 📦 **Docker Ready** – Multi‑platform image with `Dockerfile` and `docker-compose.yml`.
+- 🔧 **Developer Friendly** – CI/CD, linting, tests, and a clean architecture.
 
-🎶 **Music Sources:**
-- YouTube videos and playlists
-- Spotify tracks, playlists, albums, and artists (auto-converts to YouTube)
-- Direct audio URLs
+---
 
-🎮 **No Democracy:**
-- No vote-to-skip - direct control for a better experience
-- Perfect for small to medium-sized servers
+## Architecture Overview
 
-## Commands
+```
+GoBard
+├── cmd/gobard          # Application bootstrap
+├── internal
+│   ├── bot             # Discord bot core
+│   ├── player          # Queue + playback logic
+│   ├── cache           # LRU file cache
+│   ├── youtube         # yt‑dl integration
+│   ├── spotify         # Spotify → YouTube conversion
+│   └── config          # Environment‑driven configuration
+└── scripts
+    └── scripts.sh      # Helper scripts
+```
 
-All commands use Discord's slash command system:
+> **Key Patterns**
+>
+> * **Service‑Oriented** – Each subsystem (YouTube, Spotify, Cache, Player) is an isolated service with clean interfaces.
+> * **Concurrent Playback** – Each guild owns a dedicated `Player` goroutine that manages queue and audio streams.
+> * **Double‑Checked Locking** – `Cache.GetOrCreate` avoids race conditions and redundant downloads.
+> * **Graceful Stop** – `Player.Stop()` flushes buffers, signals goroutines, and drains channels.
 
-### Playback
-- `/play <query>` - Play a song, playlist, or URL
-- `/pause` - Pause playback
-- `/resume` - Resume playback
-- `/skip` - Skip to the next song
-- `/stop` - Stop playback and clear queue
-- `/disconnect` - Disconnect from voice channel
+---
 
-### Queue Management
-- `/queue` - Show current queue
-- `/now-playing` - Show currently playing song
-- `/clear` - Clear queue (except current song)
-- `/shuffle` - Shuffle the queue
-- `/move <from> <to>` - Move a song in the queue
-- `/remove <position>` - Remove a song from the queue
-- `/loop` - Toggle looping of current song
+## Getting Started
 
-### Playback Control
-- `/volume <level>` - Set volume (0-100)
-- `/seek <position>` - Seek to position (e.g., "1:30" or "90s")
-- `/fseek <seconds>` - Fast seek forward by seconds
+### Prerequisites
 
-### Configuration
-- `/config set-reduce-vol-when-voice <enabled>` - Enable/disable volume reduction
-- `/config set-reduce-vol-when-voice-target <volume>` - Set target volume for reduction
-- `/config show` - Show current configuration
-
-## Requirements
-
-### System Requirements
-- Go 1.21 or later
-- FFmpeg 4.1 or later
-- yt-dlp (for YouTube support)
+| Component | Minimum Version |
+|-----------|-----------------|
+| Go | 1.21+ |
+| FFmpeg | 4.1+ |
+| yt‑dlp | Latest |
 
 ### Installation
 
-#### Install FFmpeg
+#### Native Build
 
-**Linux (Debian/Ubuntu):**
-```bash
-sudo apt update
-sudo apt install ffmpeg
-```
-
-**macOS:**
-```bash
-brew install ffmpeg
-```
-
-**Arch Linux:**
-```bash
-sudo pacman -S ffmpeg
-```
-
-#### Install yt-dlp
-
-```bash
-# Using pip
-pip install yt-dlp
-
-# Or using your package manager
-# Debian/Ubuntu
-sudo apt install yt-dlp
-
-# macOS
-brew install yt-dlp
-
-# Arch Linux
-sudo pacman -S yt-dlp
-```
-
-### API Keys Required
-
-1. **Discord Bot Token** (required)
-   - Go to [Discord Developer Portal](https://discord.com/developers/applications)
-   - Create a new application
-   - Go to "Bot" section and create a bot
-   - Copy the token
-   - Enable "Message Content Intent" and "Server Members Intent"
-
-2. **YouTube API Key** (optional, recommended)
-   - Go to [Google Cloud Console](https://console.cloud.google.com/)
-   - Create a new project
-   - Enable YouTube Data API v3
-   - Create credentials (API key)
-
-3. **Spotify Credentials** (optional)
-   - Go to [Spotify Developer Dashboard](https://developer.spotify.com/dashboard)
-   - Create an app
-   - Copy Client ID and Client Secret
-
-## Setup
-
-1. **Clone the repository:**
 ```bash
 git clone https://git.grainedlotus.com/GrainedLotus515/GoBard.git
 cd GoBard
-```
-
-2. **Install dependencies:**
-```bash
 go mod download
-```
-
-3. **Configure environment variables:**
-```bash
-cp .env.example .env
-nano .env  # Edit with your tokens
-```
-
-4. **Build and run:**
-```bash
+cp .env.example .env   # Edit with your credentials
 go build -o gobard ./cmd/gobard
 ./gobard
 ```
 
-Or run directly:
-```bash
-go run ./cmd/gobard
-```
+#### Docker
 
-## Docker Deployment
-
-### Using Docker
-
-1. **Create a `.env` file** with your configuration (see `.env.example`)
-
-2. **Build and run:**
 ```bash
 docker build -t gobard .
 docker run -d --name gobard --env-file .env gobard
 ```
 
-### Using Docker Compose
+#### Docker Compose
 
-1. **Create a `.env` file** with your configuration
-
-2. **Run:**
 ```bash
 docker-compose up -d
 ```
 
+> **Tip** – All Docker images are built for multi‑platform (`linux/amd64`, `linux/arm64`) and published to `git.grainedlotus.com/grainedlotus515/gobard`.
+
+---
+
 ## Configuration
 
-All configuration is done through environment variables:
+All configuration is done via environment variables. The following table lists each variable, its default value, and a brief description.
 
-### Required
-- `DISCORD_TOKEN` - Your Discord bot token
+### Environment Variables
 
-### Optional
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `DISCORD_TOKEN` | *required* | Discord bot token |
+| `YOUTUBE_API_KEY` | *optional* | Enables YouTube Data API v3 for faster search |
+| `SPOTIFY_CLIENT_ID` | *optional* | Spotify client ID |
+| `SPOTIFY_CLIENT_SECRET` | *optional* | Spotify client secret |
+| `CACHE_DIR` | `./cache` | Directory to store cached audio |
+| `CACHE_LIMIT` | `2GB` | Maximum cache size (e.g., `512MB`, `10GB`) |
+| `BOT_STATUS` | `online` | Bot presence status |
+| `BOT_ACTIVITY_TYPE` | `LISTENING` | Activity type: `PLAYING`, `LISTENING`, `WATCHING`, `STREAMING` |
+| `BOT_ACTIVITY` | `music` | Activity text |
+| `BOT_ACTIVITY_URL` | *required if STREAMING* | URL for STREAMING activity |
+| `REGISTER_COMMANDS_ON_BOT` | `false` | Register commands globally (may take up to 1 hour) |
+| `WAIT_AFTER_QUEUE_EMPTIES` | `30` | Seconds to wait before leaving voice channel |
+| `ENABLE_SPONSORBLOCK` | `false` | Skip sponsor blocks |
+| `SPONSORBLOCK_TIMEOUT` | `5` | SponsorBlock API timeout (seconds) |
+| `DEFAULT_VOLUME` | `100` | Default playback volume |
+| `REDUCE_VOL_WHEN_VOICE` | `false` | Enable ducking when voice detected |
+| `REDUCE_VOL_WHEN_VOICE_TARGET` | `70` | Target volume when ducking |
 
-**API Keys:**
-- `YOUTUBE_API_KEY` - YouTube Data API key (improves search)
-- `SPOTIFY_CLIENT_ID` - Spotify client ID
-- `SPOTIFY_CLIENT_SECRET` - Spotify client secret
+> **Remember** – Create a `.env` file from `.env.example` and fill in the required tokens.
 
-**Cache:**
-- `CACHE_DIR` - Directory for cached files (default: `./cache`)
-- `CACHE_LIMIT` - Maximum cache size (default: `2GB`)
-  - Examples: `512MB`, `10GB`, `1024MB`
+---
 
-**Bot Appearance:**
-- `BOT_STATUS` - Bot status: `online`, `idle`, `dnd` (default: `online`)
-- `BOT_ACTIVITY_TYPE` - Activity type: `PLAYING`, `LISTENING`, `WATCHING`, `STREAMING` (default: `LISTENING`)
-- `BOT_ACTIVITY` - Activity text (default: `music`)
-- `BOT_ACTIVITY_URL` - Activity URL (required for `STREAMING` type)
+## Commands
 
-**Command Registration:**
-- `REGISTER_COMMANDS_ON_BOT` - Register commands globally instead of per-guild (default: `false`)
-  - Set to `true` for bots in 10+ guilds
-  - Note: Global command updates can take up to 1 hour to propagate
+All commands are slash commands; they can be invoked in any text channel that has the bot present.
 
-**Behavior:**
-- `WAIT_AFTER_QUEUE_EMPTIES` - Seconds to wait before leaving voice channel when queue is empty (default: `30`)
+### Playback
 
-**Features:**
-- `ENABLE_SPONSORBLOCK` - Skip non-music segments in YouTube videos (default: `false`)
-- `SPONSORBLOCK_TIMEOUT` - SponsorBlock API timeout in seconds (default: `5`)
+| Command | Description |
+|---------|-------------|
+| `/play <query>` | Search or queue a track, playlist, or URL |
+| `/pause` | Pause current playback |
+| `/resume` | Resume playback |
+| `/skip` | Skip to the next track |
+| `/stop` | Stop playback and clear the queue |
+| `/disconnect` | Leave the voice channel |
 
-**Playback:**
-- `DEFAULT_VOLUME` - Default playback volume 0-100 (default: `100`)
-- `REDUCE_VOL_WHEN_VOICE` - Reduce volume when users speak (default: `false`)
-- `REDUCE_VOL_WHEN_VOICE_TARGET` - Target volume when reducing (default: `70`)
+### Queue Management
+
+| Command | Description |
+|---------|-------------|
+| `/queue` | Show the current queue |
+| `/now-playing` | Show currently playing track |
+| `/clear` | Clear the queue (keeps current track) |
+| `/shuffle` | Randomise the queue |
+| `/move <from> <to>` | Reorder a track |
+| `/remove <position>` | Delete a track from the queue |
+| `/loop` | Toggle looping of the current track |
+
+### Playback Control
+
+| Command | Description |
+|---------|-------------|
+| `/volume <level>` | Set volume (0‑100) |
+| `/seek <position>` | Seek to a specific timestamp (`1:30`, `90s`) |
+| `/fseek <seconds>` | Fast‑forward by X seconds |
+
+### Configuration
+
+| Command | Description |
+|---------|-------------|
+| `/config set-reduce-vol-when-voice <enabled>` | Enable/disable ducking |
+| `/config set-reduce-vol-when-voice-target <volume>` | Set ducking target volume |
+| `/config show` | Display current configuration |
+
+> **Tip** – Use `/config show` to verify your settings after startup.
+
+---
 
 ## Project Structure
 
-```
+```GoBard
 gobard/
 ├── cmd/
-│   └── gobard/          # Main application entry point
-│       └── main.go
+│   └── gobard/
+│       └── main.go          # Application entry point
 ├── internal/
-│   ├── bot/             # Discord bot logic
-│   │   ├── bot.go       # Bot initialization
-│   │   ├── commands.go  # Command registration
-│   │   └── handlers.go  # Command handlers
-│   ├── cache/           # Local file caching
-│   │   └── cache.go
-│   ├── config/          # Configuration management
-│   │   └── config.go
-│   ├── player/          # Music player and queue
-│   │   ├── player.go
-│   │   └── track.go
-│   ├── spotify/         # Spotify integration
-│   │   └── spotify.go
-│   └── youtube/         # YouTube integration
-│       └── youtube.go
-├── .env.example         # Example environment file
-├── .gitignore
+│   ├── bot/
+│   │   ├── bot.go           # Bot lifecycle
+│   │   ├── commands.go      # Command registration
+│   │   └── handlers.go      # Interaction handlers
+│   ├── cache/
+│   │   └── cache.go         # LRU file cache
+│   ├── config/
+│   │   └── config.go        # Environment loading
+│   ├── player/
+│   │   ├── player.go        # Queue & playback logic
+│   │   └── track.go         # Track metadata & state
+│   ├── spotify/
+│   │   └── spotify.go       # Spotify → YouTube conversion
+│   └── youtube/
+│       └── youtube.go       # yt‑dl integration
+├── .env.example
 ├── Dockerfile
 ├── docker-compose.yml
 ├── go.mod
@@ -247,6 +241,10 @@ gobard/
 ├── LICENSE
 └── README.md
 ```
+
+> **Navigation Tip** – `internal/` contains all production code. `cmd/gobard/main.go` bootstraps the bot and injects dependencies.
+
+---
 
 ## Development
 
@@ -256,117 +254,87 @@ gobard/
 go build -o gobard ./cmd/gobard
 ```
 
-### Running Tests
+### Testing
 
 ```bash
 go test ./...
 ```
 
-### Adding New Commands
+> **Race Detector** – Run `go test -race ./...` for concurrency checks.
 
-1. Add command definition in `internal/bot/commands.go` (`registerCommands` function)
-2. Add handler case in `internal/bot/commands.go` (`interactionCreate` function)
-3. Implement handler in `internal/bot/handlers.go`
+### Linting
+
+```bash
+golangci-lint run
+go fmt ./...
+go vet ./...
+```
+
+> **Automated Linting** – CI runs `make lint` which includes `fmt` and `vet`.
+
+---
 
 ## Troubleshooting
 
-### Bot doesn't join voice channel
-- Ensure the bot has "Connect" and "Speak" permissions in the voice channel
-- Verify you're in a voice channel when using `/play`
+| Issue | Likely Cause | Fix |
+|-------|--------------|-----|
+| Bot does not join a voice channel | Missing **Connect** or **Speak** permissions | Grant permissions in the server channel |
+| No audio output | FFmpeg or yt‑dlp missing | Install `ffmpeg` and `yt-dlp` (`sudo apt install ffmpeg yt-dlp`) |
+| YouTube search fails | No API key or quota exceeded | Add `YOUTUBE_API_KEY` |
+| Spotify commands fail | Missing credentials | Set `SPOTIFY_CLIENT_ID` & `SPOTIFY_CLIENT_SECRET` |
+| Commands not visible | Global registration delay | Wait up to 1 hour or set `REGISTER_COMMANDS_ON_BOT=false` for guild‑only |
+| Queue never empties | Bot stuck after stopping | Verify `WAIT_AFTER_QUEUE_EMPTIES` is set (default 30s) |
 
-### Music not playing
-- Check that FFmpeg is installed: `ffmpeg -version`
-- Check that yt-dlp is installed: `yt-dlp --version`
-- Verify cache directory is writable
-
-### YouTube videos not found
-- Add a YouTube API key for better results
-- Some videos may be region-locked or age-restricted
-
-### Spotify integration not working
-- Ensure `SPOTIFY_CLIENT_ID` and `SPOTIFY_CLIENT_SECRET` are set
-- Verify credentials are correct in Spotify Developer Dashboard
-
-### Commands not showing up
-- Wait a few minutes for Discord to sync commands
-- If using `REGISTER_COMMANDS_ON_BOT=true`, it can take up to 1 hour
-- Try kicking and re-inviting the bot
+---
 
 ## Comparison with Muse
-
-GoBard provides feature parity with Muse while being written in Go:
 
 | Feature | Muse | GoBard |
 |---------|------|--------|
 | Language | TypeScript | Go |
-| YouTube Support | ✅ | ✅ |
-| Spotify Support | ✅ | ✅ |
-| Playlist Support | ✅ | ✅ |
-| Seeking | ✅ | ✅ |
-| Local Caching | ✅ | ✅ |
-| Queue Management | ✅ | ✅ |
-| Volume Control | ✅ | ✅ |
-| Voice Ducking | ✅ | ✅ |
-| SponsorBlock | ✅ | ✅ |
-| Slash Commands | ✅ | ✅ |
-| Multi-Guild | ✅ | ✅ |
-| Docker Support | ✅ | ✅ |
+| Build | Node.js | Single static binary |
+| Docker | Yes | Yes |
+| Cache | Yes | Yes |
+| SponsorBlock | Yes | Yes |
+| Streaming | Yes | Yes |
+| Linting | ESLint | golangci-lint |
+| Race Detection | N/A | Built‑in `-race` |
+| CI | GitHub Actions | Gitea Actions |
 
-## CI/CD Pipeline
-
-GoBard uses Gitea Actions for continuous integration and deployment:
-
-### Automated Checks
-
-Every push and pull request triggers:
-- ✅ **Go Tests** - Tests on Go 1.24 and 1.25
-- ✅ **Code Linting** - golangci-lint with strict checks
-- ✅ **Security Scanning** - Trivy vulnerability detection
-- ✅ **Docker Build** - Multi-platform image builds
-- 📦 **Image Publishing** - Automatic registry push on main/tags
-
-### Docker Images
-
-Pre-built Docker images are available from:
-```bash
-docker pull git.grainedlotus.com/grainedlotus515/gobard:latest
-docker pull git.grainedlotus.com/grainedlotus515/gobard:main
-docker pull git.grainedlotus.com/grainedlotus515/gobard:v1.0.0  # Release versions
-```
-
-### Setup Instructions
-
-See [Gitea Actions Setup Guide](docs/GITEA_ACTIONS_SETUP.md) for detailed configuration.
-
-For CI/CD documentation, see [CI/CD Pipeline Documentation](docs/CI_CD.md).
-
-## Contributing
-
-Contributions are welcome! Please feel free to submit a Pull Request.
-
-All pull requests require:
-- ✅ Passing tests (Go 1.24 and 1.25)
-- ✅ No linting errors
-- ✅ Code formatting compliance
-- ✅ Successful Docker build
-
-## License
-
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
-
-## Acknowledgments
-
-- Inspired by [Muse](https://github.com/museofficial/muse) by [@codetheweb](https://github.com/codetheweb)
-- Built with [DiscordGo](https://github.com/bwmarrin/discordgo)
-- Uses [yt-dlp](https://github.com/yt-dlp/yt-dlp) for YouTube support
-- Uses [Spotify Web API Go](https://github.com/zmb3/spotify) for Spotify integration
-
-## Support
-
-If you encounter any issues or have questions:
-- Open an issue on [Gitea](https://git.grainedlotus.com/GrainedLotus515/GoBard/issues)
-- Check existing issues for solutions
+> **Result** – GoBard matches Muse feature‑wise while offering a more lightweight runtime and tighter concurrency guarantees.
 
 ---
 
-Made with ❤️ and Go
+## CI/CD Pipeline
+
+GoBard uses **Gitea Actions** for continuous integration:
+
+- **Go Tests** – Runs against Go 1.24 and 1.25 with race detection.
+- **Linting** – `golangci-lint` enforces style and security checks.
+- **Security** – `trivy` scans Docker images for vulnerabilities.
+- **Docker Build** – Multi‑platform images are built and published to the registry.
+- **Release** – Tags trigger automatic image publishing.
+
+> **Pipeline Docs** – See `.gitea/workflows/` for detailed YAML files.
+
+---
+
+## Contributing
+
+We welcome contributions! Please follow these guidelines:
+
+1. Fork the repository and create a feature branch.
+2. Run `make test` and `make lint` locally.
+3. Submit a pull request; ensure all CI checks pass.
+4. Provide clear commit messages and PR descriptions.
+
+---
+
+## License
+
+MIT – see the [LICENSE](LICENSE) file.
+
+---
+
+**Made with ❤️ and Go**  
+```

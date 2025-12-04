@@ -90,6 +90,8 @@ func (b *Bot) Stop() error {
 // ready is called when the bot is ready
 func (b *Bot) ready(s *discordgo.Session, event *discordgo.Ready) {
 	logger.Info("✅ Logged in", "user", fmt.Sprintf("%v#%v", s.State.User.Username, s.State.User.Discriminator))
+	inviteURL := fmt.Sprintf("https://discord.com/api/oauth2/authorize?client_id=%s&permissions=0&scope=bot%%20applications.commands", s.State.User.ID)
+	logger.Info("Invite the bot using this link", "url", inviteURL)
 
 	// Set bot status
 	status := b.Config.BotStatus
