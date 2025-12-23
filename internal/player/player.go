@@ -215,6 +215,17 @@ func (p *GuildPlayer) playTrack(track *Track) {
 			continue
 		}
 
+		// Check voice connection periodically (every 100 frames ≈ 2 seconds)
+		if frameCount > 0 && frameCount%100 == 0 {
+			p.mu.RLock()
+			vcValid := p.VoiceConnection != nil
+			p.mu.RUnlock()
+			if !vcValid {
+				logger.Error("Voice connection lost during playback")
+				return
+			}
+		}
+
 		// Check for stop signal
 		select {
 		case <-p.stopChan:
@@ -235,13 +246,16 @@ func (p *GuildPlayer) playTrack(track *Track) {
 			break
 		}
 
-		// Send frame to voice connection
+		// Send frame to voice connection with timeout protection
 		select {
 		case vc.OpusSend <- frame:
 			frameCount++
 			if frameCount%1000 == 0 {
 				logger.PlaybackFramesMilestone(frameCount)
 			}
+		case <-time.After(5 * time.Second):
+			logger.Error("Timeout sending opus frame, voice connection may be dead")
+			return
 		case <-p.stopChan:
 			logger.PlaybackStopped(frameCount)
 			vc.Speaking(false)
@@ -416,6 +430,20 @@ func (p *GuildPlayer) SetLoopRunning(running bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.LoopRunning = running
+}
+
+// IsVoiceConnected safely checks if voice connection exists
+func (p *GuildPlayer) IsVoiceConnected() bool {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.VoiceConnection != nil
+}
+
+// ClearVoiceConnection safely clears the voice connection reference
+func (p *GuildPlayer) ClearVoiceConnection() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.VoiceConnection = nil
 }
 
 // streamToVoice streams audio data to Discord voice connection

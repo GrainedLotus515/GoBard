@@ -251,6 +251,13 @@ func (b *Bot) playLoop(guildID string) {
 
 		// Check if we should loop the current track
 		if p.Queue.Loop {
+			// Verify voice connection is still valid before replaying
+			if !p.IsVoiceConnected() {
+				logger.Info("Voice connection lost during loop, stopping playback", "guild", guildID)
+				p.Queue.ClearAll()
+				p.SetLoopRunning(false)
+				return
+			}
 			// Don't advance queue, just continue to replay
 			continue
 		}

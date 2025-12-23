@@ -131,6 +131,22 @@ func (b *Bot) ready(s *discordgo.Session, event *discordgo.Ready) {
 
 // voiceStateUpdate handles voice state changes
 func (b *Bot) voiceStateUpdate(s *discordgo.Session, vsu *discordgo.VoiceStateUpdate) {
+	// Check if this is the bot being disconnected from voice
+	if vsu.UserID == s.State.User.ID {
+		if vsu.ChannelID == "" {
+			// Bot was disconnected from voice channel
+			logger.Info("Bot was disconnected from voice channel", "guild", vsu.GuildID)
+			p := b.PlayerManager.GetPlayer(vsu.GuildID)
+			if p != nil {
+				p.Stop()
+				p.SetLoopRunning(false)
+				p.Queue.ClearAll()
+				p.ClearVoiceConnection()
+			}
+		}
+		return
+	}
+
 	// Handle volume reduction when someone speaks
 	if vsu.VoiceState.SelfMute || vsu.VoiceState.SelfDeaf {
 		return
