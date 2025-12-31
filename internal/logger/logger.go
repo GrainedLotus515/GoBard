@@ -8,11 +8,39 @@ import (
 
 var Logger *log.Logger
 
+// debugMode controls whether timing/debug logs are shown
+var debugMode bool
+
 func init() {
 	Logger = log.New(os.Stderr)
-	Logger.SetLevel(log.DebugLevel)
 	Logger.SetReportCaller(false)
 	Logger.SetReportTimestamp(true)
+
+	// Default to Info level, DEBUG env var will override via SetDebugMode
+	Logger.SetLevel(log.InfoLevel)
+}
+
+// SetDebugMode enables or disables debug logging
+func SetDebugMode(enabled bool) {
+	debugMode = enabled
+	if enabled {
+		Logger.SetLevel(log.DebugLevel)
+		Logger.Info("Debug mode enabled")
+	} else {
+		Logger.SetLevel(log.InfoLevel)
+	}
+}
+
+// IsDebugMode returns whether debug mode is enabled
+func IsDebugMode() bool {
+	return debugMode
+}
+
+// Timing logs timing information (only shown when DEBUG=true)
+func Timing(msg string, keyvals ...any) {
+	if debugMode {
+		Logger.Debug("⏱️ "+msg, keyvals...)
+	}
 }
 
 // Playback logging functions
@@ -158,22 +186,22 @@ func YouTubeError(err error) {
 }
 
 // General logging
-func Info(msg string, keyvals ...interface{}) {
+func Info(msg string, keyvals ...any) {
 	Logger.Info(msg, keyvals...)
 }
 
-func Debug(msg string, keyvals ...interface{}) {
+func Debug(msg string, keyvals ...any) {
 	Logger.Debug(msg, keyvals...)
 }
 
-func Warn(msg string, keyvals ...interface{}) {
+func Warn(msg string, keyvals ...any) {
 	Logger.Warn(msg, keyvals...)
 }
 
-func Error(msg string, keyvals ...interface{}) {
+func Error(msg string, keyvals ...any) {
 	Logger.Error(msg, keyvals...)
 }
 
-func Fatal(msg string, keyvals ...interface{}) {
+func Fatal(msg string, keyvals ...any) {
 	Logger.Fatal(msg, keyvals...)
 }

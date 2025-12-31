@@ -26,6 +26,7 @@ type Track struct {
 	RequestedBy string // Discord user ID
 	IsLive      bool
 	LocalPath   string // Path to cached file if available
+	StreamURL   string // Pre-fetched direct stream URL for faster playback
 }
 
 // Queue represents a music queue for a guild

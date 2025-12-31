@@ -38,6 +38,9 @@ type Config struct {
 	DefaultVolume             int
 	ReduceVolumeOnVoice       bool
 	ReduceVolumeOnVoiceTarget int
+
+	// Debug settings
+	Debug bool
 }
 
 // Load loads configuration from environment variables
@@ -71,6 +74,9 @@ func Load() (*Config, error) {
 		DefaultVolume:             getEnvInt("DEFAULT_VOLUME", 100),
 		ReduceVolumeOnVoice:       getEnvBool("REDUCE_VOL_WHEN_VOICE", false),
 		ReduceVolumeOnVoiceTarget: getEnvInt("REDUCE_VOL_WHEN_VOICE_TARGET", 70),
+
+		// Debug
+		Debug: getEnvBool("DEBUG", false),
 	}
 
 	if cfg.DiscordToken == "" {

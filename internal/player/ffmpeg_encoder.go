@@ -74,7 +74,7 @@ func NewCustomEncoder(source string, sampleRate, channels int) (*CustomEncoder, 
 		channels:    channels,
 		sampleRate:  sampleRate,
 		done:        false,
-		frameChan:   make(chan []byte, 100),
+		frameChan:   make(chan []byte, 300), // Increased from 100 to 300 (~6 seconds buffer)
 		stopChan:    make(chan bool, 1),
 	}
 

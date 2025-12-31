@@ -2,11 +2,13 @@ package player
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"io"
 	"os/exec"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/GrainedLotus515/gobard/internal/logger"
 	"github.com/hraban/opus"
@@ -27,46 +29,67 @@ type StreamingEncoder struct {
 }
 
 // NewStreamingEncoder creates a new streaming audio encoder
-// It uses yt-dlp to get the direct stream URL, then FFmpeg streams from that URL
-func NewStreamingEncoder(url string, sampleRate, channels int) (*StreamingEncoder, error) {
+// If streamURL is provided, it uses that directly; otherwise fetches via yt-dlp
+func NewStreamingEncoder(url string, streamURL string, sampleRate, channels int) (*StreamingEncoder, error) {
+	start := time.Now()
+
 	frameSize := 960 // 20ms at 48kHz
 	if sampleRate != 48000 {
 		frameSize = (sampleRate * 20) / 1000
 	}
 
-	// Step 1: Get direct stream URL from yt-dlp (blocking call, ~1-2 seconds)
-	logger.Info("Getting stream URL from yt-dlp")
-	ytdlpCmd := exec.Command(
-		"yt-dlp",
-		"-f", "bestaudio",
-		"-g", // Get URL only
-		"--no-warnings",
-		url,
-	)
+	var finalStreamURL string
 
-	var ytdlpStderr bytes.Buffer
-	ytdlpCmd.Stderr = &ytdlpStderr
+	if streamURL != "" {
+		// Use pre-fetched URL (fast path)
+		logger.Info("Using pre-fetched stream URL", "url_length", len(streamURL))
+		logger.Timing("Stream URL extraction", "source", "pre-fetched", "duration_ms", 0)
+		finalStreamURL = streamURL
+	} else {
+		// Fallback: fetch URL from yt-dlp (slow path, ~7 seconds)
+		logger.Info("Getting stream URL from yt-dlp (no pre-fetched URL)")
+		ytdlpStart := time.Now()
 
-	urlOutput, err := ytdlpCmd.Output()
-	if err != nil {
-		logger.Error("yt-dlp command failed", "stderr", ytdlpStderr.String())
-		return nil, fmt.Errorf("failed to get stream URL: %w", err)
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+
+		ytdlpCmd := exec.CommandContext(ctx,
+			"yt-dlp",
+			"-f", "bestaudio",
+			"-g", // Get URL only
+			"--no-warnings",
+			url,
+		)
+
+		var ytdlpStderr bytes.Buffer
+		ytdlpCmd.Stderr = &ytdlpStderr
+
+		urlOutput, err := ytdlpCmd.Output()
+		if err != nil {
+			if ctx.Err() == context.DeadlineExceeded {
+				return nil, fmt.Errorf("yt-dlp timed out after 30 seconds")
+			}
+			logger.Error("yt-dlp command failed", "stderr", ytdlpStderr.String())
+			return nil, fmt.Errorf("failed to get stream URL: %w", err)
+		}
+
+		finalStreamURL = strings.TrimSpace(string(urlOutput))
+		logger.Timing("Stream URL extraction", "source", "yt-dlp fallback", "duration_ms", time.Since(ytdlpStart).Milliseconds())
 	}
 
-	streamURL := strings.TrimSpace(string(urlOutput))
-	if streamURL == "" {
-		return nil, fmt.Errorf("yt-dlp returned empty stream URL")
+	if finalStreamURL == "" {
+		return nil, fmt.Errorf("no stream URL available")
 	}
 
-	logger.Info("Got stream URL, starting FFmpeg", "url_length", len(streamURL))
+	logger.Info("Got stream URL, starting FFmpeg", "url_length", len(finalStreamURL))
 
-	// Step 2: FFmpeg streams directly from the URL (FFmpeg handles HTTP natively)
+	// FFmpeg streams directly from the URL (FFmpeg handles HTTP natively)
 	ffmpegCmd := exec.Command(
 		"ffmpeg",
 		"-reconnect", "1",
 		"-reconnect_streamed", "1",
 		"-reconnect_delay_max", "5",
-		"-i", streamURL, // Direct URL instead of pipe:0
+		"-i", finalStreamURL, // Direct URL instead of pipe:0
 		"-f", "s16le",
 		"-ar", fmt.Sprintf("%d", sampleRate),
 		"-ac", fmt.Sprintf("%d", channels),
@@ -107,7 +130,7 @@ func NewStreamingEncoder(url string, sampleRate, channels int) (*StreamingEncode
 		channels:    channels,
 		sampleRate:  sampleRate,
 		done:        false,
-		frameChan:   make(chan []byte, 100),
+		frameChan:   make(chan []byte, 300), // Increased from 100 to 300 (~6 seconds buffer)
 		stopChan:    make(chan bool, 1),
 	}
 
@@ -117,6 +140,7 @@ func NewStreamingEncoder(url string, sampleRate, channels int) (*StreamingEncode
 	// Start the encoding goroutine
 	go encoder.encodeLoop(ffmpegStdout)
 
+	logger.Timing("Encoder creation completed", "duration_ms", time.Since(start).Milliseconds())
 	return encoder, nil
 }
 
@@ -146,6 +170,8 @@ func (e *StreamingEncoder) encodeLoop(reader io.Reader) {
 	pcmSamples := make([]int16, e.frameSize*e.channels)
 
 	frameCount := 0
+	var firstFrameTime time.Time
+
 	for {
 		select {
 		case <-e.stopChan:
@@ -172,6 +198,7 @@ func (e *StreamingEncoder) encodeLoop(reader io.Reader) {
 		}
 
 		if frameCount == 0 {
+			firstFrameTime = time.Now()
 			logger.Info("First PCM data received", "bytes", n)
 		}
 
@@ -196,6 +223,9 @@ func (e *StreamingEncoder) encodeLoop(reader io.Reader) {
 			select {
 			case e.frameChan <- opusFrame:
 				frameCount++
+				if frameCount == 1 {
+					logger.Timing("First opus frame ready", "duration_ms", time.Since(firstFrameTime).Milliseconds())
+				}
 				if frameCount%500 == 0 {
 					logger.Info("Streaming progress", "frames_encoded", frameCount)
 				}

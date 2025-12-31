@@ -166,7 +166,7 @@ func (p *GuildPlayer) playTrack(track *Track) {
 		// Stream directly from URL
 		logger.Info("Streaming from URL", "url", track.URL)
 		logger.PlaybackEncodingStart(track.URL)
-		encoder, err = NewStreamingEncoder(track.URL, 48000, 2)
+		encoder, err = NewStreamingEncoder(track.URL, track.StreamURL, 48000, 2)
 	}
 
 	if err != nil {
@@ -184,7 +184,7 @@ func (p *GuildPlayer) playTrack(track *Track) {
 
 	// Wait for voice connection to be ready
 	logger.PlaybackVoiceWaiting()
-	time.Sleep(500 * time.Millisecond) // Give voice connection time to stabilize
+	time.Sleep(200 * time.Millisecond) // Give voice connection time to stabilize (reduced from 500ms)
 
 	// Set speaking state BEFORE streaming
 	logger.PlaybackSpeakingStart()

@@ -1,12 +1,15 @@
 package youtube
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os/exec"
 	"strings"
+	"sync"
 	"time"
 
+	"github.com/GrainedLotus515/gobard/internal/logger"
 	"github.com/GrainedLotus515/gobard/internal/player"
 )
 
@@ -36,26 +39,67 @@ type SearchResult struct {
 
 // Format represents an available format
 type Format struct {
-	FormatID   string `json:"format_id"`
-	URL        string `json:"url"`
-	Ext        string `json:"ext"`
-	AudioCodec string `json:"acodec"`
-	VideoCodec string `json:"vcodec"`
+	FormatID   string  `json:"format_id"`
+	URL        string  `json:"url"`
+	Ext        string  `json:"ext"`
+	AudioCodec string  `json:"acodec"`
+	VideoCodec string  `json:"vcodec"`
+	ABR        float64 `json:"abr"` // Audio bitrate in kbps
+}
+
+// extractBestAudioURL finds the best audio-only URL from formats
+func extractBestAudioURL(formats []Format) string {
+	var bestURL string
+	var bestBitrate float64
+
+	for _, f := range formats {
+		// Skip if no audio
+		if f.AudioCodec == "none" || f.AudioCodec == "" {
+			continue
+		}
+		// Prefer audio-only (no video)
+		hasVideo := f.VideoCodec != "none" && f.VideoCodec != ""
+
+		// Select highest bitrate audio-only
+		if !hasVideo && f.ABR > bestBitrate && f.URL != "" {
+			bestBitrate = f.ABR
+			bestURL = f.URL
+		}
+	}
+
+	// Fallback: if no audio-only found, take any format with audio
+	if bestURL == "" {
+		for _, f := range formats {
+			if f.AudioCodec != "none" && f.AudioCodec != "" && f.URL != "" {
+				return f.URL
+			}
+		}
+	}
+
+	return bestURL
 }
 
 // Search searches for videos and returns track information
 func (c *Client) Search(query string) ([]*player.Track, error) {
-	// Use yt-dlp to search and get video info
-	cmd := exec.Command(
+	start := time.Now()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx,
 		"yt-dlp",
 		"--dump-json",
 		"--no-playlist",
+		"--no-warnings",
 		"--default-search", "ytsearch1",
 		query,
 	)
 
 	output, err := cmd.Output()
 	if err != nil {
+		if ctx.Err() == context.DeadlineExceeded {
+			return nil, fmt.Errorf("search timed out after 30 seconds")
+		}
 		return nil, fmt.Errorf("failed to search YouTube: %w", err)
 	}
 
@@ -64,6 +108,9 @@ func (c *Client) Search(query string) ([]*player.Track, error) {
 		return nil, fmt.Errorf("failed to parse search result: %w", err)
 	}
 
+	streamURL := extractBestAudioURL(result.Formats)
+	logger.Timing("YouTube search completed", "query", query, "duration_ms", time.Since(start).Milliseconds(), "has_stream_url", streamURL != "")
+
 	track := &player.Track{
 		ID:        result.ID,
 		Title:     result.Title,
@@ -73,6 +120,7 @@ func (c *Client) Search(query string) ([]*player.Track, error) {
 		Source:    player.SourceYouTube,
 		Thumbnail: result.Thumbnail,
 		IsLive:    result.IsLive,
+		StreamURL: streamURL,
 	}
 
 	return []*player.Track{track}, nil
@@ -80,15 +128,24 @@ func (c *Client) Search(query string) ([]*player.Track, error) {
 
 // GetVideoInfo gets information about a YouTube video
 func (c *Client) GetVideoInfo(url string) (*player.Track, error) {
-	cmd := exec.Command(
+	start := time.Now()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx,
 		"yt-dlp",
 		"--dump-json",
 		"--no-playlist",
+		"--no-warnings",
 		url,
 	)
 
 	output, err := cmd.Output()
 	if err != nil {
+		if ctx.Err() == context.DeadlineExceeded {
+			return nil, fmt.Errorf("video info fetch timed out after 30 seconds")
+		}
 		return nil, fmt.Errorf("failed to get video info: %w", err)
 	}
 
@@ -97,6 +154,9 @@ func (c *Client) GetVideoInfo(url string) (*player.Track, error) {
 		return nil, fmt.Errorf("failed to parse video info: %w", err)
 	}
 
+	streamURL := extractBestAudioURL(result.Formats)
+	logger.Timing("Video info fetch completed", "url", url, "duration_ms", time.Since(start).Milliseconds(), "has_stream_url", streamURL != "")
+
 	track := &player.Track{
 		ID:        result.ID,
 		Title:     result.Title,
@@ -106,6 +166,7 @@ func (c *Client) GetVideoInfo(url string) (*player.Track, error) {
 		Source:    player.SourceYouTube,
 		Thumbnail: result.Thumbnail,
 		IsLive:    result.IsLive,
+		StreamURL: streamURL,
 	}
 
 	return track, nil
@@ -113,15 +174,24 @@ func (c *Client) GetVideoInfo(url string) (*player.Track, error) {
 
 // GetPlaylistInfo gets information about a YouTube playlist
 func (c *Client) GetPlaylistInfo(url string) ([]*player.Track, error) {
-	cmd := exec.Command(
+	start := time.Now()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx,
 		"yt-dlp",
 		"--dump-json",
 		"--flat-playlist",
+		"--no-warnings",
 		url,
 	)
 
 	output, err := cmd.Output()
 	if err != nil {
+		if ctx.Err() == context.DeadlineExceeded {
+			return nil, fmt.Errorf("playlist fetch timed out after 60 seconds")
+		}
 		return nil, fmt.Errorf("failed to get playlist info: %w", err)
 	}
 
@@ -139,11 +209,17 @@ func (c *Client) GetPlaylistInfo(url string) ([]*player.Track, error) {
 			continue // Skip malformed entries
 		}
 
+		// Build video URL from ID if not provided
+		videoURL := result.URL
+		if videoURL == "" && result.ID != "" {
+			videoURL = fmt.Sprintf("https://www.youtube.com/watch?v=%s", result.ID)
+		}
+
 		track := &player.Track{
 			ID:        result.ID,
 			Title:     result.Title,
 			Artist:    result.Uploader,
-			URL:       result.URL,
+			URL:       videoURL,
 			Duration:  time.Duration(result.Duration) * time.Second,
 			Source:    player.SourceYouTube,
 			Thumbnail: result.Thumbnail,
@@ -153,22 +229,97 @@ func (c *Client) GetPlaylistInfo(url string) ([]*player.Track, error) {
 		tracks = append(tracks, track)
 	}
 
+	logger.Timing("Playlist fetch completed", "url", url, "track_count", len(tracks), "duration_ms", time.Since(start).Milliseconds())
+
+	// Pre-fetch stream URLs for first 3 tracks in parallel
+	if len(tracks) > 0 {
+		c.prefetchStreamURLs(tracks, 3)
+	}
+
 	return tracks, nil
+}
+
+// prefetchStreamURLs fetches stream URLs for the first N tracks in parallel
+func (c *Client) prefetchStreamURLs(tracks []*player.Track, count int) {
+	if count > len(tracks) {
+		count = len(tracks)
+	}
+
+	start := time.Now()
+	var wg sync.WaitGroup
+	var successCount int
+	var mu sync.Mutex
+
+	for i := 0; i < count; i++ {
+		wg.Add(1)
+		go func(track *player.Track, index int) {
+			defer wg.Done()
+
+			// Skip if already has stream URL or is live
+			if track.StreamURL != "" || track.IsLive || track.URL == "" {
+				return
+			}
+
+			// Fetch full video info to get stream URL (10 second timeout)
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+
+			cmd := exec.CommandContext(ctx,
+				"yt-dlp",
+				"--dump-json",
+				"--no-playlist",
+				"--no-warnings",
+				track.URL,
+			)
+
+			output, err := cmd.Output()
+			if err != nil {
+				logger.Debug("Prefetch failed for track", "index", index, "title", track.Title, "err", err)
+				return // Silently fail, will be fetched later
+			}
+
+			var result SearchResult
+			if err := json.Unmarshal(output, &result); err != nil {
+				return
+			}
+
+			track.StreamURL = extractBestAudioURL(result.Formats)
+			// Also update title if it was missing from flat playlist
+			if track.Title == "" && result.Title != "" {
+				track.Title = result.Title
+			}
+			if track.Artist == "" && result.Uploader != "" {
+				track.Artist = result.Uploader
+			}
+
+			mu.Lock()
+			successCount++
+			mu.Unlock()
+		}(tracks[i], i)
+	}
+
+	wg.Wait()
+	logger.Timing("Playlist prefetch completed", "requested", count, "success", successCount, "duration_ms", time.Since(start).Milliseconds())
 }
 
 // Download downloads a video to the cache directory
 func (c *Client) Download(url, outputPath string) error {
-	// Download in webm format which DCA can encode
-	// Don't extract/convert - keep original format for DCA to process
-	cmd := exec.Command(
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx,
 		"yt-dlp",
 		"-f", "bestaudio[ext=webm]/bestaudio",
 		"--no-post-overwrites",
+		"--no-warnings",
 		"-o", outputPath,
 		url,
 	)
 
 	if err := cmd.Run(); err != nil {
+		if ctx.Err() == context.DeadlineExceeded {
+			return fmt.Errorf("download timed out after 5 minutes")
+		}
 		return fmt.Errorf("failed to download video: %w", err)
 	}
 
@@ -177,15 +328,22 @@ func (c *Client) Download(url, outputPath string) error {
 
 // GetStreamURL gets the direct stream URL for a video
 func (c *Client) GetStreamURL(url string) (string, error) {
-	cmd := exec.Command(
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx,
 		"yt-dlp",
 		"-f", "bestaudio",
 		"-g", // Get URL
+		"--no-warnings",
 		url,
 	)
 
 	output, err := cmd.Output()
 	if err != nil {
+		if ctx.Err() == context.DeadlineExceeded {
+			return "", fmt.Errorf("stream URL fetch timed out after 30 seconds")
+		}
 		return "", fmt.Errorf("failed to get stream URL: %w", err)
 	}
 

@@ -23,6 +23,9 @@ func main() {
 		logger.Fatal("Failed to load configuration", "err", err)
 	}
 
+	// Set debug mode based on config
+	logger.SetDebugMode(cfg.Debug)
+
 	// Create bot instance
 	b, err := bot.New(cfg)
 	if err != nil {

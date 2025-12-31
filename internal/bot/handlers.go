@@ -66,7 +66,7 @@ func (b *Bot) handlePlay(s *discordgo.Session, i *discordgo.InteractionCreate) e
 	// Start playing if playback loop is not already running
 	if !p.IsLoopRunning() {
 		p.SetLoopRunning(true)
-		go b.playLoop(i.GuildID)
+		go b.playLoop(i.GuildID, i.ChannelID)
 	}
 
 	// Send response
@@ -183,7 +183,7 @@ func (b *Bot) resolveQuery(query, userID string) ([]*player.Track, error) {
 }
 
 // playLoop handles the playback loop for a guild
-func (b *Bot) playLoop(guildID string) {
+func (b *Bot) playLoop(guildID string, channelID string) {
 	logger.Debug("Starting playback loop", "guild", guildID)
 	p := b.PlayerManager.GetPlayer(guildID)
 
@@ -223,25 +223,40 @@ func (b *Bot) playLoop(guildID string) {
 			track.LocalPath = "" // Empty path triggers streaming encoder
 
 			// Start background download for future plays
-			go func(url, key string) {
-				logger.PlaybackDownloading(track.Title)
+			go func(url, key, title string) {
+				logger.PlaybackDownloading(title)
 				_, err := b.Cache.GetOrCreate(key, func(path string) error {
 					return b.YouTube.Download(url, path)
 				})
 				if err != nil {
-					logger.Error("Background download failed", "title", track.Title, "err", err)
+					logger.Error("Background download failed", "title", title, "err", err)
 				} else {
-					logger.Info("Background download completed", "title", track.Title)
+					logger.Info("Background download completed", "title", title)
 				}
-			}(track.URL, cacheKey)
+			}(track.URL, cacheKey, track.Title)
 		}
 
-		// Play the track
+		// Play the track with retry logic
 		logger.Info("Starting playback")
-		if err := p.Play(); err != nil {
-			logger.Error("Error starting playback", "err", err)
-			p.Queue.Next()
-			continue
+		err := p.Play()
+
+		if err != nil {
+			logger.Warn("First play attempt failed, retrying", "err", err, "title", track.Title)
+
+			// Clear stream URL to force fresh fetch on retry
+			track.StreamURL = ""
+
+			// Retry once
+			err = p.Play()
+			if err != nil {
+				// Send failure notification to Discord
+				errMsg := fmt.Sprintf("❌ **Track Failed:** %s\n**Reason:** %v", track.Title, err)
+				b.Session.ChannelMessageSend(channelID, errMsg)
+
+				logger.Error("Track failed after retry", "title", track.Title, "err", err)
+				p.Queue.Next()
+				continue
+			}
 		}
 
 		// Wait for track to finish

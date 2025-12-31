@@ -14,6 +14,8 @@ services:
     environment:
       # Override cache directory to use mounted volume
       - CACHE_DIR=/app/cache
+      # Enable debug logging for timing information (optional)
+      # - DEBUG=true
     healthcheck:
       test: ["CMD", "pgrep", "gobard"]
       interval: 30s
