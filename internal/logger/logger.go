@@ -129,6 +129,87 @@ func VoiceDisconnected() {
 	Logger.Info("✅ Disconnected from voice")
 }
 
+// Verbose voice connection logging (for debugging voice issues)
+func VoiceJoinAttempt(guildID, channelID string) {
+	Logger.Debug("🔊 Attempting to join voice channel", "guild", guildID, "channel", channelID)
+}
+
+func VoiceJoinSuccess(guildID, channelID string) {
+	Logger.Info("🔊 Successfully joined voice channel", "guild", guildID, "channel", channelID)
+}
+
+func VoiceJoinRetry(attempt int, maxAttempts int, err error) {
+	Logger.Warn("🔊 Voice join failed, retrying", "attempt", attempt, "max_attempts", maxAttempts, "err", err)
+}
+
+func VoiceReady(ready bool) {
+	Logger.Debug("🔊 Voice connection ready state", "ready", ready)
+}
+
+func VoiceOpusSend(success bool, frameCount int) {
+	if !success {
+		Logger.Warn("🔊 Failed to send opus frame", "frame", frameCount)
+	}
+}
+
+func VoiceStateChange(state string, details ...any) {
+	Logger.Debug("🔊 Voice state changed", append([]any{"state", state}, details...)...)
+}
+
+func VoiceError(operation string, err error, details ...any) {
+	Logger.Error("🔊 Voice error", append([]any{"operation", operation, "err", err}, details...)...)
+}
+
+func VoiceCloseCode(code int) {
+	// Document known close codes for easier debugging
+	var codeDesc string
+	switch code {
+	case 4001:
+		codeDesc = "Unknown opcode"
+	case 4002:
+		codeDesc = "Failed to decode payload"
+	case 4003:
+		codeDesc = "Not authenticated"
+	case 4004:
+		codeDesc = "Authentication failed"
+	case 4005:
+		codeDesc = "Already authenticated"
+	case 4006:
+		codeDesc = "Session no longer valid"
+	case 4009:
+		codeDesc = "Session timeout"
+	case 4011:
+		codeDesc = "Server not found"
+	case 4012:
+		codeDesc = "Unknown protocol"
+	case 4014:
+		codeDesc = "Disconnected"
+	case 4015:
+		codeDesc = "Voice server crashed"
+	case 4016:
+		codeDesc = "Unknown encryption mode"
+	case 4021:
+		codeDesc = "Voice server crashed (new)"
+	case 4022:
+		codeDesc = "Unknown session"
+	default:
+		codeDesc = "Unknown"
+	}
+	Logger.Warn("🔊 Voice connection closed", "close_code", code, "description", codeDesc)
+}
+
+func VoiceWaitingForReady(timeout string) {
+	Logger.Debug("🔊 Waiting for voice connection to be ready", "timeout", timeout)
+}
+
+func VoiceReadySuccess(elapsed string) {
+	Logger.Info("🔊 Voice connection is ready", "elapsed", elapsed)
+}
+
+func VoiceReadyTimeout() {
+	Logger.Warn("🔊 Voice connection ready timeout - proceeding anyway")
+}
+
 // Command logging
 func CommandExecuting(name string, user string) {
 	Logger.Info("⚙️  Executing command", "cmd", name, "user", user)

@@ -146,11 +146,12 @@ func (p *GuildPlayer) playTrack(track *Track) {
 
 	p.mu.Lock()
 	if p.VoiceConnection == nil {
-		logger.Error("No voice connection available")
+		logger.VoiceError("Play", fmt.Errorf("no voice connection"), "guild", p.GuildID)
 		p.mu.Unlock()
 		return
 	}
 	vc := p.VoiceConnection
+	logger.VoiceReady(vc.Status == discordgo.VoiceConnectionStatusReady)
 	p.mu.Unlock()
 
 	// Create appropriate encoder based on whether we have a cached file

@@ -3,6 +3,7 @@ package bot
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/GrainedLotus515/gobard/internal/cache"
 	"github.com/GrainedLotus515/gobard/internal/config"
@@ -181,20 +182,63 @@ func (b *Bot) GetVoiceChannel(guildID, userID string) (string, error) {
 	return "", fmt.Errorf("user not in voice channel")
 }
 
-// JoinVoiceChannel joins a voice channel
+// JoinVoiceChannel joins a voice channel with retry logic
 func (b *Bot) JoinVoiceChannel(guildID, channelID string) (*discordgo.VoiceConnection, error) {
-	// Join voice channel: mute=false, deaf=false
-	// Bot needs to hear users for voice ducking feature
-	ctx := context.Background()
-	vc, err := b.Session.ChannelVoiceJoin(ctx, guildID, channelID, false, false)
-	if err != nil {
-		return nil, fmt.Errorf("failed to join voice channel: %w", err)
+	const maxRetries = 3
+	const retryDelay = 500 * time.Millisecond
+	const readyTimeout = 5 * time.Second
+
+	logger.VoiceJoinAttempt(guildID, channelID)
+
+	var vc *discordgo.VoiceConnection
+	var lastErr error
+
+	for attempt := 1; attempt <= maxRetries; attempt++ {
+		// Join voice channel: mute=false, deaf=false
+		// Bot needs to hear users for voice ducking feature
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		vc, lastErr = b.Session.ChannelVoiceJoin(ctx, guildID, channelID, false, false)
+		cancel()
+
+		if lastErr != nil {
+			logger.VoiceError("ChannelVoiceJoin", lastErr, "guild", guildID, "channel", channelID, "attempt", attempt)
+			if attempt < maxRetries {
+				logger.VoiceJoinRetry(attempt, maxRetries, lastErr)
+				time.Sleep(retryDelay * time.Duration(attempt)) // Exponential backoff
+				continue
+			}
+			return nil, fmt.Errorf("failed to join voice channel after %d attempts: %w", maxRetries, lastErr)
+		}
+
+		// Successfully got a voice connection
+		break
 	}
 
-	// Wait for voice connection to be ready
-	// This ensures the encryption handshake is complete
+	logger.VoiceJoinSuccess(guildID, channelID)
+	isReady := vc.Status == discordgo.VoiceConnectionStatusReady
+	logger.VoiceReady(isReady)
+
+	// Wait for voice connection to be ready with timeout
+	logger.VoiceWaitingForReady(readyTimeout.String())
+	startWait := time.Now()
+
+	// Poll for ready state
+	readyCheckInterval := 100 * time.Millisecond
+	for vc.Status != discordgo.VoiceConnectionStatusReady {
+		if time.Since(startWait) > readyTimeout {
+			logger.VoiceReadyTimeout()
+			break
+		}
+		time.Sleep(readyCheckInterval)
+	}
+
+	if vc.Status == discordgo.VoiceConnectionStatusReady {
+		logger.VoiceReadySuccess(time.Since(startWait).String())
+	}
+
+	// Set speaking state to ensure encryption handshake is complete
 	if err := vc.Speaking(true); err != nil {
-		logger.Warn("Failed to set speaking state", "err", err)
+		logger.VoiceError("Speaking", err, "guild", guildID)
 	}
 
 	return vc, nil

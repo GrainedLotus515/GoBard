@@ -38,4 +38,6 @@ require (
 )
 
 // Use ozraru's fork with voice connection fixes for error 4016
+// Tested upstream v0.29.0 on 2026-01-08 - still getting error 4016
+// The fork includes fixes for voice close codes 4016, 4021, 4022 not yet merged upstream
 replace github.com/bwmarrin/discordgo => github.com/ozraru/discordgo v0.26.2-0.20250917201847-e6ee88434661

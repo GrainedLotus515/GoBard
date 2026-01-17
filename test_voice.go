@@ -57,22 +57,23 @@ func main() {
 			s.ChannelMessageSend(m.ChannelID, "Attempting to join voice...")
 			log.Printf("Joining voice channel %s", channelID)
 
-			// Try to join with context
+			// Try to join voice channel
 			ctx := context.Background()
 			vc, err := s.ChannelVoiceJoin(ctx, m.GuildID, channelID, false, false)
 			if err != nil {
 				log.Printf("Error joining voice: %v", err)
-				s.ChannelMessageSend(m.ChannelID, fmt.Sprintf("❌ Failed to join: %v", err))
+				s.ChannelMessageSend(m.ChannelID, fmt.Sprintf("Failed to join: %v", err))
 				return
 			}
 
-			log.Printf("Successfully joined voice channel!")
-			s.ChannelMessageSend(m.ChannelID, "✅ Successfully joined voice channel! Will disconnect in 5 seconds...")
+			isReady := vc.Status == discordgo.VoiceConnectionStatusReady
+			log.Printf("Successfully joined voice channel! Ready=%v", isReady)
+			s.ChannelMessageSend(m.ChannelID, fmt.Sprintf("Successfully joined voice channel! Ready=%v Will disconnect in 5 seconds...", isReady))
 
 			// Wait a bit
 			time.Sleep(5 * time.Second)
 
-			// Disconnect with context
+			// Disconnect
 			vc.Disconnect(ctx)
 			s.ChannelMessageSend(m.ChannelID, "Disconnected from voice")
 		}
