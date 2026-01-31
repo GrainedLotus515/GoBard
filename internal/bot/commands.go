@@ -1,11 +1,133 @@
 package bot
 
 import (
+	"context"
 	"fmt"
+	"strings"
+	"sync"
 
 	"github.com/GrainedLotus515/gobard/internal/logger"
 	"github.com/bwmarrin/discordgo"
+	"golang.org/x/time/rate"
 )
+
+// Discord API rate limits:
+// - Global: 50 requests/second
+// - Application Commands: 200 requests/minute
+// We use 10 requests/second to stay well within limits
+const (
+	requestsPerSecond = 10
+	burstSize         = 5
+)
+
+// CommandRegistrar handles parallel command registration with rate limiting
+type CommandRegistrar struct {
+	bot         *Bot
+	rateLimiter *rate.Limiter
+	errors      []error
+	errorMutex  sync.Mutex
+}
+
+// NewCommandRegistrar creates a new command registrar with rate limiting
+func NewCommandRegistrar(bot *Bot) *CommandRegistrar {
+	return &CommandRegistrar{
+		bot:         bot,
+		rateLimiter: rate.NewLimiter(rate.Limit(requestsPerSecond), burstSize),
+		errors:      make([]error, 0),
+	}
+}
+
+// addError adds an error to the error list in a thread-safe manner
+func (cr *CommandRegistrar) addError(err error) {
+	cr.errorMutex.Lock()
+	defer cr.errorMutex.Unlock()
+	cr.errors = append(cr.errors, err)
+}
+
+// getAggregatedError returns an aggregated error if any errors occurred
+func (cr *CommandRegistrar) getAggregatedError() error {
+	cr.errorMutex.Lock()
+	defer cr.errorMutex.Unlock()
+
+	if len(cr.errors) == 0 {
+		return nil
+	}
+
+	var errMsg strings.Builder
+	errMsg.WriteString(fmt.Sprintf("%d command registration errors:\n", len(cr.errors)))
+	for i, err := range cr.errors {
+		errMsg.WriteString(fmt.Sprintf("  %d. %v\n", i+1, err))
+	}
+
+	return fmt.Errorf("%s", errMsg.String())
+}
+
+// registerGlobally registers commands globally using parallel goroutines
+func (cr *CommandRegistrar) registerGlobally(commands []*discordgo.ApplicationCommand) error {
+	var wg sync.WaitGroup
+
+	for _, cmd := range commands {
+		wg.Add(1)
+		go func(c *discordgo.ApplicationCommand) {
+			defer wg.Done()
+
+			// Wait for rate limiter
+			if err := cr.rateLimiter.Wait(context.Background()); err != nil {
+				cr.addError(fmt.Errorf("rate limiter error for command %s: %w", c.Name, err))
+				return
+			}
+
+			// Register command
+			_, err := cr.bot.Session.ApplicationCommandCreate(
+				cr.bot.Session.State.User.ID, "", c)
+			if err != nil {
+				cr.addError(fmt.Errorf("failed to create command %s: %w", c.Name, err))
+			} else {
+				logger.Debug("Registered command globally", "command", c.Name)
+			}
+		}(cmd)
+	}
+
+	wg.Wait()
+	return cr.getAggregatedError()
+}
+
+// registerPerGuild registers commands for each guild using parallel goroutines
+func (cr *CommandRegistrar) registerPerGuild(commands []*discordgo.ApplicationCommand) error {
+	var wg sync.WaitGroup
+	guilds := cr.bot.Session.State.Guilds
+
+	logger.Info("Found guilds for registration", "count", len(guilds))
+
+	for _, guild := range guilds {
+		for _, cmd := range commands {
+			wg.Add(1)
+			go func(guildID string, guildName string, c *discordgo.ApplicationCommand) {
+				defer wg.Done()
+
+				// Wait for rate limiter
+				if err := cr.rateLimiter.Wait(context.Background()); err != nil {
+					cr.addError(fmt.Errorf("rate limiter error for command %s in guild %s (%s): %w",
+						c.Name, guildName, guildID, err))
+					return
+				}
+
+				// Register command
+				_, err := cr.bot.Session.ApplicationCommandCreate(
+					cr.bot.Session.State.User.ID, guildID, c)
+				if err != nil {
+					cr.addError(fmt.Errorf("failed to create command %s in guild %s (%s): %w",
+						c.Name, guildName, guildID, err))
+				} else {
+					logger.Debug("Registered command for guild", "command", c.Name, "guild", guildName)
+				}
+			}(guild.ID, guild.Name, cmd)
+		}
+	}
+
+	wg.Wait()
+	return cr.getAggregatedError()
+}
 
 // registerCommands registers all slash commands
 func (b *Bot) registerCommands() error {
@@ -173,26 +295,20 @@ func (b *Bot) registerCommands() error {
 
 	b.Commands = commands
 
+	// Create command registrar with rate limiting
+	registrar := NewCommandRegistrar(b)
+
 	if b.Config.RegisterGlobally {
-		// Register globally
-		logger.Info("📝 Registering commands globally...")
-		for _, cmd := range commands {
-			_, err := b.Session.ApplicationCommandCreate(b.Session.State.User.ID, "", cmd)
-			if err != nil {
-				return fmt.Errorf("failed to create command %s: %w", cmd.Name, err)
-			}
+		// Register globally using parallel goroutines
+		logger.Info("📝 Registering commands globally (parallel)...")
+		if err := registrar.registerGlobally(commands); err != nil {
+			return err
 		}
 	} else {
-		// Register for each guild
-		logger.Info("📝 Registering commands per guild...")
-		guilds := b.Session.State.Guilds
-		for _, guild := range guilds {
-			for _, cmd := range commands {
-				_, err := b.Session.ApplicationCommandCreate(b.Session.State.User.ID, guild.ID, cmd)
-				if err != nil {
-					logger.Error("Failed to create command", "cmd", cmd.Name, "guild", guild.ID, "err", err)
-				}
-			}
+		// Register for each guild using parallel goroutines
+		logger.Info("📝 Registering commands per guild (parallel)...")
+		if err := registrar.registerPerGuild(commands); err != nil {
+			return err
 		}
 	}
 
