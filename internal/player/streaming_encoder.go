@@ -1,12 +1,9 @@
 package player
 
 import (
-	"bytes"
-	"context"
 	"fmt"
 	"io"
 	"os/exec"
-	"strings"
 	"sync"
 	"time"
 
@@ -15,8 +12,9 @@ import (
 )
 
 // StreamingEncoder handles streaming audio encoding using yt-dlp + FFmpeg + libopus
-// It uses a two-step process: yt-dlp gets the direct URL, then FFmpeg streams from it
+// It uses a pipeline: yt-dlp streams audio -> FFmpeg decodes -> libopus encodes
 type StreamingEncoder struct {
+	ytdlpCmd    *exec.Cmd
 	ffmpegCmd   *exec.Cmd
 	opusEncoder *opus.Encoder
 	frameSize   int
@@ -29,7 +27,7 @@ type StreamingEncoder struct {
 }
 
 // NewStreamingEncoder creates a new streaming audio encoder
-// If streamURL is provided, it uses that directly; otherwise fetches via yt-dlp
+// streamURL parameter is kept for compatibility but ignored (we use yt-dlp pipeline instead)
 func NewStreamingEncoder(url string, streamURL string, sampleRate, channels int) (*StreamingEncoder, error) {
 	start := time.Now()
 
@@ -38,64 +36,36 @@ func NewStreamingEncoder(url string, streamURL string, sampleRate, channels int)
 		frameSize = (sampleRate * 20) / 1000
 	}
 
-	var finalStreamURL string
+	logger.Info("Starting yt-dlp -> FFmpeg pipeline")
 
-	if streamURL != "" {
-		// Use pre-fetched URL (fast path)
-		logger.Info("Using pre-fetched stream URL", "url_length", len(streamURL))
-		logger.Timing("Stream URL extraction", "source", "pre-fetched", "duration_ms", 0)
-		finalStreamURL = streamURL
-	} else {
-		// Fallback: fetch URL from yt-dlp (slow path, ~7 seconds)
-		logger.Info("Getting stream URL from yt-dlp (no pre-fetched URL)")
-		ytdlpStart := time.Now()
+	// Use yt-dlp to stream audio directly to FFmpeg
+	// This avoids 403 errors since yt-dlp handles YouTube's authentication headers
+	ytdlpCmd := exec.Command(
+		"yt-dlp",
+		"-f", "bestaudio",
+		"--no-warnings",
+		"-o", "-", // Output to stdout
+		url, // Use original URL, not the extracted stream URL
+	)
 
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
-
-		ytdlpCmd := exec.CommandContext(ctx,
-			"yt-dlp",
-			"-f", "bestaudio",
-			"-g", // Get URL only
-			"--no-warnings",
-			url,
-		)
-
-		var ytdlpStderr bytes.Buffer
-		ytdlpCmd.Stderr = &ytdlpStderr
-
-		urlOutput, err := ytdlpCmd.Output()
-		if err != nil {
-			if ctx.Err() == context.DeadlineExceeded {
-				return nil, fmt.Errorf("yt-dlp timed out after 30 seconds")
-			}
-			logger.Error("yt-dlp command failed", "stderr", ytdlpStderr.String())
-			return nil, fmt.Errorf("failed to get stream URL: %w", err)
-		}
-
-		finalStreamURL = strings.TrimSpace(string(urlOutput))
-		logger.Timing("Stream URL extraction", "source", "yt-dlp fallback", "duration_ms", time.Since(ytdlpStart).Milliseconds())
-	}
-
-	if finalStreamURL == "" {
-		return nil, fmt.Errorf("no stream URL available")
-	}
-
-	logger.Info("Got stream URL, starting FFmpeg", "url_length", len(finalStreamURL))
-
-	// FFmpeg streams directly from the URL (FFmpeg handles HTTP natively)
+	// FFmpeg reads from stdin (piped from yt-dlp)
 	ffmpegCmd := exec.Command(
 		"ffmpeg",
-		"-reconnect", "1",
-		"-reconnect_streamed", "1",
-		"-reconnect_delay_max", "5",
-		"-i", finalStreamURL, // Direct URL instead of pipe:0
+		"-i", "pipe:0", // Read from stdin
 		"-f", "s16le",
 		"-ar", fmt.Sprintf("%d", sampleRate),
 		"-ac", fmt.Sprintf("%d", channels),
 		"-loglevel", "error", // Only show errors
 		"pipe:1", // Output to stdout
 	)
+
+	// Pipe yt-dlp stdout to FFmpeg stdin
+	ytdlpStdout, err := ytdlpCmd.StdoutPipe()
+	if err != nil {
+		return nil, fmt.Errorf("failed to create yt-dlp stdout pipe: %w", err)
+	}
+
+	ffmpegCmd.Stdin = ytdlpStdout
 
 	// Get stdout and stderr from FFmpeg
 	ffmpegStdout, err := ffmpegCmd.StdoutPipe()
@@ -108,8 +78,13 @@ func NewStreamingEncoder(url string, streamURL string, sampleRate, channels int)
 		return nil, fmt.Errorf("failed to create ffmpeg stderr pipe: %w", err)
 	}
 
-	// Start FFmpeg
+	// Start both processes
+	if err := ytdlpCmd.Start(); err != nil {
+		return nil, fmt.Errorf("failed to start yt-dlp: %w", err)
+	}
+
 	if err := ffmpegCmd.Start(); err != nil {
+		ytdlpCmd.Process.Kill()
 		return nil, fmt.Errorf("failed to start ffmpeg: %w", err)
 	}
 
@@ -124,6 +99,7 @@ func NewStreamingEncoder(url string, streamURL string, sampleRate, channels int)
 	opusEnc.SetBitrate(128000)
 
 	encoder := &StreamingEncoder{
+		ytdlpCmd:    ytdlpCmd,
 		ffmpegCmd:   ffmpegCmd,
 		opusEncoder: opusEnc,
 		frameSize:   frameSize,
@@ -176,7 +152,12 @@ func (e *StreamingEncoder) encodeLoop(reader io.Reader) {
 		select {
 		case <-e.stopChan:
 			logger.Info("Encode loop stopped by signal", "frames_encoded", frameCount)
-			e.ffmpegCmd.Process.Kill()
+			if e.ffmpegCmd.Process != nil {
+				e.ffmpegCmd.Process.Kill()
+			}
+			if e.ytdlpCmd != nil && e.ytdlpCmd.Process != nil {
+				e.ytdlpCmd.Process.Kill()
+			}
 			return
 		default:
 		}
@@ -231,7 +212,12 @@ func (e *StreamingEncoder) encodeLoop(reader io.Reader) {
 				}
 			case <-e.stopChan:
 				logger.Info("Encode loop stopped while sending frame", "frames_encoded", frameCount)
-				e.ffmpegCmd.Process.Kill()
+				if e.ffmpegCmd.Process != nil {
+					e.ffmpegCmd.Process.Kill()
+				}
+				if e.ytdlpCmd != nil && e.ytdlpCmd.Process != nil {
+					e.ytdlpCmd.Process.Kill()
+				}
 				return
 			}
 		}
@@ -264,11 +250,21 @@ func (e *StreamingEncoder) Cleanup() error {
 	default:
 	}
 
-	// Kill FFmpeg process
+	// Kill both processes
 	if e.ffmpegCmd.Process != nil {
 		e.ffmpegCmd.Process.Kill()
 	}
+	if e.ytdlpCmd != nil && e.ytdlpCmd.Process != nil {
+		e.ytdlpCmd.Process.Kill()
+	}
 
-	// Wait for process to exit
-	return e.ffmpegCmd.Wait()
+	// Wait for processes to exit (ignore errors)
+	if e.ffmpegCmd != nil {
+		e.ffmpegCmd.Wait()
+	}
+	if e.ytdlpCmd != nil {
+		e.ytdlpCmd.Wait()
+	}
+
+	return nil
 }
