@@ -193,6 +193,14 @@ func (b *Bot) playLoop(guildID string, channelID string) {
 	}()
 
 	for {
+		// Check if voice connection is still valid before processing next track
+		if !p.IsVoiceConnected() {
+			logger.Info("Voice connection lost, stopping playback loop", "guild", guildID)
+			p.Queue.ClearAll()
+			p.SetLoopRunning(false)
+			return
+		}
+
 		track := p.Queue.Current()
 		if track == nil {
 			track = p.Queue.Next()
@@ -241,6 +249,15 @@ func (b *Bot) playLoop(guildID string, channelID string) {
 		err := p.Play()
 
 		if err != nil {
+			// Check if error is due to voice connection being lost
+			if err.Error() == "not connected to voice channel" {
+				logger.Error("Voice connection lost, cannot play track", "title", track.Title)
+				p.Queue.ClearAll()
+				p.SetLoopRunning(false)
+				p.Disconnect()
+				return
+			}
+
 			logger.Warn("First play attempt failed, retrying", "err", err, "title", track.Title)
 
 			// Clear stream URL to force fresh fetch on retry
