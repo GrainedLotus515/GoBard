@@ -410,7 +410,7 @@ func (b *Bot) handleNowPlaying(s *discordgo.Session, i *discordgo.InteractionCre
 			},
 			{
 				Name:   "Position",
-				Value:  formatDuration(p.GetCurrentPosition()),
+				Value:  formatDuration(getDisplayPosition(track, p.GetCurrentPosition())),
 				Inline: true,
 			},
 		},
@@ -644,4 +644,14 @@ func parseDuration(s string) (time.Duration, error) {
 
 func ptrString(s string) *string {
 	return &s
+}
+
+func getDisplayPosition(track *player.Track, position time.Duration) time.Duration {
+	if position < 0 {
+		return 0
+	}
+	if !track.IsLive && track.Duration > 0 && position > track.Duration {
+		return track.Duration
+	}
+	return position
 }

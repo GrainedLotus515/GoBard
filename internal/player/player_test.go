@@ -81,3 +81,15 @@ func TestStopClearsSeekStateAndPosition(t *testing.T) {
 		t.Fatal("seek request should be cleared by Stop()")
 	}
 }
+
+func TestGetCurrentPositionAdvancesWithPlaybackClock(t *testing.T) {
+	p := NewManager().GetPlayer("guild-3")
+	p.CurrentPosition = 5 * time.Second
+	p.Playing = true
+	p.playbackStartedAt = time.Now().Add(-1500 * time.Millisecond)
+
+	got := p.GetCurrentPosition()
+	if got < 6400*time.Millisecond || got > 7600*time.Millisecond {
+		t.Fatalf("GetCurrentPosition() = %v, want approximately 6.5s", got)
+	}
+}

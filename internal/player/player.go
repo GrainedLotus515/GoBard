@@ -42,6 +42,7 @@ type GuildPlayer struct {
 
 	seekRequested        bool
 	requestedStartOffset time.Duration
+	playbackStartedAt    time.Time
 
 	mu sync.RWMutex
 }
@@ -103,6 +104,7 @@ func (p *GuildPlayer) Play() error {
 	if p.Paused {
 		p.Paused = false
 		p.Playing = true
+		p.playbackStartedAt = time.Now()
 		return nil
 	}
 
@@ -119,6 +121,7 @@ func (p *GuildPlayer) Play() error {
 	startOffset := p.requestedStartOffset
 	p.requestedStartOffset = 0
 	p.CurrentPosition = startOffset
+	p.playbackStartedAt = time.Now()
 
 	// Drain any stale completion signal
 	select {
@@ -256,9 +259,6 @@ func (p *GuildPlayer) playTrack(track *Track, startOffset time.Duration) {
 		select {
 		case vc.OpusSend <- frame:
 			frameCount++
-			p.mu.Lock()
-			p.CurrentPosition += 20 * time.Millisecond
-			p.mu.Unlock()
 			if frameCount%1000 == 0 {
 				logger.PlaybackFramesMilestone(frameCount)
 			}
@@ -282,7 +282,9 @@ func (p *GuildPlayer) playTrack(track *Track, startOffset time.Duration) {
 		p.encoder.Cleanup()
 		p.encoder = nil
 	}
+	p.CurrentPosition = p.currentPositionLocked()
 	p.Playing = false
+	p.playbackStartedAt = time.Time{}
 	p.mu.Unlock()
 }
 
@@ -300,6 +302,8 @@ func (p *GuildPlayer) Pause() {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
+	p.CurrentPosition = p.currentPositionLocked()
+	p.playbackStartedAt = time.Time{}
 	p.Paused = true
 	p.Playing = false
 }
@@ -312,6 +316,7 @@ func (p *GuildPlayer) Resume() {
 	if p.Paused {
 		p.Paused = false
 		p.Playing = true
+		p.playbackStartedAt = time.Now()
 	}
 }
 
@@ -351,6 +356,7 @@ func (p *GuildPlayer) Seek(position time.Duration) error {
 	p.seekRequested = true
 	p.requestedStartOffset = position
 	p.stopPlaybackLocked(false)
+	p.CurrentPosition = position
 
 	return nil
 }
@@ -404,7 +410,7 @@ func (p *GuildPlayer) SetVoiceConnection(vc *discordgo.VoiceConnection) {
 func (p *GuildPlayer) GetCurrentPosition() time.Duration {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
-	return p.CurrentPosition
+	return p.currentPositionLocked()
 }
 
 // SetVoiceReductionEnabled toggles volume ducking on voice activity.
@@ -488,8 +494,10 @@ func (p *GuildPlayer) ClearVoiceConnection() {
 }
 
 func (p *GuildPlayer) stopPlaybackLocked(resetPosition bool) {
+	p.CurrentPosition = p.currentPositionLocked()
 	p.Playing = false
 	p.Paused = false
+	p.playbackStartedAt = time.Time{}
 	if resetPosition {
 		p.CurrentPosition = 0
 		p.requestedStartOffset = 0
@@ -506,6 +514,14 @@ func (p *GuildPlayer) stopPlaybackLocked(resetPosition bool) {
 		p.encoder.Cleanup()
 		p.encoder = nil
 	}
+}
+
+func (p *GuildPlayer) currentPositionLocked() time.Duration {
+	position := p.CurrentPosition
+	if p.Playing && !p.playbackStartedAt.IsZero() {
+		position += time.Since(p.playbackStartedAt)
+	}
+	return position
 }
 
 // streamToVoice streams audio data to Discord voice connection
