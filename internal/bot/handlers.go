@@ -2,7 +2,6 @@ package bot
 
 import (
 	"fmt"
-	"math/rand"
 	"strconv"
 	"strings"
 	"time"
@@ -29,12 +28,12 @@ func (b *Bot) handlePlay(s *discordgo.Session, i *discordgo.InteractionCreate) e
 	p := b.PlayerManager.GetPlayer(i.GuildID)
 
 	// Join voice channel if not already connected
-	if p.VoiceConnection == nil {
+	if !p.IsVoiceConnected() {
 		vc, err := b.JoinVoiceChannel(i.GuildID, channelID)
 		if err != nil {
 			return err
 		}
-		p.VoiceConnection = vc
+		p.SetVoiceConnection(vc)
 	}
 
 	// Defer the response since this might take a while
@@ -246,7 +245,7 @@ func (b *Bot) playLoop(guildID string, channelID string) {
 
 		// Play the track with retry logic
 		logger.Info("Starting playback")
-		err := p.Play()
+		err := b.playTrackForGuild(p)
 
 		if err != nil {
 			// Check if error is due to voice connection being lost
@@ -264,7 +263,7 @@ func (b *Bot) playLoop(guildID string, channelID string) {
 			track.StreamURL = ""
 
 			// Retry once
-			err = p.Play()
+			err = b.playTrackForGuild(p)
 			if err != nil {
 				// Send failure notification to Discord
 				errMsg := fmt.Sprintf("❌ **Track Failed:** %s\n**Reason:** %v", track.Title, err)
@@ -278,11 +277,16 @@ func (b *Bot) playLoop(guildID string, channelID string) {
 
 		// Wait for track to finish
 		logger.Debug("Waiting for track to complete")
-		p.WaitForCompletion()
+		b.waitForTrackCompletion(p)
 		logger.Info("Track completed", "title", track.Title)
 
+		// A seek request stops playback and replays the current track.
+		if p.ConsumeSeekRequest() {
+			continue
+		}
+
 		// Check if we should loop the current track
-		if p.Queue.Loop {
+		if p.Queue.IsLoopEnabled() {
 			// Verify voice connection is still valid before replaying
 			if !p.IsVoiceConnected() {
 				logger.Info("Voice connection lost during loop, stopping playback", "guild", guildID)
@@ -359,9 +363,10 @@ func (b *Bot) handleQueue(s *discordgo.Session, i *discordgo.InteractionCreate) 
 	var builder strings.Builder
 	builder.WriteString("**Current Queue:**\n\n")
 
-	for idx, track := range p.Queue.Tracks {
+	tracks, currentIndex := p.Queue.Snapshot()
+	for idx, track := range tracks {
 		prefix := fmt.Sprintf("%d. ", idx+1)
-		if idx == p.Queue.CurrentIndex {
+		if idx == currentIndex {
 			prefix = "▶️ "
 		}
 		builder.WriteString(fmt.Sprintf("%s**%s** - %s\n", prefix, track.Title, track.Artist))
@@ -405,7 +410,7 @@ func (b *Bot) handleNowPlaying(s *discordgo.Session, i *discordgo.InteractionCre
 			},
 			{
 				Name:   "Position",
-				Value:  formatDuration(p.CurrentPosition),
+				Value:  formatDuration(p.GetCurrentPosition()),
 				Inline: true,
 			},
 		},
@@ -439,22 +444,8 @@ func (b *Bot) handleShuffle(s *discordgo.Session, i *discordgo.InteractionCreate
 		return fmt.Errorf("not enough tracks to shuffle")
 	}
 
-	// Shuffle all tracks except the current one
-	current := p.Queue.CurrentIndex
-	tracks := p.Queue.Tracks
-
-	// Keep current track, shuffle the rest
-	if current >= 0 {
-		// Shuffle tracks after current
-		toShuffle := tracks[current+1:]
-		rand.Shuffle(len(toShuffle), func(i, j int) {
-			toShuffle[i], toShuffle[j] = toShuffle[j], toShuffle[i]
-		})
-	} else {
-		// Shuffle all tracks
-		rand.Shuffle(len(tracks), func(i, j int) {
-			tracks[i], tracks[j] = tracks[j], tracks[i]
-		})
+	if !p.Queue.ShuffleUpcoming() {
+		return fmt.Errorf("not enough tracks to shuffle")
 	}
 
 	b.respond(s, i, "🔀 Shuffled queue")
@@ -464,9 +455,9 @@ func (b *Bot) handleShuffle(s *discordgo.Session, i *discordgo.InteractionCreate
 // handleLoop handles the loop command
 func (b *Bot) handleLoop(s *discordgo.Session, i *discordgo.InteractionCreate) error {
 	p := b.PlayerManager.GetPlayer(i.GuildID)
-	p.Queue.Loop = !p.Queue.Loop
+	enabled := p.Queue.ToggleLoop()
 
-	if p.Queue.Loop {
+	if enabled {
 		b.respond(s, i, "🔂 Looping enabled")
 	} else {
 		b.respond(s, i, "▶️ Looping disabled")
@@ -510,7 +501,7 @@ func (b *Bot) handleFSeek(s *discordgo.Session, i *discordgo.InteractionCreate) 
 	seconds := int(i.ApplicationCommandData().Options[0].IntValue())
 
 	p := b.PlayerManager.GetPlayer(i.GuildID)
-	newPosition := p.CurrentPosition + time.Duration(seconds)*time.Second
+	newPosition := p.GetCurrentPosition() + time.Duration(seconds)*time.Second
 
 	if err := p.Seek(newPosition); err != nil {
 		return err
@@ -560,7 +551,7 @@ func (b *Bot) handleConfig(s *discordgo.Session, i *discordgo.InteractionCreate)
 	switch subCmd.Name {
 	case "set-reduce-vol-when-voice":
 		enabled := subCmd.Options[0].BoolValue()
-		p.ReduceOnVoice = enabled
+		p.SetVoiceReductionEnabled(enabled)
 		if enabled {
 			b.respond(s, i, "✅ Volume reduction enabled")
 		} else {
@@ -569,21 +560,24 @@ func (b *Bot) handleConfig(s *discordgo.Session, i *discordgo.InteractionCreate)
 
 	case "set-reduce-vol-when-voice-target":
 		volume := int(subCmd.Options[0].IntValue())
-		p.ReduceOnVoiceTarget = volume
+		if err := p.SetVoiceReductionTarget(volume); err != nil {
+			return err
+		}
 		b.respond(s, i, fmt.Sprintf("✅ Volume reduction target set to %d%%", volume))
 
 	case "show":
+		enabled, target := p.GetVoiceReductionConfig()
 		embed := &discordgo.MessageEmbed{
 			Title: "Configuration",
 			Fields: []*discordgo.MessageEmbedField{
 				{
 					Name:   "Reduce volume on voice",
-					Value:  fmt.Sprintf("%v", p.ReduceOnVoice),
+					Value:  fmt.Sprintf("%v", enabled),
 					Inline: true,
 				},
 				{
 					Name:   "Voice reduction target",
-					Value:  fmt.Sprintf("%d%%", p.ReduceOnVoiceTarget),
+					Value:  fmt.Sprintf("%d%%", target),
 					Inline: true,
 				},
 			},

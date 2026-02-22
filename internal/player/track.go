@@ -1,6 +1,7 @@
 package player
 
 import (
+	"math/rand"
 	"sync"
 	"time"
 )
@@ -159,6 +160,59 @@ func (q *Queue) Move(from, to int) bool {
 	}
 
 	return true
+}
+
+// Snapshot returns a copy of queue tracks and the current index.
+func (q *Queue) Snapshot() ([]*Track, int) {
+	q.mu.RLock()
+	defer q.mu.RUnlock()
+
+	tracks := make([]*Track, len(q.Tracks))
+	copy(tracks, q.Tracks)
+	return tracks, q.CurrentIndex
+}
+
+// ShuffleUpcoming shuffles tracks after the current one.
+// If no track is currently selected, it shuffles the whole queue.
+func (q *Queue) ShuffleUpcoming() bool {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+
+	if len(q.Tracks) <= 1 {
+		return false
+	}
+
+	if q.CurrentIndex >= 0 {
+		if q.CurrentIndex >= len(q.Tracks)-1 {
+			return false
+		}
+
+		start := q.CurrentIndex + 1
+		rand.Shuffle(len(q.Tracks[start:]), func(i, j int) {
+			q.Tracks[start+i], q.Tracks[start+j] = q.Tracks[start+j], q.Tracks[start+i]
+		})
+		return true
+	}
+
+	rand.Shuffle(len(q.Tracks), func(i, j int) {
+		q.Tracks[i], q.Tracks[j] = q.Tracks[j], q.Tracks[i]
+	})
+	return true
+}
+
+// IsLoopEnabled returns whether loop mode is enabled.
+func (q *Queue) IsLoopEnabled() bool {
+	q.mu.RLock()
+	defer q.mu.RUnlock()
+	return q.Loop
+}
+
+// ToggleLoop toggles loop mode and returns the new value.
+func (q *Queue) ToggleLoop() bool {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	q.Loop = !q.Loop
+	return q.Loop
 }
 
 // IsEmpty returns true if the queue is empty

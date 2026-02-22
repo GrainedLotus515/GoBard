@@ -22,6 +22,9 @@ type Bot struct {
 	YouTube       *youtube.Client
 	Spotify       *spotify.Client
 	Commands      []*discordgo.ApplicationCommand
+
+	playTrackFn         func(*player.GuildPlayer) error
+	waitForCompletionFn func(*player.GuildPlayer)
 }
 
 // New creates a new bot instance
@@ -198,4 +201,19 @@ func (b *Bot) JoinVoiceChannel(guildID, channelID string) (*discordgo.VoiceConne
 	}
 
 	return vc, nil
+}
+
+func (b *Bot) playTrackForGuild(p *player.GuildPlayer) error {
+	if b.playTrackFn != nil {
+		return b.playTrackFn(p)
+	}
+	return p.Play()
+}
+
+func (b *Bot) waitForTrackCompletion(p *player.GuildPlayer) {
+	if b.waitForCompletionFn != nil {
+		b.waitForCompletionFn(p)
+		return
+	}
+	p.WaitForCompletion()
 }

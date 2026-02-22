@@ -6,6 +6,7 @@ import (
 	"io"
 	"os/exec"
 	"sync"
+	"time"
 
 	"github.com/GrainedLotus515/gobard/internal/logger"
 	"github.com/hraban/opus"
@@ -26,21 +27,14 @@ type CustomEncoder struct {
 }
 
 // NewCustomEncoder creates a new audio encoder using FFmpeg + libopus
-func NewCustomEncoder(source string, sampleRate, channels int) (*CustomEncoder, error) {
+func NewCustomEncoder(source string, sampleRate, channels int, startOffset time.Duration) (*CustomEncoder, error) {
 	frameSize := 960 // 20ms at 48kHz
 	if sampleRate != 48000 {
 		frameSize = (sampleRate * 20) / 1000
 	}
 
 	// FFmpeg command to convert audio to PCM s16le
-	cmd := exec.Command(
-		"ffmpeg",
-		"-i", source,
-		"-f", "s16le",
-		"-ar", fmt.Sprintf("%d", sampleRate),
-		"-ac", fmt.Sprintf("%d", channels),
-		"-",
-	)
+	cmd := exec.Command("ffmpeg", buildFileFFmpegArgs(source, sampleRate, channels, startOffset)...)
 
 	// Capture stderr to suppress FFmpeg output
 	var stderr bytes.Buffer
@@ -174,4 +168,49 @@ func (e *CustomEncoder) Cleanup() error {
 	}
 
 	return e.cmd.Wait()
+}
+
+func buildFileFFmpegArgs(source string, sampleRate, channels int, startOffset time.Duration) []string {
+	args := make([]string, 0, 16)
+	if startOffset > 0 {
+		args = append(args, "-ss", formatFFmpegTimestamp(startOffset))
+	}
+	args = append(args,
+		"-i", source,
+		"-f", "s16le",
+		"-ar", fmt.Sprintf("%d", sampleRate),
+		"-ac", fmt.Sprintf("%d", channels),
+		"-",
+	)
+	return args
+}
+
+func buildStreamingFFmpegArgs(sampleRate, channels int, startOffset time.Duration) []string {
+	args := []string{
+		"-i", "pipe:0", // Read from stdin
+	}
+	if startOffset > 0 {
+		// Output seeking works even on non-seekable input pipes.
+		args = append(args, "-ss", formatFFmpegTimestamp(startOffset))
+	}
+	args = append(args,
+		"-f", "s16le",
+		"-ar", fmt.Sprintf("%d", sampleRate),
+		"-ac", fmt.Sprintf("%d", channels),
+		"-loglevel", "error",
+		"pipe:1",
+	)
+	return args
+}
+
+func formatFFmpegTimestamp(d time.Duration) string {
+	if d < 0 {
+		d = 0
+	}
+	totalMillis := d.Milliseconds()
+	hours := totalMillis / (1000 * 60 * 60)
+	minutes := (totalMillis / (1000 * 60)) % 60
+	seconds := (totalMillis / 1000) % 60
+	millis := totalMillis % 1000
+	return fmt.Sprintf("%02d:%02d:%02d.%03d", hours, minutes, seconds, millis)
 }

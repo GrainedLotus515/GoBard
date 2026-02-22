@@ -12,10 +12,11 @@ import (
 
 // Cache manages cached audio files
 type Cache struct {
-	dir     string
-	maxSize int64
-	mu      sync.RWMutex
-	entries map[string]*CacheEntry
+	dir      string
+	maxSize  int64
+	mu       sync.RWMutex
+	entries  map[string]*CacheEntry
+	inFlight map[string]*inFlightCreate
 }
 
 // CacheEntry represents a cached file
@@ -26,6 +27,12 @@ type CacheEntry struct {
 	URL          string
 }
 
+type inFlightCreate struct {
+	done chan struct{}
+	path string
+	err  error
+}
+
 // NewCache creates a new cache manager
 func NewCache(dir string, maxSize int64) (*Cache, error) {
 	if err := os.MkdirAll(dir, 0755); err != nil {
@@ -33,9 +40,10 @@ func NewCache(dir string, maxSize int64) (*Cache, error) {
 	}
 
 	cache := &Cache{
-		dir:     dir,
-		maxSize: maxSize,
-		entries: make(map[string]*CacheEntry),
+		dir:      dir,
+		maxSize:  maxSize,
+		entries:  make(map[string]*CacheEntry),
+		inFlight: make(map[string]*inFlightCreate),
 	}
 
 	// Load existing cache entries
@@ -85,8 +93,8 @@ func (c *Cache) loadEntries() error {
 
 // Get gets a cached file path if it exists
 func (c *Cache) Get(key string) (string, bool) {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
+	c.mu.Lock()
+	defer c.mu.Unlock()
 
 	entry, exists := c.entries[key]
 	if !exists {
@@ -134,43 +142,80 @@ func (c *Cache) Set(key, sourcePath string, size int64) error {
 
 // GetOrCreate gets a cached file or creates it using the provided function
 func (c *Cache) GetOrCreate(key string, create func(path string) error) (string, error) {
-	// Check if already cached
+	// Fast path
 	if path, exists := c.Get(key); exists {
 		return path, nil
 	}
 
-	destPath := filepath.Join(c.dir, key)
+	for {
+		c.mu.Lock()
 
-	// Create the file WITHOUT holding the lock
-	// This allows other cache operations to proceed during download
-	if err := create(destPath); err != nil {
+		if entry, exists := c.entries[key]; exists {
+			entry.LastAccessed = time.Now()
+			path := entry.Path
+			c.mu.Unlock()
+			return path, nil
+		}
+
+		if pending, exists := c.inFlight[key]; exists {
+			c.mu.Unlock()
+			<-pending.done
+			return pending.path, pending.err
+		}
+
+		pending := &inFlightCreate{done: make(chan struct{})}
+		c.inFlight[key] = pending
+		c.mu.Unlock()
+
+		path, err := c.createAndStore(key, create)
+
+		c.mu.Lock()
+		pending.path = path
+		pending.err = err
+		delete(c.inFlight, key)
+		close(pending.done)
+		c.mu.Unlock()
+
+		return path, err
+	}
+}
+
+func (c *Cache) createAndStore(key string, create func(path string) error) (string, error) {
+	destPath := filepath.Join(c.dir, key)
+	tmpPath := fmt.Sprintf("%s.tmp-%d", destPath, time.Now().UnixNano())
+
+	// Create the file without holding the cache lock.
+	if err := create(tmpPath); err != nil {
+		os.Remove(tmpPath)
 		return "", fmt.Errorf("failed to create cached file: %w", err)
 	}
 
-	// Get file size
-	info, err := os.Stat(destPath)
+	info, err := os.Stat(tmpPath)
 	if err != nil {
-		os.Remove(destPath)
+		os.Remove(tmpPath)
 		return "", fmt.Errorf("failed to stat created file: %w", err)
 	}
 
 	size := info.Size()
 
-	// NOW acquire lock only for registration
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	// Check if another goroutine already created this entry while we were downloading
+	// Another writer may have populated the key while we were downloading.
 	if entry, exists := c.entries[key]; exists {
-		// Remove our duplicate download
-		os.Remove(destPath)
+		os.Remove(tmpPath)
+		entry.LastAccessed = time.Now()
 		return entry.Path, nil
 	}
 
-	// Evict if necessary
 	currentSize := c.getCurrentSize()
 	if currentSize+size > c.maxSize {
 		c.evict(currentSize + size - c.maxSize)
+	}
+
+	if err := os.Rename(tmpPath, destPath); err != nil {
+		os.Remove(tmpPath)
+		return "", fmt.Errorf("failed to finalize cached file: %w", err)
 	}
 
 	c.entries[key] = &CacheEntry{

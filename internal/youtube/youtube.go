@@ -92,6 +92,7 @@ func (c *Client) Search(query string) ([]*player.Track, error) {
 		"--no-playlist",
 		"--no-warnings",
 		"--default-search", "ytsearch1",
+		"--",
 		query,
 	)
 
@@ -138,6 +139,7 @@ func (c *Client) GetVideoInfo(url string) (*player.Track, error) {
 		"--dump-json",
 		"--no-playlist",
 		"--no-warnings",
+		"--",
 		url,
 	)
 
@@ -184,6 +186,7 @@ func (c *Client) GetPlaylistInfo(url string) ([]*player.Track, error) {
 		"--dump-json",
 		"--flat-playlist",
 		"--no-warnings",
+		"--",
 		url,
 	)
 
@@ -269,6 +272,7 @@ func (c *Client) prefetchStreamURLs(tracks []*player.Track, count int) {
 				"--dump-json",
 				"--no-playlist",
 				"--no-warnings",
+				"--",
 				track.URL,
 			)
 
@@ -313,6 +317,7 @@ func (c *Client) Download(url, outputPath string) error {
 		"--no-post-overwrites",
 		"--no-warnings",
 		"-o", outputPath,
+		"--",
 		url,
 	)
 
@@ -336,6 +341,7 @@ func (c *Client) GetStreamURL(url string) (string, error) {
 		"-f", "bestaudio",
 		"-g", // Get URL
 		"--no-warnings",
+		"--",
 		url,
 	)
 

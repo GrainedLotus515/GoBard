@@ -28,7 +28,7 @@ type StreamingEncoder struct {
 
 // NewStreamingEncoder creates a new streaming audio encoder
 // streamURL parameter is kept for compatibility but ignored (we use yt-dlp pipeline instead)
-func NewStreamingEncoder(url string, streamURL string, sampleRate, channels int) (*StreamingEncoder, error) {
+func NewStreamingEncoder(url string, streamURL string, sampleRate, channels int, startOffset time.Duration) (*StreamingEncoder, error) {
 	start := time.Now()
 
 	frameSize := 960 // 20ms at 48kHz
@@ -45,19 +45,12 @@ func NewStreamingEncoder(url string, streamURL string, sampleRate, channels int)
 		"-f", "bestaudio",
 		"--no-warnings",
 		"-o", "-", // Output to stdout
+		"--",
 		url, // Use original URL, not the extracted stream URL
 	)
 
 	// FFmpeg reads from stdin (piped from yt-dlp)
-	ffmpegCmd := exec.Command(
-		"ffmpeg",
-		"-i", "pipe:0", // Read from stdin
-		"-f", "s16le",
-		"-ar", fmt.Sprintf("%d", sampleRate),
-		"-ac", fmt.Sprintf("%d", channels),
-		"-loglevel", "error", // Only show errors
-		"pipe:1", // Output to stdout
-	)
+	ffmpegCmd := exec.Command("ffmpeg", buildStreamingFFmpegArgs(sampleRate, channels, startOffset)...)
 
 	// Pipe yt-dlp stdout to FFmpeg stdin
 	ytdlpStdout, err := ytdlpCmd.StdoutPipe()

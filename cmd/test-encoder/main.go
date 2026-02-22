@@ -13,7 +13,7 @@ func main() {
 
 	log.Println("=== Testing Custom Encoder ===")
 	log.Printf("Creating encoder for: %s", source)
-	encoder, err := player.NewCustomEncoder(source, 48000, 2)
+	encoder, err := player.NewCustomEncoder(source, 48000, 2, 0)
 	if err != nil {
 		log.Fatalf("Failed to create encoder: %v", err)
 	}

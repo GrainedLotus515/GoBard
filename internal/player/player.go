@@ -40,6 +40,9 @@ type GuildPlayer struct {
 	doneChan chan bool
 	encoder  EncoderInterface
 
+	seekRequested        bool
+	requestedStartOffset time.Duration
+
 	mu sync.RWMutex
 }
 
@@ -113,6 +116,9 @@ func (p *GuildPlayer) Play() error {
 
 	p.Playing = true
 	p.Paused = false
+	startOffset := p.requestedStartOffset
+	p.requestedStartOffset = 0
+	p.CurrentPosition = startOffset
 
 	// Drain any stale completion signal
 	select {
@@ -127,13 +133,13 @@ func (p *GuildPlayer) Play() error {
 	}
 
 	// Start playback in goroutine
-	go p.playTrack(track)
+	go p.playTrack(track, startOffset)
 
 	return nil
 }
 
 // playTrack handles the actual playback of a track
-func (p *GuildPlayer) playTrack(track *Track) {
+func (p *GuildPlayer) playTrack(track *Track, startOffset time.Duration) {
 	logger.PlaybackStart(track.Title)
 
 	// Ensure completion is always signaled, regardless of exit path
@@ -161,12 +167,12 @@ func (p *GuildPlayer) playTrack(track *Track) {
 		// Use cached file
 		logger.Info("Using cached file", "path", track.LocalPath)
 		logger.PlaybackEncodingStart(track.LocalPath)
-		encoder, err = NewCustomEncoder(track.LocalPath, 48000, 2)
+		encoder, err = NewCustomEncoder(track.LocalPath, 48000, 2, startOffset)
 	} else {
 		// Stream directly from URL
 		logger.Info("Streaming from URL", "url", track.URL)
 		logger.PlaybackEncodingStart(track.URL)
-		encoder, err = NewStreamingEncoder(track.URL, track.StreamURL, 48000, 2)
+		encoder, err = NewStreamingEncoder(track.URL, track.StreamURL, 48000, 2, startOffset)
 	}
 
 	if err != nil {
@@ -250,6 +256,9 @@ func (p *GuildPlayer) playTrack(track *Track) {
 		select {
 		case vc.OpusSend <- frame:
 			frameCount++
+			p.mu.Lock()
+			p.CurrentPosition += 20 * time.Millisecond
+			p.mu.Unlock()
 			if frameCount%1000 == 0 {
 				logger.PlaybackFramesMilestone(frameCount)
 			}
@@ -311,21 +320,8 @@ func (p *GuildPlayer) Stop() {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	p.Playing = false
-	p.Paused = false
-	p.CurrentPosition = 0
-
-	// Stop streaming
-	select {
-	case p.stopChan <- true:
-	default:
-	}
-
-	// Cleanup encoder
-	if p.encoder != nil {
-		p.encoder.Cleanup()
-		p.encoder = nil
-	}
+	p.seekRequested = false
+	p.stopPlaybackLocked(true)
 }
 
 // Skip skips to the next track
@@ -339,9 +335,6 @@ func (p *GuildPlayer) Skip() *Track {
 
 // Seek seeks to a position in the current track
 func (p *GuildPlayer) Seek(position time.Duration) error {
-	// Stop current playback first to prevent duplicate streams
-	p.Stop()
-
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
@@ -355,11 +348,9 @@ func (p *GuildPlayer) Seek(position time.Duration) error {
 	}
 
 	p.CurrentPosition = position
-
-	// Restart playback from new position
-	p.Playing = true
-	p.Paused = false
-	go p.playTrack(track)
+	p.seekRequested = true
+	p.requestedStartOffset = position
+	p.stopPlaybackLocked(false)
 
 	return nil
 }
@@ -400,6 +391,56 @@ func (p *GuildPlayer) RestoreVolume() {
 	}
 
 	p.Volume = p.OriginalVolume
+}
+
+// SetVoiceConnection safely sets the voice connection reference.
+func (p *GuildPlayer) SetVoiceConnection(vc *discordgo.VoiceConnection) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.VoiceConnection = vc
+}
+
+// GetCurrentPosition safely returns the current playback position.
+func (p *GuildPlayer) GetCurrentPosition() time.Duration {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.CurrentPosition
+}
+
+// SetVoiceReductionEnabled toggles volume ducking on voice activity.
+func (p *GuildPlayer) SetVoiceReductionEnabled(enabled bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.ReduceOnVoice = enabled
+}
+
+// SetVoiceReductionTarget sets the ducked volume level.
+func (p *GuildPlayer) SetVoiceReductionTarget(target int) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if target < 0 || target > 100 {
+		return fmt.Errorf("volume must be between 0 and 100")
+	}
+
+	p.ReduceOnVoiceTarget = target
+	return nil
+}
+
+// GetVoiceReductionConfig returns voice ducking settings.
+func (p *GuildPlayer) GetVoiceReductionConfig() (bool, int) {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.ReduceOnVoice, p.ReduceOnVoiceTarget
+}
+
+// ConsumeSeekRequest reports and clears a pending seek restart request.
+func (p *GuildPlayer) ConsumeSeekRequest() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	requested := p.seekRequested
+	p.seekRequested = false
+	return requested
 }
 
 // Disconnect disconnects from voice channel
@@ -444,6 +485,27 @@ func (p *GuildPlayer) ClearVoiceConnection() {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.VoiceConnection = nil
+}
+
+func (p *GuildPlayer) stopPlaybackLocked(resetPosition bool) {
+	p.Playing = false
+	p.Paused = false
+	if resetPosition {
+		p.CurrentPosition = 0
+		p.requestedStartOffset = 0
+	}
+
+	// Stop streaming
+	select {
+	case p.stopChan <- true:
+	default:
+	}
+
+	// Cleanup encoder
+	if p.encoder != nil {
+		p.encoder.Cleanup()
+		p.encoder = nil
+	}
 }
 
 // streamToVoice streams audio data to Discord voice connection
