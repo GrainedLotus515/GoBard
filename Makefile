@@ -12,6 +12,11 @@ GOTEST=$(GOCMD) test
 GOGET=$(GOCMD) get
 GOMOD=$(GOCMD) mod
 
+LOCAL_PKG_CONFIG=$(HOME)/.local/lib/pkgconfig
+LOCAL_LIB_DIR=$(HOME)/.local/lib
+export PKG_CONFIG_PATH=$(LOCAL_PKG_CONFIG):$(PKG_CONFIG_PATH)
+export LD_LIBRARY_PATH=$(LOCAL_LIB_DIR):$(LD_LIBRARY_PATH)
+
 help: ## Show this help message
 	@echo 'Usage: make [target]'
 	@echo ''
@@ -61,5 +66,7 @@ install-tools: ## Install development tools
 	@command -v yt-dlp >/dev/null 2>&1 || pip3 install yt-dlp
 	@echo "Checking FFmpeg..."
 	@command -v ffmpeg >/dev/null 2>&1 || echo "Please install FFmpeg manually"
+	@echo "Installing libdave..."
+	@sh ./scripts/install-libdave.sh
 
 all: clean deps lint build ## Clean, download deps, lint, and build

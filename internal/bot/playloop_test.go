@@ -1,6 +1,7 @@
 package bot
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"reflect"
@@ -9,7 +10,6 @@ import (
 
 	"github.com/GrainedLotus515/gobard/internal/cache"
 	"github.com/GrainedLotus515/gobard/internal/player"
-	"github.com/bwmarrin/discordgo"
 )
 
 func TestPlayLoopSeekReplaysCurrentTrackBeforeAdvancing(t *testing.T) {
@@ -35,7 +35,7 @@ func TestPlayLoopSeekReplaysCurrentTrackBeforeAdvancing(t *testing.T) {
 	manager := player.NewManager()
 	guildID := "guild-seek"
 	p := manager.GetPlayer(guildID)
-	p.SetVoiceConnection(&discordgo.VoiceConnection{})
+	p.SetVoiceConnection(stubVoiceConn{})
 	p.Queue.Add(trackA)
 	p.Queue.Add(trackB)
 
@@ -86,6 +86,12 @@ func TestPlayLoopSeekReplaysCurrentTrackBeforeAdvancing(t *testing.T) {
 		t.Fatalf("play order = %v, want %v", playOrder, want)
 	}
 }
+
+type stubVoiceConn struct{}
+
+func (stubVoiceConn) SetSpeaking(context.Context, bool) error { return nil }
+func (stubVoiceConn) SendOpusFrame([]byte) error              { return nil }
+func (stubVoiceConn) Disconnect(context.Context) error        { return nil }
 
 func seedCacheEntry(t *testing.T, c *cache.Cache, url string) {
 	t.Helper()

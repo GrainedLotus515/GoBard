@@ -8,7 +8,7 @@ import (
 	"time"
 
 	"github.com/GrainedLotus515/gobard/internal/logger"
-	"github.com/bwmarrin/discordgo"
+	"github.com/GrainedLotus515/gobard/internal/voiceconn"
 )
 
 // EncoderInterface defines the interface for audio encoders
@@ -21,7 +21,7 @@ type EncoderInterface interface {
 type GuildPlayer struct {
 	GuildID         string
 	Queue           *Queue
-	VoiceConnection *discordgo.VoiceConnection
+	VoiceConnection voiceconn.Connection
 
 	// Playback state
 	Playing         bool
@@ -197,7 +197,7 @@ func (p *GuildPlayer) playTrack(track *Track, startOffset time.Duration) {
 
 	// Set speaking state BEFORE streaming
 	logger.PlaybackSpeakingStart()
-	if err := vc.Speaking(true); err != nil {
+	if err := vc.SetSpeaking(context.Background(), true); err != nil {
 		logger.PlaybackSpeakingError(err)
 	}
 
@@ -217,7 +217,7 @@ func (p *GuildPlayer) playTrack(track *Track, startOffset time.Duration) {
 			select {
 			case <-p.stopChan:
 				logger.PlaybackStopped(frameCount)
-				vc.Speaking(false)
+				_ = vc.SetSpeaking(context.Background(), false)
 				return
 			default:
 			}
@@ -239,7 +239,7 @@ func (p *GuildPlayer) playTrack(track *Track, startOffset time.Duration) {
 		select {
 		case <-p.stopChan:
 			logger.PlaybackStopped(frameCount)
-			vc.Speaking(false)
+			_ = vc.SetSpeaking(context.Background(), false)
 			return
 		default:
 		}
@@ -255,26 +255,19 @@ func (p *GuildPlayer) playTrack(track *Track, startOffset time.Duration) {
 			break
 		}
 
-		// Send frame to voice connection with timeout protection
-		select {
-		case vc.OpusSend <- frame:
-			frameCount++
-			if frameCount%1000 == 0 {
-				logger.PlaybackFramesMilestone(frameCount)
-			}
-		case <-time.After(5 * time.Second):
-			logger.Error("Timeout sending opus frame, voice connection may be dead")
+		if err := vc.SendOpusFrame(frame); err != nil {
+			logger.Error("Failed sending opus frame", "err", err)
 			return
-		case <-p.stopChan:
-			logger.PlaybackStopped(frameCount)
-			vc.Speaking(false)
-			return
+		}
+		frameCount++
+		if frameCount%1000 == 0 {
+			logger.PlaybackFramesMilestone(frameCount)
 		}
 	}
 
 	// Clear speaking state
 	logger.PlaybackSpeakingStop()
-	vc.Speaking(false)
+	_ = vc.SetSpeaking(context.Background(), false)
 
 	// Cleanup
 	p.mu.Lock()
@@ -400,7 +393,7 @@ func (p *GuildPlayer) RestoreVolume() {
 }
 
 // SetVoiceConnection safely sets the voice connection reference.
-func (p *GuildPlayer) SetVoiceConnection(vc *discordgo.VoiceConnection) {
+func (p *GuildPlayer) SetVoiceConnection(vc voiceconn.Connection) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.VoiceConnection = vc

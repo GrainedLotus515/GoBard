@@ -3,12 +3,15 @@ package bot
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/GrainedLotus515/gobard/internal/cache"
 	"github.com/GrainedLotus515/gobard/internal/config"
+	"github.com/GrainedLotus515/gobard/internal/discordvoice"
 	"github.com/GrainedLotus515/gobard/internal/logger"
 	"github.com/GrainedLotus515/gobard/internal/player"
 	"github.com/GrainedLotus515/gobard/internal/spotify"
+	"github.com/GrainedLotus515/gobard/internal/voiceconn"
 	"github.com/GrainedLotus515/gobard/internal/youtube"
 	"github.com/bwmarrin/discordgo"
 )
@@ -18,6 +21,7 @@ type Bot struct {
 	Session       *discordgo.Session
 	Config        *config.Config
 	PlayerManager *player.Manager
+	VoiceManager  *discordvoice.Manager
 	Cache         *cache.Cache
 	YouTube       *youtube.Client
 	Spotify       *spotify.Client
@@ -66,6 +70,7 @@ func New(cfg *config.Config) (*Bot, error) {
 	session.AddHandler(bot.ready)
 	session.AddHandler(bot.interactionCreate)
 	session.AddHandler(bot.voiceStateUpdate)
+	session.AddHandler(bot.voiceServerUpdate)
 
 	// Set intents
 	session.Identify.Intents = discordgo.IntentsGuilds |
@@ -81,12 +86,24 @@ func (b *Bot) Start() error {
 		return fmt.Errorf("failed to open Discord session: %w", err)
 	}
 
+	voiceManager, err := discordvoice.NewManager(b.Session)
+	if err != nil {
+		_ = b.Session.Close()
+		return fmt.Errorf("failed to initialize voice manager: %w", err)
+	}
+	b.VoiceManager = voiceManager
+
 	logger.Info("🤖 Bot is now running. Press CTRL-C to exit.")
 	return nil
 }
 
 // Stop stops the bot
 func (b *Bot) Stop() error {
+	if b.VoiceManager != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		b.VoiceManager.Close(ctx)
+		cancel()
+	}
 	return b.Session.Close()
 }
 
@@ -134,6 +151,10 @@ func (b *Bot) ready(s *discordgo.Session, event *discordgo.Ready) {
 
 // voiceStateUpdate handles voice state changes
 func (b *Bot) voiceStateUpdate(s *discordgo.Session, vsu *discordgo.VoiceStateUpdate) {
+	if b.VoiceManager != nil {
+		b.VoiceManager.HandleVoiceStateUpdate(vsu)
+	}
+
 	// Check if this is the bot being disconnected from voice
 	if vsu.UserID == s.State.User.ID {
 		if vsu.ChannelID == "" {
@@ -168,6 +189,12 @@ func (b *Bot) voiceStateUpdate(s *discordgo.Session, vsu *discordgo.VoiceStateUp
 	}
 }
 
+func (b *Bot) voiceServerUpdate(_ *discordgo.Session, update *discordgo.VoiceServerUpdate) {
+	if b.VoiceManager != nil {
+		b.VoiceManager.HandleVoiceServerUpdate(update)
+	}
+}
+
 // GetVoiceChannel gets the voice channel a user is in
 func (b *Bot) GetVoiceChannel(guildID, userID string) (string, error) {
 	guild, err := b.Session.State.Guild(guildID)
@@ -185,19 +212,20 @@ func (b *Bot) GetVoiceChannel(guildID, userID string) (string, error) {
 }
 
 // JoinVoiceChannel joins a voice channel
-func (b *Bot) JoinVoiceChannel(guildID, channelID string) (*discordgo.VoiceConnection, error) {
+func (b *Bot) JoinVoiceChannel(guildID, channelID string) (voiceconn.Connection, error) {
 	// Join voice channel: mute=false, deaf=false
 	// Bot needs to hear users for voice ducking feature
-	ctx := context.Background()
-	vc, err := b.Session.ChannelVoiceJoin(ctx, guildID, channelID, false, false)
-	if err != nil {
-		return nil, fmt.Errorf("failed to join voice channel: %w", err)
+	if b.VoiceManager == nil {
+		return nil, fmt.Errorf("voice manager is not initialized")
 	}
 
-	// Wait for voice connection to be ready
-	// This ensures the encryption handshake is complete
-	if err := vc.Speaking(true); err != nil {
-		logger.Warn("Failed to set speaking state", "err", err)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	vc, err := b.VoiceManager.Join(ctx, guildID, channelID, false, false)
+	if err != nil {
+		logger.VoiceConnectionError(err)
+		return nil, wrapVoiceJoinError(err)
 	}
 
 	return vc, nil

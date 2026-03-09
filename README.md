@@ -100,6 +100,7 @@ GoBard
 | Component | Minimum Version |
 |-----------|-----------------|
 | Go | 1.21+ |
+| libdave | 1.1.0 |
 | FFmpeg | 4.1+ |
 | yt‑dlp | Latest |
 
@@ -111,10 +112,15 @@ GoBard
 git clone https://git.grainedlotus.com/GrainedLotus515/GoBard.git
 cd GoBard
 go mod download
+sh ./scripts/install-libdave.sh
+export PKG_CONFIG_PATH="$HOME/.local/lib/pkgconfig:$PKG_CONFIG_PATH"
+export LD_LIBRARY_PATH="$HOME/.local/lib:$LD_LIBRARY_PATH"
 cp .env.example .env   # Edit with your credentials
 go build -o gobard ./cmd/gobard
 ./gobard
 ```
+
+`libdave` is required for Discord voice connections because non-Stage voice channels now require DAVE/E2EE.
 
 #### Docker
 
@@ -279,6 +285,7 @@ go vet ./...
 | Issue | Likely Cause | Fix |
 |-------|--------------|-----|
 | Bot does not join a voice channel | Missing **Connect** or **Speak** permissions | Grant permissions in the server channel |
+| Bot fails to join with close code `4017` | `libdave` missing or not discoverable via `pkg-config` | Run `sh ./scripts/install-libdave.sh` and export `PKG_CONFIG_PATH` / `LD_LIBRARY_PATH` |
 | No audio output | FFmpeg or yt‑dlp missing | Install `ffmpeg` and `yt-dlp` (`sudo apt install ffmpeg yt-dlp`) |
 | YouTube search fails | No API key or quota exceeded | Add `YOUTUBE_API_KEY` |
 | Spotify commands fail | Missing credentials | Set `SPOTIFY_CLIENT_ID` & `SPOTIFY_CLIENT_SECRET` |

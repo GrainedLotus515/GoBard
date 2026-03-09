@@ -9,6 +9,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/GrainedLotus515/gobard/internal/discordvoice"
 	"github.com/bwmarrin/discordgo"
 	"github.com/joho/godotenv"
 )
@@ -28,8 +29,22 @@ func main() {
 		log.Fatal("Error creating Discord session:", err)
 	}
 
+	var voiceManager *discordvoice.Manager
+
 	dg.AddHandler(func(s *discordgo.Session, r *discordgo.Ready) {
 		log.Printf("Logged in as %s", r.User.Username)
+	})
+
+	dg.AddHandler(func(_ *discordgo.Session, update *discordgo.VoiceStateUpdate) {
+		if voiceManager != nil {
+			voiceManager.HandleVoiceStateUpdate(update)
+		}
+	})
+
+	dg.AddHandler(func(_ *discordgo.Session, update *discordgo.VoiceServerUpdate) {
+		if voiceManager != nil {
+			voiceManager.HandleVoiceServerUpdate(update)
+		}
 	})
 
 	dg.AddHandler(func(s *discordgo.Session, m *discordgo.MessageCreate) {
@@ -57,9 +72,14 @@ func main() {
 			s.ChannelMessageSend(m.ChannelID, "Attempting to join voice...")
 			log.Printf("Joining voice channel %s", channelID)
 
+			if voiceManager == nil {
+				s.ChannelMessageSend(m.ChannelID, "Voice manager is not initialized yet")
+				return
+			}
+
 			// Try to join with context
 			ctx := context.Background()
-			vc, err := s.ChannelVoiceJoin(ctx, m.GuildID, channelID, false, false)
+			vc, err := voiceManager.Join(ctx, m.GuildID, channelID, false, false)
 			if err != nil {
 				log.Printf("Error joining voice: %v", err)
 				s.ChannelMessageSend(m.ChannelID, fmt.Sprintf("❌ Failed to join: %v", err))
@@ -85,6 +105,11 @@ func main() {
 		log.Fatal("Error opening connection:", err)
 	}
 	defer dg.Close()
+
+	voiceManager, err = discordvoice.NewManager(dg)
+	if err != nil {
+		log.Fatal("Error creating voice manager:", err)
+	}
 
 	log.Println("Bot is running. Type !testvoice in a channel while in a voice channel to test.")
 	log.Println("Press CTRL-C to exit.")
