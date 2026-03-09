@@ -6,6 +6,7 @@ import (
 	"io"
 	"reflect"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -22,6 +23,9 @@ func TestSeekSignalsPlaybackRestart(t *testing.T) {
 		t.Fatal("Queue.Next() returned nil, expected current track")
 	}
 
+	session := newPlaybackSession()
+	p.activePlayback = session
+	p.lastPlayback = session
 	p.Playing = true
 
 	if err := p.Seek(30 * time.Second); err != nil {
@@ -51,9 +55,9 @@ func TestSeekSignalsPlaybackRestart(t *testing.T) {
 	}
 
 	select {
-	case <-p.stopChan:
+	case <-session.stop:
 	default:
-		t.Fatal("seek should signal stop channel")
+		t.Fatal("seek should stop the active playback session")
 	}
 }
 
@@ -68,6 +72,11 @@ func TestStopClearsSeekStateAndPosition(t *testing.T) {
 	if got := p.Queue.Next(); got == nil {
 		t.Fatal("Queue.Next() returned nil, expected current track")
 	}
+
+	session := newPlaybackSession()
+	p.activePlayback = session
+	p.lastPlayback = session
+	p.Playing = true
 
 	if err := p.Seek(15 * time.Second); err != nil {
 		t.Fatalf("Seek() error = %v", err)
@@ -87,6 +96,36 @@ func TestStopClearsSeekStateAndPosition(t *testing.T) {
 	}
 }
 
+func TestWaitForCompletionUsesCurrentPlaybackSession(t *testing.T) {
+	p := NewManager().GetPlayer("guild-wait")
+
+	stale := newPlaybackSession()
+	current := newPlaybackSession()
+	p.activePlayback = current
+	p.lastPlayback = current
+	stale.signalDone()
+
+	done := make(chan struct{})
+	go func() {
+		p.WaitForCompletion()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		t.Fatal("WaitForCompletion() returned before the active session completed")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	current.signalDone()
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("WaitForCompletion() did not return after the active session completed")
+	}
+}
+
 func TestGetCurrentPositionAdvancesWithPlaybackClock(t *testing.T) {
 	p := NewManager().GetPlayer("guild-3")
 	p.CurrentPosition = 5 * time.Second
@@ -96,6 +135,55 @@ func TestGetCurrentPositionAdvancesWithPlaybackClock(t *testing.T) {
 	got := p.GetCurrentPosition()
 	if got < 6400*time.Millisecond || got > 7600*time.Millisecond {
 		t.Fatalf("GetCurrentPosition() = %v, want approximately 6.5s", got)
+	}
+}
+
+func TestPlayTrackStopsBeforeSendingBufferedFrame(t *testing.T) {
+	originalNewCustomEncoder := newCustomEncoder
+	originalSleepVoiceReady := sleepVoiceReady
+	t.Cleanup(func() {
+		newCustomEncoder = originalNewCustomEncoder
+		sleepVoiceReady = originalSleepVoiceReady
+	})
+
+	p := NewManager().GetPlayer("guild-stop-buffered")
+	vc := &stubVoiceConnection{}
+	p.SetVoiceConnection(vc)
+
+	encoder := &stubEncoder{
+		frames: [][]byte{
+			[]byte("frame-1"),
+			[]byte("frame-2"),
+		},
+		onFrame: func(nextIndex int) {
+			if nextIndex == 2 {
+				p.Stop()
+			}
+		},
+	}
+	newCustomEncoder = func(string, int, int, time.Duration) (EncoderInterface, error) {
+		return encoder, nil
+	}
+	sleepVoiceReady = func() {}
+
+	session := newPlaybackSession()
+	p.activePlayback = session
+	p.lastPlayback = session
+	p.Playing = true
+	p.playbackStartedAt = time.Now()
+
+	track := &Track{
+		Title:     "buffered-stop",
+		LocalPath: "/tmp/buffered-stop.opus",
+	}
+
+	p.playTrack(session, track, 0)
+
+	if got := len(vc.frames); got != 1 {
+		t.Fatalf("sent frames = %d, want 1", got)
+	}
+	if !encoder.cleaned {
+		t.Fatal("encoder Cleanup() was not called")
 	}
 }
 
@@ -146,16 +234,18 @@ func TestPlayTrackPacesOpusFrames(t *testing.T) {
 	vc := &stubVoiceConnection{}
 	p.SetVoiceConnection(vc)
 
+	session := newPlaybackSession()
+	p.activePlayback = session
+	p.lastPlayback = session
+	p.Playing = true
+	p.playbackStartedAt = time.Now()
+
 	track := &Track{
 		Title:     "paced",
 		LocalPath: "/tmp/paced.opus",
 	}
-	p.Queue.Add(track)
 
-	if err := p.Play(); err != nil {
-		t.Fatalf("Play() error = %v", err)
-	}
-	p.WaitForCompletion()
+	p.playTrack(session, track, 0)
 
 	if got := len(vc.frames); got != 3 {
 		t.Fatalf("sent frames = %d, want 3", got)
@@ -281,6 +371,109 @@ func TestPlaybackSignalsCloseDoneOnEncoderFailureWithoutStarted(t *testing.T) {
 	}
 }
 
+func TestLatePlaybackCannotClearNewerSessionState(t *testing.T) {
+	originalNewCustomEncoder := newCustomEncoder
+	originalSleepVoiceReady := sleepVoiceReady
+	t.Cleanup(func() {
+		newCustomEncoder = originalNewCustomEncoder
+		sleepVoiceReady = originalSleepVoiceReady
+	})
+
+	encoder1 := newBlockingEncoder()
+	newCustomEncoder = func(string, int, int, time.Duration) (EncoderInterface, error) {
+		return encoder1, nil
+	}
+	sleepVoiceReady = func() {}
+
+	p := NewManager().GetPlayer("guild-late-finish")
+	p.SetVoiceConnection(&stubVoiceConnection{})
+
+	session1 := newPlaybackSession()
+	p.activePlayback = session1
+	p.lastPlayback = session1
+	p.Playing = true
+	p.playbackStartedAt = time.Now()
+
+	done1 := make(chan struct{})
+	go func() {
+		p.playTrack(session1, &Track{Title: "first", LocalPath: "/tmp/first.opus"}, 0)
+		close(done1)
+	}()
+
+	select {
+	case <-encoder1.ready:
+	case <-time.After(time.Second):
+		t.Fatal("first playback did not reach encoder read")
+	}
+
+	session2 := newPlaybackSession()
+	encoder2 := &stubEncoder{}
+	if !session2.bindEncoder(encoder2) {
+		t.Fatal("failed to bind encoder to second session")
+	}
+
+	p.mu.Lock()
+	p.activePlayback = session2
+	p.lastPlayback = session2
+	p.Playing = true
+	p.playbackStartedAt = time.Now()
+	p.mu.Unlock()
+
+	encoder1.release()
+
+	select {
+	case <-done1:
+	case <-time.After(time.Second):
+		t.Fatal("first playback did not finish")
+	}
+
+	p.mu.RLock()
+	active := p.activePlayback
+	playing := p.Playing
+	p.mu.RUnlock()
+
+	if active != session2 {
+		t.Fatal("late playback cleared the newer active session")
+	}
+	if !playing {
+		t.Fatal("late playback cleared newer playback state")
+	}
+	if encoder2.cleaned {
+		t.Fatal("late playback cleaned the newer session encoder")
+	}
+}
+
+func TestStartLoopIfIdleIsAtomic(t *testing.T) {
+	p := NewManager().GetPlayer("guild-loop")
+
+	var (
+		successes atomic.Int32
+		wg        sync.WaitGroup
+		start     = make(chan struct{})
+	)
+
+	for range 32 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			if p.StartLoopIfIdle() {
+				successes.Add(1)
+			}
+		}()
+	}
+
+	close(start)
+	wg.Wait()
+
+	if got := successes.Load(); got != 1 {
+		t.Fatalf("successful loop starts = %d, want 1", got)
+	}
+	if !p.IsLoopRunning() {
+		t.Fatal("loop should be marked as running")
+	}
+}
+
 func TestWaitForCompletionUnblocksWhenDoneChannelCloses(t *testing.T) {
 	originalNewCustomEncoder := newCustomEncoder
 	originalSleepVoiceReady := sleepVoiceReady
@@ -298,7 +491,7 @@ func TestWaitForCompletionUnblocksWhenDoneChannelCloses(t *testing.T) {
 	}
 	sleepVoiceReady = func() {}
 
-	p := NewManager().GetPlayer("guild-wait")
+	p := NewManager().GetPlayer("guild-wait-unblock")
 	p.SetVoiceConnection(&stubVoiceConnection{})
 	p.Queue.Add(&Track{Title: "wait-track", LocalPath: "/tmp/wait.opus"})
 
@@ -325,12 +518,16 @@ type stubEncoder struct {
 	cleaned    bool
 	frameDelay time.Duration
 	advance    func(time.Duration)
+	onFrame    func(nextIndex int)
 	cleanupMu  sync.Mutex
 }
 
 func (e *stubEncoder) OpusFrame() ([]byte, error) {
 	if e.index >= len(e.frames) {
 		return nil, io.EOF
+	}
+	if e.onFrame != nil {
+		e.onFrame(e.index + 1)
 	}
 	if e.advance != nil && e.frameDelay > 0 {
 		e.advance(e.frameDelay)
@@ -345,6 +542,44 @@ func (e *stubEncoder) Cleanup() error {
 	defer e.cleanupMu.Unlock()
 	e.cleaned = true
 	return nil
+}
+
+type blockingEncoder struct {
+	ready       chan struct{}
+	releaseCh   chan struct{}
+	readyOnce   sync.Once
+	releaseOnce sync.Once
+	cleanupMu   sync.Mutex
+	cleaned     bool
+}
+
+func newBlockingEncoder() *blockingEncoder {
+	return &blockingEncoder{
+		ready:     make(chan struct{}),
+		releaseCh: make(chan struct{}),
+	}
+}
+
+func (e *blockingEncoder) OpusFrame() ([]byte, error) {
+	e.readyOnce.Do(func() {
+		close(e.ready)
+	})
+	<-e.releaseCh
+	return nil, io.EOF
+}
+
+func (e *blockingEncoder) Cleanup() error {
+	e.cleanupMu.Lock()
+	e.cleaned = true
+	e.cleanupMu.Unlock()
+	e.release()
+	return nil
+}
+
+func (e *blockingEncoder) release() {
+	e.releaseOnce.Do(func() {
+		close(e.releaseCh)
+	})
 }
 
 type stubVoiceConnection struct {

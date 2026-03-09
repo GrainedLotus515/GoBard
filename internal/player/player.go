@@ -33,6 +33,82 @@ type EncoderInterface interface {
 	Cleanup() error
 }
 
+type playbackSession struct {
+	stop    chan struct{}
+	started chan struct{}
+	done    chan struct{}
+
+	stopOnce    sync.Once
+	startedOnce sync.Once
+	doneOnce    sync.Once
+
+	mu      sync.Mutex
+	encoder EncoderInterface
+}
+
+func newPlaybackSession() *playbackSession {
+	return &playbackSession{
+		stop:    make(chan struct{}),
+		started: make(chan struct{}),
+		done:    make(chan struct{}),
+	}
+}
+
+func (s *playbackSession) stopPlayback() {
+	s.stopOnce.Do(func() {
+		close(s.stop)
+	})
+}
+
+func (s *playbackSession) signalStarted() {
+	s.startedOnce.Do(func() {
+		close(s.started)
+	})
+}
+
+func (s *playbackSession) signalDone() {
+	s.doneOnce.Do(func() {
+		close(s.done)
+	})
+}
+
+func (s *playbackSession) isStopped() bool {
+	select {
+	case <-s.stop:
+		return true
+	default:
+		return false
+	}
+}
+
+func (s *playbackSession) bindEncoder(encoder EncoderInterface) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.isStopped() {
+		return false
+	}
+
+	s.encoder = encoder
+	return true
+}
+
+func (s *playbackSession) cleanupEncoder() {
+	s.mu.Lock()
+	encoder := s.encoder
+	s.encoder = nil
+	s.mu.Unlock()
+
+	if encoder != nil {
+		_ = encoder.Cleanup()
+	}
+}
+
+func (s *playbackSession) stopAndCleanup() {
+	s.stopPlayback()
+	s.cleanupEncoder()
+}
+
 // GuildPlayer manages playback for a single guild
 type GuildPlayer struct {
 	GuildID         string
@@ -51,17 +127,11 @@ type GuildPlayer struct {
 	ReduceOnVoiceTarget int
 	OriginalVolume      int
 
-	// Encoder
-	stopChan        chan bool
-	doneChan        chan struct{}
-	startedChan     chan struct{}
-	doneSignaled    bool
-	startedSignaled bool
-	encoder         EncoderInterface
-
 	seekRequested        bool
 	requestedStartOffset time.Duration
 	playbackStartedAt    time.Time
+	activePlayback       *playbackSession
+	lastPlayback         *playbackSession
 
 	mu sync.RWMutex
 }
@@ -89,12 +159,9 @@ func (m *Manager) GetPlayer(guildID string) *GuildPlayer {
 	}
 
 	player := &GuildPlayer{
-		GuildID:     guildID,
-		Queue:       NewQueue(),
-		Volume:      100,
-		stopChan:    make(chan bool, 1),
-		doneChan:    make(chan struct{}),
-		startedChan: make(chan struct{}),
+		GuildID: guildID,
+		Queue:   NewQueue(),
+		Volume:  100,
 	}
 
 	m.players[guildID] = player
@@ -128,6 +195,10 @@ func (p *GuildPlayer) Play() error {
 		return nil
 	}
 
+	if p.activePlayback != nil {
+		return fmt.Errorf("playback session already active")
+	}
+
 	track := p.Queue.Current()
 	if track == nil {
 		track = p.Queue.Next()
@@ -142,34 +213,57 @@ func (p *GuildPlayer) Play() error {
 	p.requestedStartOffset = 0
 	p.CurrentPosition = startOffset
 	p.playbackStartedAt = time.Now()
-	p.startedChan = make(chan struct{})
-	p.doneChan = make(chan struct{})
-	p.startedSignaled = false
-	p.doneSignaled = false
 
-	// Drain any stale stop signal from previous playback
-	select {
-	case <-p.stopChan:
-	default:
-	}
+	session := newPlaybackSession()
+	p.activePlayback = session
+	p.lastPlayback = session
 
-	startedChan := p.startedChan
-	doneChan := p.doneChan
-
-	// Start playback in goroutine
-	go p.playTrack(track, startOffset, startedChan, doneChan)
+	go p.playTrack(session, track, startOffset)
 
 	return nil
 }
 
 // playTrack handles the actual playback of a track
-func (p *GuildPlayer) playTrack(track *Track, startOffset time.Duration, startedChan chan struct{}, doneChan chan struct{}) {
+func (p *GuildPlayer) playTrack(session *playbackSession, track *Track, startOffset time.Duration) {
 	logger.PlaybackStart(track.Title)
 
-	// Ensure completion is always signaled, regardless of exit path
+	var (
+		vc           voiceconn.Connection
+		encoder      EncoderInterface
+		encoderBound bool
+		speaking     bool
+		frameCount   int
+	)
+
 	defer func() {
-		p.signalPlaybackDone(startedChan, doneChan)
+		if speaking && vc != nil {
+			logger.PlaybackSpeakingStop()
+			_ = vc.SetSpeaking(context.Background(), false)
+		}
+
+		if encoderBound {
+			session.cleanupEncoder()
+		} else if encoder != nil {
+			_ = encoder.Cleanup()
+		}
+
+		p.mu.Lock()
+		if p.activePlayback == session {
+			p.CurrentPosition = p.currentPositionLocked()
+			p.Playing = false
+			p.Paused = false
+			p.playbackStartedAt = time.Time{}
+			p.activePlayback = nil
+		}
+		p.mu.Unlock()
+
+		session.signalDone()
 	}()
+
+	if session.isStopped() {
+		logger.PlaybackStopped(frameCount)
+		return
+	}
 
 	p.mu.Lock()
 	if p.VoiceConnection == nil {
@@ -177,20 +271,20 @@ func (p *GuildPlayer) playTrack(track *Track, startOffset time.Duration, started
 		p.mu.Unlock()
 		return
 	}
-	vc := p.VoiceConnection
+	vc = p.VoiceConnection
 	p.mu.Unlock()
 
-	// Create appropriate encoder based on whether we have a cached file
-	var encoder EncoderInterface
-	var err error
+	if session.isStopped() {
+		logger.PlaybackStopped(frameCount)
+		return
+	}
 
+	var err error
 	if track.LocalPath != "" {
-		// Use cached file
 		logger.Info("Using cached file", "path", track.LocalPath)
 		logger.PlaybackEncodingStart(track.LocalPath)
 		encoder, err = newCustomEncoder(track.LocalPath, 48000, 2, startOffset)
 	} else {
-		// Stream directly from URL
 		logger.Info("Streaming from URL", "url", track.URL)
 		logger.PlaybackEncodingStart(track.URL)
 		encoder, err = newStreamingEncoder(track.URL, track.StreamURL, 48000, 2, startOffset)
@@ -198,53 +292,53 @@ func (p *GuildPlayer) playTrack(track *Track, startOffset time.Duration, started
 
 	if err != nil {
 		logger.PlaybackEncodingError(err)
-		p.mu.Lock()
-		p.Playing = false
-		p.mu.Unlock()
 		return
 	}
+
+	if session.isStopped() {
+		logger.PlaybackStopped(frameCount)
+		return
+	}
+
+	if !session.bindEncoder(encoder) {
+		logger.PlaybackStopped(frameCount)
+		return
+	}
+	encoderBound = true
 	logger.PlaybackEncodingSuccess()
 
-	p.mu.Lock()
-	p.encoder = encoder
-	p.mu.Unlock()
-
-	// Wait for voice connection to be ready
 	logger.PlaybackVoiceWaiting()
-	sleepVoiceReady() // Give voice connection time to stabilize before streaming begins.
+	sleepVoiceReady()
 
-	// Set speaking state BEFORE streaming
+	if session.isStopped() {
+		logger.PlaybackStopped(frameCount)
+		return
+	}
+
 	logger.PlaybackSpeakingStart()
 	if err := vc.SetSpeaking(context.Background(), true); err != nil {
 		logger.PlaybackSpeakingError(err)
 	}
+	speaking = true
 
-	// Manual frame sending
 	logger.PlaybackFrameStart()
 
-	frameCount := 0
-	playbackStarted := false
 	nextFrameDeadline := nowOpusFrame()
 	for {
-		// Check for pause
 		p.mu.RLock()
 		paused := p.Paused
 		p.mu.RUnlock()
 
 		if paused {
-			time.Sleep(100 * time.Millisecond)
-			// Check for stop during pause
 			select {
-			case <-p.stopChan:
+			case <-session.stop:
 				logger.PlaybackStopped(frameCount)
-				_ = vc.SetSpeaking(context.Background(), false)
 				return
-			default:
+			case <-time.After(100 * time.Millisecond):
 			}
 			continue
 		}
 
-		// Check voice connection periodically (every 100 frames ≈ 2 seconds)
 		if frameCount > 0 && frameCount%100 == 0 {
 			p.mu.RLock()
 			vcValid := p.VoiceConnection != nil
@@ -255,16 +349,11 @@ func (p *GuildPlayer) playTrack(track *Track, startOffset time.Duration, started
 			}
 		}
 
-		// Check for stop signal
-		select {
-		case <-p.stopChan:
+		if session.isStopped() {
 			logger.PlaybackStopped(frameCount)
-			_ = vc.SetSpeaking(context.Background(), false)
 			return
-		default:
 		}
 
-		// Read opus frame
 		frame, err := encoder.OpusFrame()
 		if err != nil {
 			if err != io.EOF {
@@ -275,18 +364,22 @@ func (p *GuildPlayer) playTrack(track *Track, startOffset time.Duration, started
 			break
 		}
 
+		if session.isStopped() {
+			logger.PlaybackStopped(frameCount)
+			return
+		}
+
 		if err := vc.SendOpusFrame(frame); err != nil {
 			logger.Error("Failed sending opus frame", "err", err)
 			return
 		}
-		if !playbackStarted {
-			p.signalPlaybackStarted(startedChan)
-			playbackStarted = true
-		}
+
+		session.signalStarted()
 		frameCount++
 		if frameCount%1000 == 0 {
 			logger.PlaybackFramesMilestone(frameCount)
 		}
+
 		nextFrameDeadline = nextFrameDeadline.Add(opusFrameInterval)
 		if delay := nextFrameDeadline.Sub(nowOpusFrame()); delay > 0 {
 			sleepOpusFrame(delay)
@@ -294,32 +387,24 @@ func (p *GuildPlayer) playTrack(track *Track, startOffset time.Duration, started
 			nextFrameDeadline = nowOpusFrame()
 		}
 	}
-
-	// Clear speaking state
-	logger.PlaybackSpeakingStop()
-	_ = vc.SetSpeaking(context.Background(), false)
-
-	// Cleanup
-	p.mu.Lock()
-	if p.encoder != nil {
-		p.encoder.Cleanup()
-		p.encoder = nil
-	}
-	p.CurrentPosition = p.currentPositionLocked()
-	p.Playing = false
-	p.playbackStartedAt = time.Time{}
-	p.mu.Unlock()
 }
 
-// WaitForCompletion waits for the current track to finish
+// WaitForCompletion waits for the current track to finish.
 func (p *GuildPlayer) WaitForCompletion() {
 	p.mu.RLock()
-	doneChan := p.doneChan
+	session := p.activePlayback
+	if session == nil {
+		session = p.lastPlayback
+	}
 	p.mu.RUnlock()
 
+	if session == nil {
+		return
+	}
+
 	select {
-	case <-doneChan:
-	case <-time.After(3 * time.Hour): // Max track length safety
+	case <-session.done:
+	case <-time.After(3 * time.Hour):
 		logger.Info("Track completion timeout reached, continuing")
 	}
 }
@@ -327,8 +412,20 @@ func (p *GuildPlayer) WaitForCompletion() {
 // PlaybackSignals returns channels for playback start and completion notifications.
 func (p *GuildPlayer) PlaybackSignals() (<-chan struct{}, <-chan struct{}) {
 	p.mu.RLock()
-	defer p.mu.RUnlock()
-	return p.startedChan, p.doneChan
+	session := p.activePlayback
+	if session == nil {
+		session = p.lastPlayback
+	}
+	p.mu.RUnlock()
+
+	if session != nil {
+		return session.started, session.done
+	}
+
+	started := make(chan struct{})
+	done := make(chan struct{})
+	close(done)
+	return started, done
 }
 
 // Pause pauses playback
@@ -357,40 +454,46 @@ func (p *GuildPlayer) Resume() {
 // Stop stops playback completely
 func (p *GuildPlayer) Stop() {
 	p.mu.Lock()
-	defer p.mu.Unlock()
-
 	p.seekRequested = false
-	p.stopPlaybackLocked(true)
+	session := p.stopPlaybackLocked(true)
+	p.mu.Unlock()
+
+	if session != nil {
+		session.stopAndCleanup()
+	}
 }
 
 // Skip skips to the next track
 func (p *GuildPlayer) Skip() *Track {
 	p.Stop()
-
-	// Return what will play next (peek without advancing)
-	// Note: The playLoop will handle actually advancing the queue
 	return p.Queue.Peek()
 }
 
 // Seek seeks to a position in the current track
 func (p *GuildPlayer) Seek(position time.Duration) error {
 	p.mu.Lock()
-	defer p.mu.Unlock()
 
 	track := p.Queue.Current()
 	if track == nil {
+		p.mu.Unlock()
 		return fmt.Errorf("no track currently playing")
 	}
 
 	if position < 0 || (!track.IsLive && position > track.Duration) {
+		p.mu.Unlock()
 		return fmt.Errorf("invalid seek position")
 	}
 
 	p.CurrentPosition = position
 	p.seekRequested = true
 	p.requestedStartOffset = position
-	p.stopPlaybackLocked(false)
+	session := p.stopPlaybackLocked(false)
 	p.CurrentPosition = position
+	p.mu.Unlock()
+
+	if session != nil {
+		session.stopAndCleanup()
+	}
 
 	return nil
 }
@@ -447,13 +550,6 @@ func (p *GuildPlayer) GetCurrentPosition() time.Duration {
 	return p.currentPositionLocked()
 }
 
-// GetPlaybackState safely returns the current playback flags and position.
-func (p *GuildPlayer) GetPlaybackState() (playing, paused bool, position time.Duration) {
-	p.mu.RLock()
-	defer p.mu.RUnlock()
-	return p.Playing, p.Paused, p.currentPositionLocked()
-}
-
 // SetVoiceReductionEnabled toggles volume ducking on voice activity.
 func (p *GuildPlayer) SetVoiceReductionEnabled(enabled bool) {
 	p.mu.Lock()
@@ -492,18 +588,35 @@ func (p *GuildPlayer) ConsumeSeekRequest() bool {
 
 // Disconnect disconnects from voice channel
 func (p *GuildPlayer) Disconnect() error {
-	p.Stop()
-
 	p.mu.Lock()
-	defer p.mu.Unlock()
+	p.seekRequested = false
+	session := p.stopPlaybackLocked(true)
+	vc := p.VoiceConnection
+	p.VoiceConnection = nil
+	p.mu.Unlock()
 
-	if p.VoiceConnection != nil {
-		err := p.VoiceConnection.Disconnect(context.Background())
-		p.VoiceConnection = nil
-		return err
+	if session != nil {
+		session.stopAndCleanup()
+	}
+
+	if vc != nil {
+		return vc.Disconnect(context.Background())
 	}
 
 	return nil
+}
+
+// StartLoopIfIdle marks the playback loop as running if it was previously idle.
+func (p *GuildPlayer) StartLoopIfIdle() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if p.LoopRunning {
+		return false
+	}
+
+	p.LoopRunning = true
+	return true
 }
 
 // IsLoopRunning safely checks if the playback loop is running
@@ -534,7 +647,7 @@ func (p *GuildPlayer) ClearVoiceConnection() {
 	p.VoiceConnection = nil
 }
 
-func (p *GuildPlayer) stopPlaybackLocked(resetPosition bool) {
+func (p *GuildPlayer) stopPlaybackLocked(resetPosition bool) *playbackSession {
 	p.CurrentPosition = p.currentPositionLocked()
 	p.Playing = false
 	p.Paused = false
@@ -544,53 +657,7 @@ func (p *GuildPlayer) stopPlaybackLocked(resetPosition bool) {
 		p.requestedStartOffset = 0
 	}
 
-	// Stop streaming
-	select {
-	case p.stopChan <- true:
-	default:
-	}
-
-	// Cleanup encoder
-	if p.encoder != nil {
-		p.encoder.Cleanup()
-		p.encoder = nil
-	}
-}
-
-func (p *GuildPlayer) signalPlaybackStarted(startedChan chan struct{}) {
-	if startedChan == nil {
-		return
-	}
-
-	p.mu.Lock()
-	defer p.mu.Unlock()
-
-	if p.startedChan == startedChan {
-		if p.startedSignaled {
-			return
-		}
-		p.startedSignaled = true
-	}
-
-	close(startedChan)
-}
-
-func (p *GuildPlayer) signalPlaybackDone(startedChan chan struct{}, doneChan chan struct{}) {
-	if doneChan == nil {
-		return
-	}
-
-	p.mu.Lock()
-	defer p.mu.Unlock()
-
-	if p.doneChan == doneChan {
-		if p.doneSignaled {
-			return
-		}
-		p.doneSignaled = true
-	}
-
-	close(doneChan)
+	return p.activePlayback
 }
 
 func (p *GuildPlayer) currentPositionLocked() time.Duration {

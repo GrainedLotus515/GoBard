@@ -68,9 +68,8 @@ func (b *Bot) handlePlay(s *discordgo.Session, i *discordgo.InteractionCreate) e
 		p.Queue.Add(track)
 	}
 
-	// Start playing if playback loop is not already running
-	if !p.IsLoopRunning() {
-		p.SetLoopRunning(true)
+	// Start playing if playback loop is not already running.
+	if p.StartLoopIfIdle() {
 		go b.playLoop(i.GuildID, i.ChannelID)
 	}
 
