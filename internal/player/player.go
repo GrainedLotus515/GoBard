@@ -52,9 +52,12 @@ type GuildPlayer struct {
 	OriginalVolume      int
 
 	// Encoder
-	stopChan chan bool
-	doneChan chan bool
-	encoder  EncoderInterface
+	stopChan        chan bool
+	doneChan        chan struct{}
+	startedChan     chan struct{}
+	doneSignaled    bool
+	startedSignaled bool
+	encoder         EncoderInterface
 
 	seekRequested        bool
 	requestedStartOffset time.Duration
@@ -86,11 +89,12 @@ func (m *Manager) GetPlayer(guildID string) *GuildPlayer {
 	}
 
 	player := &GuildPlayer{
-		GuildID:  guildID,
-		Queue:    NewQueue(),
-		Volume:   100,
-		stopChan: make(chan bool, 1),
-		doneChan: make(chan bool, 1),
+		GuildID:     guildID,
+		Queue:       NewQueue(),
+		Volume:      100,
+		stopChan:    make(chan bool, 1),
+		doneChan:    make(chan struct{}),
+		startedChan: make(chan struct{}),
 	}
 
 	m.players[guildID] = player
@@ -138,12 +142,10 @@ func (p *GuildPlayer) Play() error {
 	p.requestedStartOffset = 0
 	p.CurrentPosition = startOffset
 	p.playbackStartedAt = time.Now()
-
-	// Drain any stale completion signal
-	select {
-	case <-p.doneChan:
-	default:
-	}
+	p.startedChan = make(chan struct{})
+	p.doneChan = make(chan struct{})
+	p.startedSignaled = false
+	p.doneSignaled = false
 
 	// Drain any stale stop signal from previous playback
 	select {
@@ -151,22 +153,22 @@ func (p *GuildPlayer) Play() error {
 	default:
 	}
 
+	startedChan := p.startedChan
+	doneChan := p.doneChan
+
 	// Start playback in goroutine
-	go p.playTrack(track, startOffset)
+	go p.playTrack(track, startOffset, startedChan, doneChan)
 
 	return nil
 }
 
 // playTrack handles the actual playback of a track
-func (p *GuildPlayer) playTrack(track *Track, startOffset time.Duration) {
+func (p *GuildPlayer) playTrack(track *Track, startOffset time.Duration, startedChan chan struct{}, doneChan chan struct{}) {
 	logger.PlaybackStart(track.Title)
 
 	// Ensure completion is always signaled, regardless of exit path
 	defer func() {
-		select {
-		case p.doneChan <- true:
-		default:
-		}
+		p.signalPlaybackDone(startedChan, doneChan)
 	}()
 
 	p.mu.Lock()
@@ -221,6 +223,7 @@ func (p *GuildPlayer) playTrack(track *Track, startOffset time.Duration) {
 	logger.PlaybackFrameStart()
 
 	frameCount := 0
+	playbackStarted := false
 	nextFrameDeadline := nowOpusFrame()
 	for {
 		// Check for pause
@@ -276,6 +279,10 @@ func (p *GuildPlayer) playTrack(track *Track, startOffset time.Duration) {
 			logger.Error("Failed sending opus frame", "err", err)
 			return
 		}
+		if !playbackStarted {
+			p.signalPlaybackStarted(startedChan)
+			playbackStarted = true
+		}
 		frameCount++
 		if frameCount%1000 == 0 {
 			logger.PlaybackFramesMilestone(frameCount)
@@ -306,11 +313,22 @@ func (p *GuildPlayer) playTrack(track *Track, startOffset time.Duration) {
 
 // WaitForCompletion waits for the current track to finish
 func (p *GuildPlayer) WaitForCompletion() {
+	p.mu.RLock()
+	doneChan := p.doneChan
+	p.mu.RUnlock()
+
 	select {
-	case <-p.doneChan:
+	case <-doneChan:
 	case <-time.After(3 * time.Hour): // Max track length safety
 		logger.Info("Track completion timeout reached, continuing")
 	}
+}
+
+// PlaybackSignals returns channels for playback start and completion notifications.
+func (p *GuildPlayer) PlaybackSignals() (<-chan struct{}, <-chan struct{}) {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.startedChan, p.doneChan
 }
 
 // Pause pauses playback
@@ -530,6 +548,42 @@ func (p *GuildPlayer) stopPlaybackLocked(resetPosition bool) {
 		p.encoder.Cleanup()
 		p.encoder = nil
 	}
+}
+
+func (p *GuildPlayer) signalPlaybackStarted(startedChan chan struct{}) {
+	if startedChan == nil {
+		return
+	}
+
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if p.startedChan == startedChan {
+		if p.startedSignaled {
+			return
+		}
+		p.startedSignaled = true
+	}
+
+	close(startedChan)
+}
+
+func (p *GuildPlayer) signalPlaybackDone(startedChan chan struct{}, doneChan chan struct{}) {
+	if doneChan == nil {
+		return
+	}
+
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if p.doneChan == doneChan {
+		if p.doneSignaled {
+			return
+		}
+		p.doneSignaled = true
+	}
+
+	close(doneChan)
 }
 
 func (p *GuildPlayer) currentPositionLocked() time.Duration {

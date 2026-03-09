@@ -217,30 +217,23 @@ func (b *Bot) playLoop(guildID string, channelID string) {
 		}
 
 		logger.Info("Processing track", "title", track.Title)
+		trackSelectedAt := time.Now()
 
 		// Check if track is already cached
 		cacheKey := cache.GenerateKey(track.URL)
+		cacheMiss := false
 		if cachedPath, exists := b.Cache.Get(cacheKey); exists {
 			// Use cached file
+			logger.Timing("Cache hit before playback", "title", track.Title, "key", cacheKey)
 			logger.PlaybackCached(cachedPath)
 			track.LocalPath = cachedPath
 		} else {
-			// Not cached - stream immediately and download in background
-			logger.Info("Track not cached, streaming and downloading in background")
+			// Not cached - stream immediately and defer download until playback begins
+			logger.Timing("Cache miss before playback", "title", track.Title, "key", cacheKey)
+			logger.Timing("Background cache deferred until playback start", "title", track.Title, "key", cacheKey)
+			logger.Info("Track not cached, streaming immediately")
 			track.LocalPath = "" // Empty path triggers streaming encoder
-
-			// Start background download for future plays
-			go func(url, key, title string) {
-				logger.PlaybackDownloading(title)
-				_, err := b.Cache.GetOrCreate(key, func(path string) error {
-					return b.YouTube.Download(url, path)
-				})
-				if err != nil {
-					logger.Error("Background download failed", "title", title, "err", err)
-				} else {
-					logger.Info("Background download completed", "title", title)
-				}
-			}(track.URL, cacheKey, track.Title)
+			cacheMiss = true
 		}
 
 		// Play the track with retry logic
@@ -273,6 +266,11 @@ func (b *Bot) playLoop(guildID string, channelID string) {
 				p.Queue.Next()
 				continue
 			}
+		}
+
+		if cacheMiss {
+			started, done := p.PlaybackSignals()
+			b.deferBackgroundCacheUntilPlaybackStarts(p, track, cacheKey, trackSelectedAt, started, done)
 		}
 
 		// Wait for track to finish
@@ -310,6 +308,48 @@ func (b *Bot) playLoop(guildID string, channelID string) {
 		// Advance to next track
 		p.Queue.Next()
 	}
+}
+
+func (b *Bot) deferBackgroundCacheUntilPlaybackStarts(
+	p *player.GuildPlayer,
+	track *player.Track,
+	cacheKey string,
+	trackSelectedAt time.Time,
+	started <-chan struct{},
+	done <-chan struct{},
+) {
+	url := track.URL
+	title := track.Title
+
+	go func() {
+		if !b.waitForPlaybackStart(p, started, done) {
+			logger.Timing(
+				"Background cache skipped because playback ended before start",
+				"title", title,
+				"key", cacheKey,
+				"elapsed_ms", time.Since(trackSelectedAt).Milliseconds(),
+			)
+			return
+		}
+
+		logger.Timing(
+			"Background cache started after playback began",
+			"title", title,
+			"key", cacheKey,
+			"elapsed_ms", time.Since(trackSelectedAt).Milliseconds(),
+		)
+		logger.PlaybackDownloading(title)
+
+		_, err := b.Cache.GetOrCreate(cacheKey, func(path string) error {
+			return b.cacheTrack(url, path)
+		})
+		if err != nil {
+			logger.Error("Background download failed", "title", title, "err", err)
+			return
+		}
+
+		logger.Info("Background download completed", "title", title)
+	}()
 }
 
 // handlePause handles the pause command
