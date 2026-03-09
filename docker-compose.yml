@@ -1,9 +1,8 @@
-version: '3.8'
-
 services:
   gobard:
     build: .
     container_name: gobard
+    init: true
     restart: unless-stopped
     env_file:
       - .env
@@ -22,3 +21,8 @@ services:
       timeout: 10s
       retries: 3
       start_period: 10s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

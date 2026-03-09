@@ -11,6 +11,22 @@ import (
 	"github.com/GrainedLotus515/gobard/internal/voiceconn"
 )
 
+const opusFrameInterval = 20 * time.Millisecond
+
+var (
+	newCustomEncoder = func(inputPath string, sampleRate, channels int, startOffset time.Duration) (EncoderInterface, error) {
+		return NewCustomEncoder(inputPath, sampleRate, channels, startOffset)
+	}
+	newStreamingEncoder = func(url, streamURL string, sampleRate, channels int, startOffset time.Duration) (EncoderInterface, error) {
+		return NewStreamingEncoder(url, streamURL, sampleRate, channels, startOffset)
+	}
+	nowOpusFrame    = time.Now
+	sleepOpusFrame  = time.Sleep
+	sleepVoiceReady = func() {
+		time.Sleep(200 * time.Millisecond)
+	}
+)
+
 // EncoderInterface defines the interface for audio encoders
 type EncoderInterface interface {
 	OpusFrame() ([]byte, error)
@@ -170,12 +186,12 @@ func (p *GuildPlayer) playTrack(track *Track, startOffset time.Duration) {
 		// Use cached file
 		logger.Info("Using cached file", "path", track.LocalPath)
 		logger.PlaybackEncodingStart(track.LocalPath)
-		encoder, err = NewCustomEncoder(track.LocalPath, 48000, 2, startOffset)
+		encoder, err = newCustomEncoder(track.LocalPath, 48000, 2, startOffset)
 	} else {
 		// Stream directly from URL
 		logger.Info("Streaming from URL", "url", track.URL)
 		logger.PlaybackEncodingStart(track.URL)
-		encoder, err = NewStreamingEncoder(track.URL, track.StreamURL, 48000, 2, startOffset)
+		encoder, err = newStreamingEncoder(track.URL, track.StreamURL, 48000, 2, startOffset)
 	}
 
 	if err != nil {
@@ -193,7 +209,7 @@ func (p *GuildPlayer) playTrack(track *Track, startOffset time.Duration) {
 
 	// Wait for voice connection to be ready
 	logger.PlaybackVoiceWaiting()
-	time.Sleep(200 * time.Millisecond) // Give voice connection time to stabilize (reduced from 500ms)
+	sleepVoiceReady() // Give voice connection time to stabilize before streaming begins.
 
 	// Set speaking state BEFORE streaming
 	logger.PlaybackSpeakingStart()
@@ -205,6 +221,7 @@ func (p *GuildPlayer) playTrack(track *Track, startOffset time.Duration) {
 	logger.PlaybackFrameStart()
 
 	frameCount := 0
+	nextFrameDeadline := nowOpusFrame()
 	for {
 		// Check for pause
 		p.mu.RLock()
@@ -262,6 +279,12 @@ func (p *GuildPlayer) playTrack(track *Track, startOffset time.Duration) {
 		frameCount++
 		if frameCount%1000 == 0 {
 			logger.PlaybackFramesMilestone(frameCount)
+		}
+		nextFrameDeadline = nextFrameDeadline.Add(opusFrameInterval)
+		if delay := nextFrameDeadline.Sub(nowOpusFrame()); delay > 0 {
+			sleepOpusFrame(delay)
+		} else if delay < -(3 * opusFrameInterval) {
+			nextFrameDeadline = nowOpusFrame()
 		}
 	}
 

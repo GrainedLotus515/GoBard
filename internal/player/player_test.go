@@ -1,6 +1,10 @@
 package player
 
 import (
+	"context"
+	"io"
+	"reflect"
+	"sync"
 	"testing"
 	"time"
 )
@@ -92,4 +96,135 @@ func TestGetCurrentPositionAdvancesWithPlaybackClock(t *testing.T) {
 	if got < 6400*time.Millisecond || got > 7600*time.Millisecond {
 		t.Fatalf("GetCurrentPosition() = %v, want approximately 6.5s", got)
 	}
+}
+
+func TestPlayTrackPacesOpusFrames(t *testing.T) {
+	originalNewCustomEncoder := newCustomEncoder
+	originalNowOpusFrame := nowOpusFrame
+	originalSleepOpusFrame := sleepOpusFrame
+	originalSleepVoiceReady := sleepVoiceReady
+	t.Cleanup(func() {
+		newCustomEncoder = originalNewCustomEncoder
+		nowOpusFrame = originalNowOpusFrame
+		sleepOpusFrame = originalSleepOpusFrame
+		sleepVoiceReady = originalSleepVoiceReady
+	})
+
+	fakeNow := time.Unix(0, 0)
+	encoder := &stubEncoder{
+		frames: [][]byte{
+			[]byte("frame-1"),
+			[]byte("frame-2"),
+			[]byte("frame-3"),
+		},
+		frameDelay: 5 * time.Millisecond,
+		advance: func(d time.Duration) {
+			fakeNow = fakeNow.Add(d)
+		},
+	}
+	newCustomEncoder = func(string, int, int, time.Duration) (EncoderInterface, error) {
+		return encoder, nil
+	}
+	nowOpusFrame = func() time.Time {
+		return fakeNow
+	}
+
+	var (
+		sleepMu        sync.Mutex
+		sleepDurations []time.Duration
+	)
+	sleepOpusFrame = func(d time.Duration) {
+		fakeNow = fakeNow.Add(d)
+		sleepMu.Lock()
+		sleepDurations = append(sleepDurations, d)
+		sleepMu.Unlock()
+	}
+	sleepVoiceReady = func() {}
+
+	p := NewManager().GetPlayer("guild-pacing")
+	vc := &stubVoiceConnection{}
+	p.SetVoiceConnection(vc)
+
+	track := &Track{
+		Title:     "paced",
+		LocalPath: "/tmp/paced.opus",
+	}
+
+	p.playTrack(track, 0)
+
+	if got := len(vc.frames); got != 3 {
+		t.Fatalf("sent frames = %d, want 3", got)
+	}
+	if !encoder.cleaned {
+		t.Fatal("encoder Cleanup() was not called")
+	}
+
+	sleepMu.Lock()
+	gotSleeps := append([]time.Duration(nil), sleepDurations...)
+	sleepMu.Unlock()
+
+	wantSleeps := []time.Duration{
+		opusFrameInterval - encoder.frameDelay,
+		opusFrameInterval - encoder.frameDelay,
+		opusFrameInterval - encoder.frameDelay,
+	}
+	if !reflect.DeepEqual(gotSleeps, wantSleeps) {
+		t.Fatalf("sleep durations = %v, want %v", gotSleeps, wantSleeps)
+	}
+}
+
+type stubEncoder struct {
+	frames     [][]byte
+	index      int
+	cleaned    bool
+	frameDelay time.Duration
+	advance    func(time.Duration)
+	cleanupMu  sync.Mutex
+}
+
+func (e *stubEncoder) OpusFrame() ([]byte, error) {
+	if e.index >= len(e.frames) {
+		return nil, io.EOF
+	}
+	if e.advance != nil && e.frameDelay > 0 {
+		e.advance(e.frameDelay)
+	}
+	frame := e.frames[e.index]
+	e.index++
+	return frame, nil
+}
+
+func (e *stubEncoder) Cleanup() error {
+	e.cleanupMu.Lock()
+	defer e.cleanupMu.Unlock()
+	e.cleaned = true
+	return nil
+}
+
+type stubVoiceConnection struct {
+	frames      [][]byte
+	speaking    []bool
+	disconnects int
+	mu          sync.Mutex
+}
+
+func (c *stubVoiceConnection) SetSpeaking(context.Context, bool) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.speaking = append(c.speaking, true)
+	return nil
+}
+
+func (c *stubVoiceConnection) SendOpusFrame(frame []byte) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.frames = append(c.frames, append([]byte(nil), frame...))
+	return nil
+}
+
+func (c *stubVoiceConnection) Disconnect(context.Context) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.disconnects++
+	return nil
 }
