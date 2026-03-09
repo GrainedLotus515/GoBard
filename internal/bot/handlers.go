@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/GrainedLotus515/gobard/internal/botui"
 	"github.com/GrainedLotus515/gobard/internal/cache"
 	"github.com/GrainedLotus515/gobard/internal/logger"
 	"github.com/GrainedLotus515/gobard/internal/player"
@@ -26,6 +27,7 @@ func (b *Bot) handlePlay(s *discordgo.Session, i *discordgo.InteractionCreate) e
 
 	// Get or create player
 	p := b.PlayerManager.GetPlayer(i.GuildID)
+	wasIdle := p.Queue.Current() == nil && p.Queue.IsEmpty()
 
 	// Join voice channel if not already connected
 	if !p.IsVoiceConnected() {
@@ -44,16 +46,20 @@ func (b *Bot) handlePlay(s *discordgo.Session, i *discordgo.InteractionCreate) e
 	// Parse the query and get tracks
 	tracks, err := b.resolveQuery(query, i.Member.User.ID)
 	if err != nil {
-		s.InteractionResponseEdit(i.Interaction, &discordgo.WebhookEdit{
-			Content: ptrString(fmt.Sprintf("🚫 ope: %v", err)),
-		})
+		b.editDeferredEmbedComponents(s, i, botui.BuildStatusCard(botui.StatusCardSpec{
+			Title:       "Command Failed",
+			Description: err.Error(),
+			Color:       botui.ColorError,
+		}), nil)
 		return nil
 	}
 
 	if len(tracks) == 0 {
-		s.InteractionResponseEdit(i.Interaction, &discordgo.WebhookEdit{
-			Content: ptrString("🚫 ope: no songs found"),
-		})
+		b.editDeferredEmbedComponents(s, i, botui.BuildStatusCard(botui.StatusCardSpec{
+			Title:       "Nothing Found",
+			Description: "No songs matched that query.",
+			Color:       botui.ColorError,
+		}), nil)
 		return nil
 	}
 
@@ -68,24 +74,48 @@ func (b *Bot) handlePlay(s *discordgo.Session, i *discordgo.InteractionCreate) e
 		go b.playLoop(i.GuildID, i.ChannelID)
 	}
 
-	// Send response
-	if len(tracks) == 1 {
-		embed := &discordgo.MessageEmbed{
-			Title:       "Added to queue",
-			Description: fmt.Sprintf("**%s**\nby %s", tracks[0].Title, tracks[0].Artist),
-			Color:       0x00ff00,
-			Thumbnail: &discordgo.MessageEmbedThumbnail{
-				URL: tracks[0].Thumbnail,
-			},
+	queueLength := p.Queue.Length()
+	loopEnabled := p.Queue.IsLoopEnabled()
+
+	if wasIdle {
+		contextValue := "Starting playback"
+		if len(tracks) > 1 {
+			contextValue = fmt.Sprintf("+%d more queued", len(tracks)-1)
 		}
-		s.InteractionResponseEdit(i.Interaction, &discordgo.WebhookEdit{
-			Embeds: &[]*discordgo.MessageEmbed{embed},
-		})
-	} else {
-		s.InteractionResponseEdit(i.Interaction, &discordgo.WebhookEdit{
-			Content: ptrString(fmt.Sprintf("✅ Added %d tracks to queue", len(tracks))),
-		})
+
+		embed, components := b.buildPlaybackCard(
+			tracks[0],
+			queueLength,
+			false,
+			loopEnabled,
+			"Status",
+			contextValue,
+			true,
+		)
+		b.editDeferredEmbedComponents(s, i, embed, components)
+		return nil
 	}
+
+	if len(tracks) == 1 {
+		embed, components := b.buildPlaybackCard(
+			tracks[0],
+			queueLength,
+			false,
+			loopEnabled,
+			"Queued",
+			fmt.Sprintf("Queue position #%d", queueLength),
+			false,
+		)
+		b.editDeferredEmbedComponents(s, i, embed, components)
+		return nil
+	}
+
+	startPosition := queueLength - len(tracks) + 1
+	b.editDeferredEmbedComponents(s, i, botui.BuildStatusCard(botui.StatusCardSpec{
+		Title:       "Added to Queue",
+		Description: fmt.Sprintf("Queued %d tracks starting at #%d; first added was %s.", len(tracks), startPosition, tracks[0].Title),
+		Color:       botui.ColorSuccess,
+	}), nil)
 
 	return nil
 }
@@ -314,17 +344,29 @@ func (b *Bot) playLoop(guildID string, channelID string) {
 
 // handlePause handles the pause command
 func (b *Bot) handlePause(s *discordgo.Session, i *discordgo.InteractionCreate) error {
+	state := b.getPlaybackState(i.GuildID)
+	if state.Track == nil {
+		b.respondEmbed(s, i, idleStatusCard("Playback Is Idle", "Nothing is currently playing."))
+		return nil
+	}
+
 	p := b.PlayerManager.GetPlayer(i.GuildID)
 	p.Pause()
-	b.respond(s, i, "⏸️ Paused")
+	b.respondStatus(s, i, "Playback Paused", fmt.Sprintf("Paused %s.", state.Track.Title), botui.ColorInfo)
 	return nil
 }
 
 // handleResume handles the resume command
 func (b *Bot) handleResume(s *discordgo.Session, i *discordgo.InteractionCreate) error {
+	state := b.getPlaybackState(i.GuildID)
+	if state.Track == nil {
+		b.respondEmbed(s, i, idleStatusCard("Playback Is Idle", "Nothing is currently playing."))
+		return nil
+	}
+
 	p := b.PlayerManager.GetPlayer(i.GuildID)
 	p.Resume()
-	b.respond(s, i, "▶️ Resumed")
+	b.respondStatus(s, i, "Playback Resumed", fmt.Sprintf("Resumed %s.", state.Track.Title), botui.ColorSuccess)
 	return nil
 }
 
@@ -334,9 +376,9 @@ func (b *Bot) handleSkip(s *discordgo.Session, i *discordgo.InteractionCreate) e
 	next := p.Skip()
 
 	if next == nil {
-		b.respond(s, i, "⏭️ Skipped (queue is now empty)")
+		b.respondStatus(s, i, "Track Skipped", "Queue is now empty.", botui.ColorInfo)
 	} else {
-		b.respond(s, i, fmt.Sprintf("⏭️ Skipped to: **%s**", next.Title))
+		b.respondStatus(s, i, "Track Skipped", fmt.Sprintf("Skipped to %s.", next.Title), botui.ColorSuccess)
 	}
 	return nil
 }
@@ -347,76 +389,37 @@ func (b *Bot) handleStop(s *discordgo.Session, i *discordgo.InteractionCreate) e
 	p.Stop()
 	p.Queue.ClearAll()
 	p.Disconnect()
-	b.respond(s, i, "⏹️ Stopped and cleared queue")
+	b.respondStatus(s, i, "Playback Stopped", "Disconnected and cleared the queue.", botui.ColorWarning)
 	return nil
 }
 
 // handleQueue handles the queue command
 func (b *Bot) handleQueue(s *discordgo.Session, i *discordgo.InteractionCreate) error {
-	p := b.PlayerManager.GetPlayer(i.GuildID)
-
-	if p.Queue.IsEmpty() {
-		b.respond(s, i, "Queue is empty")
-		return nil
-	}
-
-	var builder strings.Builder
-	builder.WriteString("**Current Queue:**\n\n")
-
-	tracks, currentIndex := p.Queue.Snapshot()
-	for idx, track := range tracks {
-		prefix := fmt.Sprintf("%d. ", idx+1)
-		if idx == currentIndex {
-			prefix = "▶️ "
-		}
-		builder.WriteString(fmt.Sprintf("%s**%s** - %s\n", prefix, track.Title, track.Artist))
-	}
-
-	embed := &discordgo.MessageEmbed{
-		Title:       "Queue",
-		Description: builder.String(),
-		Color:       0x0099ff,
-		Footer: &discordgo.MessageEmbedFooter{
-			Text: fmt.Sprintf("%d tracks", p.Queue.Length()),
-		},
-	}
-
-	b.respondEmbed(s, i, embed)
+	state := b.getPlaybackState(i.GuildID)
+	embed, components := b.buildQueueCard(state, 1)
+	b.respondEmbedComponents(s, i, embed, components)
 	return nil
 }
 
 // handleNowPlaying handles the now-playing command
 func (b *Bot) handleNowPlaying(s *discordgo.Session, i *discordgo.InteractionCreate) error {
-	p := b.PlayerManager.GetPlayer(i.GuildID)
-	track := p.Queue.Current()
-
-	if track == nil {
-		b.respond(s, i, "Nothing is currently playing")
+	state := b.getPlaybackState(i.GuildID)
+	if state.Track == nil {
+		b.respondEmbed(s, i, idleStatusCard("Playback Is Idle", "Nothing is currently playing."))
 		return nil
 	}
 
-	embed := &discordgo.MessageEmbed{
-		Title:       "Now Playing",
-		Description: fmt.Sprintf("**%s**\nby %s", track.Title, track.Artist),
-		Color:       0x00ff00,
-		Thumbnail: &discordgo.MessageEmbedThumbnail{
-			URL: track.Thumbnail,
-		},
-		Fields: []*discordgo.MessageEmbedField{
-			{
-				Name:   "Duration",
-				Value:  formatDuration(track.Duration),
-				Inline: true,
-			},
-			{
-				Name:   "Position",
-				Value:  formatDuration(getDisplayPosition(track, p.GetCurrentPosition())),
-				Inline: true,
-			},
-		},
-	}
-
-	b.respondEmbed(s, i, embed)
+	label, value := playbackProgressContext(state.Track, state.Position, state.Paused)
+	embed, components := b.buildPlaybackCard(
+		state.Track,
+		state.TotalTracks,
+		state.Paused,
+		state.LoopEnabled,
+		label,
+		value,
+		true,
+	)
+	b.respondEmbedComponents(s, i, embed, components)
 	return nil
 }
 
@@ -424,7 +427,7 @@ func (b *Bot) handleNowPlaying(s *discordgo.Session, i *discordgo.InteractionCre
 func (b *Bot) handleClear(s *discordgo.Session, i *discordgo.InteractionCreate) error {
 	p := b.PlayerManager.GetPlayer(i.GuildID)
 	p.Queue.Clear()
-	b.respond(s, i, "🗑️ Cleared queue")
+	b.respondStatus(s, i, "Queue Cleared", "Removed queued tracks and kept the current song.", botui.ColorInfo)
 	return nil
 }
 
@@ -432,7 +435,7 @@ func (b *Bot) handleClear(s *discordgo.Session, i *discordgo.InteractionCreate) 
 func (b *Bot) handleDisconnect(s *discordgo.Session, i *discordgo.InteractionCreate) error {
 	p := b.PlayerManager.GetPlayer(i.GuildID)
 	p.Disconnect()
-	b.respond(s, i, "👋 Disconnected")
+	b.respondStatus(s, i, "Disconnected", "Left the voice channel.", botui.ColorWarning)
 	return nil
 }
 
@@ -448,7 +451,7 @@ func (b *Bot) handleShuffle(s *discordgo.Session, i *discordgo.InteractionCreate
 		return fmt.Errorf("not enough tracks to shuffle")
 	}
 
-	b.respond(s, i, "🔀 Shuffled queue")
+	b.respondStatus(s, i, "Queue Shuffled", "Reordered the upcoming tracks.", botui.ColorSuccess)
 	return nil
 }
 
@@ -458,9 +461,9 @@ func (b *Bot) handleLoop(s *discordgo.Session, i *discordgo.InteractionCreate) e
 	enabled := p.Queue.ToggleLoop()
 
 	if enabled {
-		b.respond(s, i, "🔂 Looping enabled")
+		b.respondStatus(s, i, "Loop Enabled", "The current track will repeat.", botui.ColorSuccess)
 	} else {
-		b.respond(s, i, "▶️ Looping disabled")
+		b.respondStatus(s, i, "Loop Disabled", "The current track will no longer repeat.", botui.ColorInfo)
 	}
 	return nil
 }
@@ -474,7 +477,7 @@ func (b *Bot) handleVolume(s *discordgo.Session, i *discordgo.InteractionCreate)
 		return err
 	}
 
-	b.respond(s, i, fmt.Sprintf("🔊 Volume set to %d%%", volume))
+	b.respondStatus(s, i, "Volume Updated", fmt.Sprintf("Playback volume is now %d%%.", volume), botui.ColorSuccess)
 	return nil
 }
 
@@ -492,7 +495,7 @@ func (b *Bot) handleSeek(s *discordgo.Session, i *discordgo.InteractionCreate) e
 		return err
 	}
 
-	b.respond(s, i, fmt.Sprintf("⏩ Seeked to %s", formatDuration(duration)))
+	b.respondStatus(s, i, "Seek Updated", fmt.Sprintf("Jumped to %s.", formatDuration(duration)), botui.ColorSuccess)
 	return nil
 }
 
@@ -507,7 +510,7 @@ func (b *Bot) handleFSeek(s *discordgo.Session, i *discordgo.InteractionCreate) 
 		return err
 	}
 
-	b.respond(s, i, fmt.Sprintf("⏩ Seeked forward %d seconds", seconds))
+	b.respondStatus(s, i, "Seek Updated", fmt.Sprintf("Advanced playback by %d seconds.", seconds), botui.ColorSuccess)
 	return nil
 }
 
@@ -521,7 +524,7 @@ func (b *Bot) handleMove(s *discordgo.Session, i *discordgo.InteractionCreate) e
 		return fmt.Errorf("invalid positions")
 	}
 
-	b.respond(s, i, fmt.Sprintf("↔️ Moved track from position %d to %d", from+1, to+1))
+	b.respondStatus(s, i, "Queue Updated", fmt.Sprintf("Moved track from #%d to #%d.", from+1, to+1), botui.ColorSuccess)
 	return nil
 }
 
@@ -534,7 +537,7 @@ func (b *Bot) handleRemove(s *discordgo.Session, i *discordgo.InteractionCreate)
 		return fmt.Errorf("invalid position")
 	}
 
-	b.respond(s, i, fmt.Sprintf("🗑️ Removed track at position %d", position+1))
+	b.respondStatus(s, i, "Track Removed", fmt.Sprintf("Removed track #%d from the queue.", position+1), botui.ColorWarning)
 	return nil
 }
 
@@ -553,9 +556,9 @@ func (b *Bot) handleConfig(s *discordgo.Session, i *discordgo.InteractionCreate)
 		enabled := subCmd.Options[0].BoolValue()
 		p.SetVoiceReductionEnabled(enabled)
 		if enabled {
-			b.respond(s, i, "✅ Volume reduction enabled")
+			b.respondStatus(s, i, "Voice Ducking Enabled", "Volume will drop when someone speaks.", botui.ColorSuccess)
 		} else {
-			b.respond(s, i, "❌ Volume reduction disabled")
+			b.respondStatus(s, i, "Voice Ducking Disabled", "Volume will stay unchanged when someone speaks.", botui.ColorInfo)
 		}
 
 	case "set-reduce-vol-when-voice-target":
@@ -563,12 +566,13 @@ func (b *Bot) handleConfig(s *discordgo.Session, i *discordgo.InteractionCreate)
 		if err := p.SetVoiceReductionTarget(volume); err != nil {
 			return err
 		}
-		b.respond(s, i, fmt.Sprintf("✅ Volume reduction target set to %d%%", volume))
+		b.respondStatus(s, i, "Voice Ducking Target Updated", fmt.Sprintf("Voice ducking now targets %d%% volume.", volume), botui.ColorSuccess)
 
 	case "show":
 		enabled, target := p.GetVoiceReductionConfig()
 		embed := &discordgo.MessageEmbed{
-			Title: "Configuration",
+			Title:       "Configuration",
+			Description: "Current voice ducking settings.",
 			Fields: []*discordgo.MessageEmbedField{
 				{
 					Name:   "Reduce volume on voice",
@@ -581,7 +585,7 @@ func (b *Bot) handleConfig(s *discordgo.Session, i *discordgo.InteractionCreate)
 					Inline: true,
 				},
 			},
-			Color: 0x0099ff,
+			Color: botui.ColorInfo,
 		}
 		b.respondEmbed(s, i, embed)
 
