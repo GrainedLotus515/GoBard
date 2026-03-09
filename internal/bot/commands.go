@@ -318,54 +318,56 @@ func (b *Bot) registerCommands() error {
 
 // interactionCreate handles slash command interactions
 func (b *Bot) interactionCreate(s *discordgo.Session, i *discordgo.InteractionCreate) {
-	if i.Type != discordgo.InteractionApplicationCommand {
-		return
-	}
+	switch i.Type {
+	case discordgo.InteractionApplicationCommand:
+		data := i.ApplicationCommandData()
 
-	data := i.ApplicationCommandData()
+		var err error
+		switch data.Name {
+		case "play":
+			err = b.handlePlay(s, i)
+		case "pause":
+			err = b.handlePause(s, i)
+		case "resume":
+			err = b.handleResume(s, i)
+		case "skip":
+			err = b.handleSkip(s, i)
+		case "stop":
+			err = b.handleStop(s, i)
+		case "queue":
+			err = b.handleQueue(s, i)
+		case "now-playing":
+			err = b.handleNowPlaying(s, i)
+		case "clear":
+			err = b.handleClear(s, i)
+		case "disconnect":
+			err = b.handleDisconnect(s, i)
+		case "shuffle":
+			err = b.handleShuffle(s, i)
+		case "loop":
+			err = b.handleLoop(s, i)
+		case "volume":
+			err = b.handleVolume(s, i)
+		case "seek":
+			err = b.handleSeek(s, i)
+		case "fseek":
+			err = b.handleFSeek(s, i)
+		case "move":
+			err = b.handleMove(s, i)
+		case "remove":
+			err = b.handleRemove(s, i)
+		case "config":
+			err = b.handleConfig(s, i)
+		default:
+			err = fmt.Errorf("unknown command")
+		}
 
-	var err error
-	switch data.Name {
-	case "play":
-		err = b.handlePlay(s, i)
-	case "pause":
-		err = b.handlePause(s, i)
-	case "resume":
-		err = b.handleResume(s, i)
-	case "skip":
-		err = b.handleSkip(s, i)
-	case "stop":
-		err = b.handleStop(s, i)
-	case "queue":
-		err = b.handleQueue(s, i)
-	case "now-playing":
-		err = b.handleNowPlaying(s, i)
-	case "clear":
-		err = b.handleClear(s, i)
-	case "disconnect":
-		err = b.handleDisconnect(s, i)
-	case "shuffle":
-		err = b.handleShuffle(s, i)
-	case "loop":
-		err = b.handleLoop(s, i)
-	case "volume":
-		err = b.handleVolume(s, i)
-	case "seek":
-		err = b.handleSeek(s, i)
-	case "fseek":
-		err = b.handleFSeek(s, i)
-	case "move":
-		err = b.handleMove(s, i)
-	case "remove":
-		err = b.handleRemove(s, i)
-	case "config":
-		err = b.handleConfig(s, i)
-	default:
-		err = fmt.Errorf("unknown command")
-	}
+		if err != nil {
+			b.respondError(s, i, err)
+		}
 
-	if err != nil {
-		b.respondError(s, i, err)
+	case discordgo.InteractionMessageComponent:
+		b.handleMessageComponent(s, i)
 	}
 }
 
@@ -374,28 +376,14 @@ func (b *Bot) respondError(s *discordgo.Session, i *discordgo.InteractionCreate,
 	s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
 		Type: discordgo.InteractionResponseChannelMessageWithSource,
 		Data: &discordgo.InteractionResponseData{
-			Content: fmt.Sprintf("🚫 ope: %v", err),
-			Flags:   discordgo.MessageFlagsEphemeral,
-		},
-	})
-}
-
-// respond sends a success response
-func (b *Bot) respond(s *discordgo.Session, i *discordgo.InteractionCreate, message string) {
-	s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
-		Type: discordgo.InteractionResponseChannelMessageWithSource,
-		Data: &discordgo.InteractionResponseData{
-			Content: message,
-		},
-	})
-}
-
-// respondEmbed sends an embed response
-func (b *Bot) respondEmbed(s *discordgo.Session, i *discordgo.InteractionCreate, embed *discordgo.MessageEmbed) {
-	s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
-		Type: discordgo.InteractionResponseChannelMessageWithSource,
-		Data: &discordgo.InteractionResponseData{
-			Embeds: []*discordgo.MessageEmbed{embed},
+			Embeds: []*discordgo.MessageEmbed{
+				{
+					Title:       "Command Failed",
+					Description: err.Error(),
+					Color:       0xDC2626,
+				},
+			},
+			Flags: discordgo.MessageFlagsEphemeral,
 		},
 	})
 }
