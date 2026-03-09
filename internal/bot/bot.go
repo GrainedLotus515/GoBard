@@ -27,8 +27,10 @@ type Bot struct {
 	Spotify       *spotify.Client
 	Commands      []*discordgo.ApplicationCommand
 
-	playTrackFn         func(*player.GuildPlayer) error
-	waitForCompletionFn func(*player.GuildPlayer)
+	playTrackFn            func(*player.GuildPlayer) error
+	waitForCompletionFn    func(*player.GuildPlayer)
+	cacheTrackFn           func(url, path string) error
+	waitForPlaybackStartFn func(*player.GuildPlayer) bool
 }
 
 // New creates a new bot instance
@@ -244,4 +246,24 @@ func (b *Bot) waitForTrackCompletion(p *player.GuildPlayer) {
 		return
 	}
 	p.WaitForCompletion()
+}
+
+func (b *Bot) cacheTrack(url, path string) error {
+	if b.cacheTrackFn != nil {
+		return b.cacheTrackFn(url, path)
+	}
+	return b.YouTube.Download(url, path)
+}
+
+func (b *Bot) waitForPlaybackStart(p *player.GuildPlayer, started <-chan struct{}, done <-chan struct{}) bool {
+	if b.waitForPlaybackStartFn != nil {
+		return b.waitForPlaybackStartFn(p)
+	}
+
+	select {
+	case <-started:
+		return true
+	case <-done:
+		return false
+	}
 }

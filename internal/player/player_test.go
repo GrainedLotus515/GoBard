@@ -2,6 +2,7 @@ package player
 
 import (
 	"context"
+	"errors"
 	"io"
 	"reflect"
 	"sync"
@@ -149,8 +150,12 @@ func TestPlayTrackPacesOpusFrames(t *testing.T) {
 		Title:     "paced",
 		LocalPath: "/tmp/paced.opus",
 	}
+	p.Queue.Add(track)
 
-	p.playTrack(track, 0)
+	if err := p.Play(); err != nil {
+		t.Fatalf("Play() error = %v", err)
+	}
+	p.WaitForCompletion()
 
 	if got := len(vc.frames); got != 3 {
 		t.Fatalf("sent frames = %d, want 3", got)
@@ -170,6 +175,147 @@ func TestPlayTrackPacesOpusFrames(t *testing.T) {
 	}
 	if !reflect.DeepEqual(gotSleeps, wantSleeps) {
 		t.Fatalf("sleep durations = %v, want %v", gotSleeps, wantSleeps)
+	}
+}
+
+func TestPlaybackSignalsCloseStartedBeforeDone(t *testing.T) {
+	originalNewCustomEncoder := newCustomEncoder
+	originalSleepVoiceReady := sleepVoiceReady
+	t.Cleanup(func() {
+		newCustomEncoder = originalNewCustomEncoder
+		sleepVoiceReady = originalSleepVoiceReady
+	})
+
+	secondFrameBlocked := make(chan struct{})
+	releaseSecondFrame := make(chan struct{})
+	newCustomEncoder = func(string, int, int, time.Duration) (EncoderInterface, error) {
+		return &stubEncoder{
+			frames: [][]byte{
+				[]byte("frame-1"),
+				[]byte("frame-2"),
+				[]byte("frame-3"),
+			},
+		}, nil
+	}
+	sleepVoiceReady = func() {}
+
+	p := NewManager().GetPlayer("guild-signals")
+	vc := &stubVoiceConnection{
+		sendHook: func(_ []byte, sendCount int) {
+			if sendCount == 2 {
+				close(secondFrameBlocked)
+				<-releaseSecondFrame
+			}
+		},
+	}
+	p.SetVoiceConnection(vc)
+	p.Queue.Add(&Track{Title: "signal-track", LocalPath: "/tmp/signal.opus"})
+
+	if err := p.Play(); err != nil {
+		t.Fatalf("Play() error = %v", err)
+	}
+
+	started, done := p.PlaybackSignals()
+
+	select {
+	case <-secondFrameBlocked:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("second frame was not blocked in time")
+	}
+
+	select {
+	case <-started:
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("started signal did not close after first frame")
+	}
+
+	select {
+	case <-done:
+		t.Fatal("done signal closed before playback completed")
+	default:
+	}
+
+	close(releaseSecondFrame)
+	p.WaitForCompletion()
+
+	select {
+	case <-done:
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("done signal did not close after playback completed")
+	}
+}
+
+func TestPlaybackSignalsCloseDoneOnEncoderFailureWithoutStarted(t *testing.T) {
+	originalNewCustomEncoder := newCustomEncoder
+	originalSleepVoiceReady := sleepVoiceReady
+	t.Cleanup(func() {
+		newCustomEncoder = originalNewCustomEncoder
+		sleepVoiceReady = originalSleepVoiceReady
+	})
+
+	newCustomEncoder = func(string, int, int, time.Duration) (EncoderInterface, error) {
+		return nil, errors.New("boom")
+	}
+	sleepVoiceReady = func() {}
+
+	p := NewManager().GetPlayer("guild-encoder-fail")
+	p.SetVoiceConnection(&stubVoiceConnection{})
+	p.Queue.Add(&Track{Title: "broken-track", LocalPath: "/tmp/broken.opus"})
+
+	if err := p.Play(); err != nil {
+		t.Fatalf("Play() error = %v", err)
+	}
+
+	started, done := p.PlaybackSignals()
+
+	select {
+	case <-done:
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("done signal did not close after encoder creation failure")
+	}
+
+	select {
+	case <-started:
+		t.Fatal("started signal closed even though playback never began")
+	default:
+	}
+}
+
+func TestWaitForCompletionUnblocksWhenDoneChannelCloses(t *testing.T) {
+	originalNewCustomEncoder := newCustomEncoder
+	originalSleepVoiceReady := sleepVoiceReady
+	t.Cleanup(func() {
+		newCustomEncoder = originalNewCustomEncoder
+		sleepVoiceReady = originalSleepVoiceReady
+	})
+
+	newCustomEncoder = func(string, int, int, time.Duration) (EncoderInterface, error) {
+		return &stubEncoder{
+			frames: [][]byte{
+				[]byte("frame-1"),
+			},
+		}, nil
+	}
+	sleepVoiceReady = func() {}
+
+	p := NewManager().GetPlayer("guild-wait")
+	p.SetVoiceConnection(&stubVoiceConnection{})
+	p.Queue.Add(&Track{Title: "wait-track", LocalPath: "/tmp/wait.opus"})
+
+	if err := p.Play(); err != nil {
+		t.Fatalf("Play() error = %v", err)
+	}
+
+	done := make(chan struct{})
+	go func() {
+		p.WaitForCompletion()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("WaitForCompletion() did not return after playback finished")
 	}
 }
 
@@ -205,13 +351,14 @@ type stubVoiceConnection struct {
 	frames      [][]byte
 	speaking    []bool
 	disconnects int
+	sendHook    func(frame []byte, sendCount int)
 	mu          sync.Mutex
 }
 
-func (c *stubVoiceConnection) SetSpeaking(context.Context, bool) error {
+func (c *stubVoiceConnection) SetSpeaking(_ context.Context, speaking bool) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.speaking = append(c.speaking, true)
+	c.speaking = append(c.speaking, speaking)
 	return nil
 }
 
@@ -219,6 +366,9 @@ func (c *stubVoiceConnection) SendOpusFrame(frame []byte) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.frames = append(c.frames, append([]byte(nil), frame...))
+	if c.sendHook != nil {
+		c.sendHook(frame, len(c.frames))
+	}
 	return nil
 }
 
