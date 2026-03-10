@@ -15,7 +15,6 @@ on:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_NAME: ${{ github.repository }}
 
 jobs:
   build:
@@ -31,7 +30,17 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libopus-dev libopusfile-dev pkg-config
+          sudo apt-get install -y \
+            build-essential \
+            ca-certificates \
+            cmake \
+            curl \
+            git \
+            libopus-dev \
+            libopusfile-dev \
+            libsodium-dev \
+            pkg-config \
+            unzip
 
       - name: Set up Go
         uses: actions/setup-go@v5
@@ -49,9 +58,23 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-go-
 
+      - name: Download dependencies
+        run: go mod download
+
+      - name: Install libdave
+        run: |
+          sh ./scripts/install-libdave.sh
+          echo "PKG_CONFIG_PATH=$HOME/.local/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}" >> $GITHUB_ENV
+          echo "LD_LIBRARY_PATH=$HOME/.local/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" >> $GITHUB_ENV
+
       - name: Run tests
         run: |
           go test ./cmd/... ./internal/... -v -race
+
+      - name: Derive image name
+        id: image
+        run: |
+          echo "name=$(printf '%s' "$GITHUB_REPOSITORY" | tr '[:upper:]' '[:lower:]')" >> $GITHUB_OUTPUT
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
@@ -71,7 +94,7 @@ jobs:
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          images: ${{ env.REGISTRY }}/${{ steps.image.outputs.name }}
           tags: |
             type=ref,event=branch
             type=semver,pattern={{version}}
@@ -125,13 +148,15 @@ jobs:
     steps:
       - name: Build Summary
         run: |
+          image_name="$(printf '%s' "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')"
+
           echo "## Docker Build Summary" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
 
           if [ "${{ needs.build.result }}" == "success" ]; then
             echo "✅ **Docker build completed successfully**" >> $GITHUB_STEP_SUMMARY
             echo "" >> $GITHUB_STEP_SUMMARY
-            echo "📦 **Image:** \`ghcr.io/${{ github.repository }}:${{ github.ref_name }}\`" >> $GITHUB_STEP_SUMMARY
+            echo "📦 **Image:** \`ghcr.io/${image_name}:${{ github.ref_name }}\`" >> $GITHUB_STEP_SUMMARY
           else
             echo "❌ **Docker build failed**" >> $GITHUB_STEP_SUMMARY
             exit 1

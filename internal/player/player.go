@@ -550,6 +550,13 @@ func (p *GuildPlayer) GetCurrentPosition() time.Duration {
 	return p.currentPositionLocked()
 }
 
+// GetPlaybackState returns a snapshot of the current playback flags and position.
+func (p *GuildPlayer) GetPlaybackState() (playing bool, paused bool, position time.Duration) {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.Playing, p.Paused, p.currentPositionLocked()
+}
+
 // SetVoiceReductionEnabled toggles volume ducking on voice activity.
 func (p *GuildPlayer) SetVoiceReductionEnabled(enabled bool) {
 	p.mu.Lock()
