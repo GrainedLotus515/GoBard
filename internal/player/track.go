@@ -17,17 +17,66 @@ const (
 
 // Track represents a single music track
 type Track struct {
-	ID          string
-	Title       string
-	Artist      string
-	URL         string
-	Duration    time.Duration
-	Source      TrackSource
-	Thumbnail   string
-	RequestedBy string // Discord user ID
-	IsLive      bool
-	LocalPath   string // Path to cached file if available
-	StreamURL   string // Pre-fetched direct stream URL for faster playback
+	ID              string
+	Title           string
+	Artist          string
+	URL             string
+	Duration        time.Duration
+	Source          TrackSource
+	Thumbnail       string
+	RequestedBy     string // Discord user ID
+	IsLive          bool
+	LocalPath       string // Path to cached file if available
+	StreamURL       string // Pre-fetched direct stream URL for faster playback
+	StreamHeaders   map[string]string
+	StreamExpiresAt time.Time
+}
+
+const prefetchedStreamSafetyMargin = 2 * time.Minute
+
+// SetPrefetchedStream stores a direct stream URL and the metadata needed to reuse it safely.
+func (t *Track) SetPrefetchedStream(url string, headers map[string]string, expiresAt time.Time) {
+	t.StreamURL = url
+	t.StreamHeaders = cloneStringMap(headers)
+	t.StreamExpiresAt = expiresAt
+}
+
+// ClearPrefetchedStream removes any previously resolved direct stream metadata.
+func (t *Track) ClearPrefetchedStream() {
+	t.StreamURL = ""
+	t.StreamHeaders = nil
+	t.StreamExpiresAt = time.Time{}
+}
+
+// CanUsePrefetchedStream reports whether the stored direct stream URL is still fresh enough for playback.
+func (t *Track) CanUsePrefetchedStream(now time.Time, startOffset time.Duration) bool {
+	if t == nil || t.IsLive || t.StreamURL == "" {
+		return false
+	}
+
+	if t.StreamExpiresAt.IsZero() {
+		return true
+	}
+
+	remainingPlayback := t.Duration - startOffset
+	if remainingPlayback < 0 {
+		remainingPlayback = 0
+	}
+
+	return !now.Add(remainingPlayback + prefetchedStreamSafetyMargin).After(t.StreamExpiresAt)
+}
+
+func cloneStringMap(src map[string]string) map[string]string {
+	if len(src) == 0 {
+		return nil
+	}
+
+	dst := make(map[string]string, len(src))
+	for key, value := range src {
+		dst[key] = value
+	}
+
+	return dst
 }
 
 // Queue represents a music queue for a guild

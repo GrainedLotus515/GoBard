@@ -11,8 +11,8 @@ import (
 	"github.com/hraban/opus"
 )
 
-// StreamingEncoder handles streaming audio encoding using yt-dlp + FFmpeg + libopus
-// It uses a pipeline: yt-dlp streams audio -> FFmpeg decodes -> libopus encodes
+// StreamingEncoder handles streaming audio encoding using either a direct media URL
+// or a yt-dlp -> FFmpeg pipeline before libopus encoding.
 type StreamingEncoder struct {
 	ytdlpCmd    *exec.Cmd
 	ffmpegCmd   *exec.Cmd
@@ -27,8 +27,7 @@ type StreamingEncoder struct {
 }
 
 // NewStreamingEncoder creates a new streaming audio encoder
-// streamURL parameter is kept for compatibility but ignored (we use yt-dlp pipeline instead)
-func NewStreamingEncoder(url string, streamURL string, sampleRate, channels int, startOffset time.Duration) (*StreamingEncoder, error) {
+func NewStreamingEncoder(url, streamURL string, streamHeaders map[string]string, sampleRate, channels int, startOffset time.Duration) (*StreamingEncoder, error) {
 	start := time.Now()
 
 	frameSize := 960 // 20ms at 48kHz
@@ -36,55 +35,78 @@ func NewStreamingEncoder(url string, streamURL string, sampleRate, channels int,
 		frameSize = (sampleRate * 20) / 1000
 	}
 
-	logger.Info("Starting yt-dlp -> FFmpeg pipeline")
-
-	// Use yt-dlp to stream audio directly to FFmpeg
-	// This avoids 403 errors since yt-dlp handles YouTube's authentication headers
-	ytdlpCmd := exec.Command(
-		"yt-dlp",
-		"-f", "bestaudio",
-		"--no-warnings",
-		"-o", "-", // Output to stdout
-		"--",
-		url, // Use original URL, not the extracted stream URL
+	var (
+		ytdlpCmd     *exec.Cmd
+		ffmpegCmd    *exec.Cmd
+		ffmpegStdout io.ReadCloser
+		ffmpegStderr io.ReadCloser
+		err          error
 	)
 
-	// FFmpeg reads from stdin (piped from yt-dlp)
-	ffmpegCmd := exec.Command("ffmpeg", buildStreamingFFmpegArgs(sampleRate, channels, startOffset)...)
+	if streamURL != "" {
+		logger.Info("Starting direct FFmpeg stream", "url", streamURL)
+		ffmpegCmd = exec.Command("ffmpeg", buildDirectStreamingFFmpegArgs(streamURL, streamHeaders, sampleRate, channels, startOffset)...)
+		ffmpegStdout, err = ffmpegCmd.StdoutPipe()
+		if err != nil {
+			return nil, fmt.Errorf("failed to create direct ffmpeg stdout pipe: %w", err)
+		}
 
-	// Pipe yt-dlp stdout to FFmpeg stdin
-	ytdlpStdout, err := ytdlpCmd.StdoutPipe()
-	if err != nil {
-		return nil, fmt.Errorf("failed to create yt-dlp stdout pipe: %w", err)
-	}
+		ffmpegStderr, err = ffmpegCmd.StderrPipe()
+		if err != nil {
+			return nil, fmt.Errorf("failed to create direct ffmpeg stderr pipe: %w", err)
+		}
 
-	ffmpegCmd.Stdin = ytdlpStdout
+		if err := ffmpegCmd.Start(); err != nil {
+			return nil, fmt.Errorf("failed to start direct ffmpeg stream: %w", err)
+		}
+	} else {
+		logger.Info("Starting yt-dlp -> FFmpeg pipeline")
 
-	// Get stdout and stderr from FFmpeg
-	ffmpegStdout, err := ffmpegCmd.StdoutPipe()
-	if err != nil {
-		return nil, fmt.Errorf("failed to create ffmpeg stdout pipe: %w", err)
-	}
+		// Use yt-dlp to stream audio directly to FFmpeg.
+		// This avoids 403 errors when a direct media URL is unavailable or stale.
+		ytdlpCmd = exec.Command(
+			"yt-dlp",
+			"-f", "bestaudio",
+			"--no-warnings",
+			"-o", "-", // Output to stdout
+			"--",
+			url,
+		)
 
-	ffmpegStderr, err := ffmpegCmd.StderrPipe()
-	if err != nil {
-		return nil, fmt.Errorf("failed to create ffmpeg stderr pipe: %w", err)
-	}
+		ffmpegCmd = exec.Command("ffmpeg", buildStreamingFFmpegArgs(sampleRate, channels, startOffset)...)
 
-	// Start both processes
-	if err := ytdlpCmd.Start(); err != nil {
-		return nil, fmt.Errorf("failed to start yt-dlp: %w", err)
-	}
+		ytdlpStdout, err := ytdlpCmd.StdoutPipe()
+		if err != nil {
+			return nil, fmt.Errorf("failed to create yt-dlp stdout pipe: %w", err)
+		}
 
-	if err := ffmpegCmd.Start(); err != nil {
-		ytdlpCmd.Process.Kill()
-		return nil, fmt.Errorf("failed to start ffmpeg: %w", err)
+		ffmpegCmd.Stdin = ytdlpStdout
+
+		ffmpegStdout, err = ffmpegCmd.StdoutPipe()
+		if err != nil {
+			return nil, fmt.Errorf("failed to create ffmpeg stdout pipe: %w", err)
+		}
+
+		ffmpegStderr, err = ffmpegCmd.StderrPipe()
+		if err != nil {
+			return nil, fmt.Errorf("failed to create ffmpeg stderr pipe: %w", err)
+		}
+
+		if err := ytdlpCmd.Start(); err != nil {
+			return nil, fmt.Errorf("failed to start yt-dlp: %w", err)
+		}
+
+		if err := ffmpegCmd.Start(); err != nil {
+			stopProcess(ytdlpCmd)
+			return nil, fmt.Errorf("failed to start ffmpeg: %w", err)
+		}
 	}
 
 	// Create Opus encoder
 	opusEnc, err := opus.NewEncoder(sampleRate, channels, opus.AppAudio)
 	if err != nil {
-		ffmpegCmd.Process.Kill()
+		stopProcess(ffmpegCmd)
+		stopProcess(ytdlpCmd)
 		return nil, fmt.Errorf("failed to create opus encoder: %w", err)
 	}
 
@@ -145,12 +167,8 @@ func (e *StreamingEncoder) encodeLoop(reader io.Reader) {
 		select {
 		case <-e.stopChan:
 			logger.Info("Encode loop stopped by signal", "frames_encoded", frameCount)
-			if e.ffmpegCmd.Process != nil {
-				e.ffmpegCmd.Process.Kill()
-			}
-			if e.ytdlpCmd != nil && e.ytdlpCmd.Process != nil {
-				e.ytdlpCmd.Process.Kill()
-			}
+			stopProcess(e.ffmpegCmd)
+			stopProcess(e.ytdlpCmd)
 			return
 		default:
 		}
@@ -205,12 +223,8 @@ func (e *StreamingEncoder) encodeLoop(reader io.Reader) {
 				}
 			case <-e.stopChan:
 				logger.Info("Encode loop stopped while sending frame", "frames_encoded", frameCount)
-				if e.ffmpegCmd.Process != nil {
-					e.ffmpegCmd.Process.Kill()
-				}
-				if e.ytdlpCmd != nil && e.ytdlpCmd.Process != nil {
-					e.ytdlpCmd.Process.Kill()
-				}
+				stopProcess(e.ffmpegCmd)
+				stopProcess(e.ytdlpCmd)
 				return
 			}
 		}
@@ -244,20 +258,32 @@ func (e *StreamingEncoder) Cleanup() error {
 	}
 
 	// Kill both processes
-	if e.ffmpegCmd.Process != nil {
-		e.ffmpegCmd.Process.Kill()
-	}
-	if e.ytdlpCmd != nil && e.ytdlpCmd.Process != nil {
-		e.ytdlpCmd.Process.Kill()
-	}
+	stopProcess(e.ffmpegCmd)
+	stopProcess(e.ytdlpCmd)
 
 	// Wait for processes to exit (ignore errors)
 	if e.ffmpegCmd != nil {
-		e.ffmpegCmd.Wait()
+		waitProcess(e.ffmpegCmd)
 	}
 	if e.ytdlpCmd != nil {
-		e.ytdlpCmd.Wait()
+		waitProcess(e.ytdlpCmd)
 	}
 
 	return nil
+}
+
+func stopProcess(cmd *exec.Cmd) {
+	if cmd == nil || cmd.Process == nil {
+		return
+	}
+
+	_ = cmd.Process.Kill()
+}
+
+func waitProcess(cmd *exec.Cmd) {
+	if cmd == nil {
+		return
+	}
+
+	_ = cmd.Wait()
 }

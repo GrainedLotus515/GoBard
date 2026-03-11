@@ -17,8 +17,8 @@ var (
 	newCustomEncoder = func(inputPath string, sampleRate, channels int, startOffset time.Duration) (EncoderInterface, error) {
 		return NewCustomEncoder(inputPath, sampleRate, channels, startOffset)
 	}
-	newStreamingEncoder = func(url, streamURL string, sampleRate, channels int, startOffset time.Duration) (EncoderInterface, error) {
-		return NewStreamingEncoder(url, streamURL, sampleRate, channels, startOffset)
+	newStreamingEncoder = func(url, streamURL string, streamHeaders map[string]string, sampleRate, channels int, startOffset time.Duration) (EncoderInterface, error) {
+		return NewStreamingEncoder(url, streamURL, streamHeaders, sampleRate, channels, startOffset)
 	}
 	nowOpusFrame    = time.Now
 	sleepOpusFrame  = time.Sleep
@@ -228,11 +228,12 @@ func (p *GuildPlayer) playTrack(session *playbackSession, track *Track, startOff
 	logger.PlaybackStart(track.Title)
 
 	var (
-		vc           voiceconn.Connection
-		encoder      EncoderInterface
-		encoderBound bool
-		speaking     bool
-		frameCount   int
+		vc                   voiceconn.Connection
+		encoder              EncoderInterface
+		encoderBound         bool
+		speaking             bool
+		frameCount           int
+		prefetchedStreamUsed bool
 	)
 
 	defer func() {
@@ -287,7 +288,17 @@ func (p *GuildPlayer) playTrack(session *playbackSession, track *Track, startOff
 	} else {
 		logger.Info("Streaming from URL", "url", track.URL)
 		logger.PlaybackEncodingStart(track.URL)
-		encoder, err = newStreamingEncoder(track.URL, track.StreamURL, 48000, 2, startOffset)
+		streamURL := ""
+		var streamHeaders map[string]string
+		if track.CanUsePrefetchedStream(time.Now(), startOffset) {
+			streamURL = track.StreamURL
+			streamHeaders = track.StreamHeaders
+			prefetchedStreamUsed = true
+			logger.Info("Using prefetched stream URL", "title", track.Title, "expires_at", track.StreamExpiresAt)
+		} else if track.StreamURL != "" {
+			logger.Info("Prefetched stream URL unavailable, resolving live at playback", "title", track.Title, "expires_at", track.StreamExpiresAt)
+		}
+		encoder, err = newStreamingEncoder(track.URL, streamURL, streamHeaders, 48000, 2, startOffset)
 	}
 
 	if err != nil {
@@ -307,6 +318,44 @@ func (p *GuildPlayer) playTrack(session *playbackSession, track *Track, startOff
 	encoderBound = true
 	logger.PlaybackEncodingSuccess()
 
+	nextFrameDeadline := nowOpusFrame()
+	firstFrame, err := encoder.OpusFrame()
+	if err != nil && prefetchedStreamUsed && !session.isStopped() {
+		logger.Warn("Prefetched stream failed before first frame, retrying with yt-dlp", "title", track.Title, "err", err)
+		session.cleanupEncoder()
+		encoderBound = false
+		track.ClearPrefetchedStream()
+
+		encoder, err = newStreamingEncoder(track.URL, "", nil, 48000, 2, startOffset)
+		if err != nil {
+			logger.PlaybackEncodingError(err)
+			return
+		}
+
+		if session.isStopped() {
+			_ = encoder.Cleanup()
+			logger.PlaybackStopped(frameCount)
+			return
+		}
+
+		if !session.bindEncoder(encoder) {
+			_ = encoder.Cleanup()
+			logger.PlaybackStopped(frameCount)
+			return
+		}
+		encoderBound = true
+		logger.PlaybackEncodingSuccess()
+		firstFrame, err = encoder.OpusFrame()
+	}
+	if err != nil {
+		if err != io.EOF {
+			logger.PlaybackFrameError(err)
+		} else {
+			logger.PlaybackFramesComplete(frameCount)
+		}
+		return
+	}
+
 	logger.PlaybackVoiceWaiting()
 	sleepVoiceReady()
 
@@ -323,7 +372,6 @@ func (p *GuildPlayer) playTrack(session *playbackSession, track *Track, startOff
 
 	logger.PlaybackFrameStart()
 
-	nextFrameDeadline := nowOpusFrame()
 	for {
 		p.mu.RLock()
 		paused := p.Paused
@@ -354,14 +402,17 @@ func (p *GuildPlayer) playTrack(session *playbackSession, track *Track, startOff
 			return
 		}
 
-		frame, err := encoder.OpusFrame()
-		if err != nil {
-			if err != io.EOF {
-				logger.PlaybackFrameError(err)
-			} else {
-				logger.PlaybackFramesComplete(frameCount)
+		frame := firstFrame
+		if frameCount > 0 {
+			frame, err = encoder.OpusFrame()
+			if err != nil {
+				if err != io.EOF {
+					logger.PlaybackFrameError(err)
+				} else {
+					logger.PlaybackFramesComplete(frameCount)
+				}
+				break
 			}
-			break
 		}
 
 		if session.isStopped() {

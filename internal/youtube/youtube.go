@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"os/exec"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -39,18 +41,25 @@ type SearchResult struct {
 
 // Format represents an available format
 type Format struct {
-	FormatID   string  `json:"format_id"`
-	URL        string  `json:"url"`
-	Ext        string  `json:"ext"`
-	AudioCodec string  `json:"acodec"`
-	VideoCodec string  `json:"vcodec"`
-	ABR        float64 `json:"abr"` // Audio bitrate in kbps
+	FormatID    string            `json:"format_id"`
+	URL         string            `json:"url"`
+	Ext         string            `json:"ext"`
+	AudioCodec  string            `json:"acodec"`
+	VideoCodec  string            `json:"vcodec"`
+	ABR         float64           `json:"abr"` // Audio bitrate in kbps
+	HTTPHeaders map[string]string `json:"http_headers"`
 }
 
-// extractBestAudioURL finds the best audio-only URL from formats
-func extractBestAudioURL(formats []Format) string {
-	var bestURL string
-	var bestBitrate float64
+type audioStream struct {
+	URL       string
+	Headers   map[string]string
+	ExpiresAt time.Time
+}
+
+// extractBestAudioStream finds the best audio-only stream metadata from formats.
+func extractBestAudioStream(formats []Format) audioStream {
+	var best Format
+	var foundBest bool
 
 	for _, f := range formats {
 		// Skip if no audio
@@ -61,22 +70,63 @@ func extractBestAudioURL(formats []Format) string {
 		hasVideo := f.VideoCodec != "none" && f.VideoCodec != ""
 
 		// Select highest bitrate audio-only
-		if !hasVideo && f.ABR > bestBitrate && f.URL != "" {
-			bestBitrate = f.ABR
-			bestURL = f.URL
+		if !hasVideo && f.URL != "" && (!foundBest || f.ABR > best.ABR) {
+			best = f
+			foundBest = true
 		}
 	}
 
 	// Fallback: if no audio-only found, take any format with audio
-	if bestURL == "" {
+	if !foundBest {
 		for _, f := range formats {
 			if f.AudioCodec != "none" && f.AudioCodec != "" && f.URL != "" {
-				return f.URL
+				best = f
+				foundBest = true
+				break
 			}
 		}
 	}
 
-	return bestURL
+	if !foundBest {
+		return audioStream{}
+	}
+
+	return audioStream{
+		URL:       best.URL,
+		Headers:   cloneHeaders(best.HTTPHeaders),
+		ExpiresAt: parseStreamExpiry(best.URL),
+	}
+}
+
+func parseStreamExpiry(rawURL string) time.Time {
+	if rawURL == "" {
+		return time.Time{}
+	}
+
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		return time.Time{}
+	}
+
+	expiresAt, err := strconv.ParseInt(parsed.Query().Get("expire"), 10, 64)
+	if err != nil || expiresAt <= 0 {
+		return time.Time{}
+	}
+
+	return time.Unix(expiresAt, 0).UTC()
+}
+
+func cloneHeaders(headers map[string]string) map[string]string {
+	if len(headers) == 0 {
+		return nil
+	}
+
+	cloned := make(map[string]string, len(headers))
+	for key, value := range headers {
+		cloned[key] = value
+	}
+
+	return cloned
 }
 
 // Search searches for videos and returns track information
@@ -109,8 +159,8 @@ func (c *Client) Search(query string) ([]*player.Track, error) {
 		return nil, fmt.Errorf("failed to parse search result: %w", err)
 	}
 
-	streamURL := extractBestAudioURL(result.Formats)
-	logger.Timing("YouTube search completed", "query", query, "duration_ms", time.Since(start).Milliseconds(), "has_stream_url", streamURL != "")
+	stream := extractBestAudioStream(result.Formats)
+	logger.Timing("YouTube search completed", "query", query, "duration_ms", time.Since(start).Milliseconds(), "has_stream_url", stream.URL != "")
 
 	track := &player.Track{
 		ID:        result.ID,
@@ -121,8 +171,8 @@ func (c *Client) Search(query string) ([]*player.Track, error) {
 		Source:    player.SourceYouTube,
 		Thumbnail: result.Thumbnail,
 		IsLive:    result.IsLive,
-		StreamURL: streamURL,
 	}
+	track.SetPrefetchedStream(stream.URL, stream.Headers, stream.ExpiresAt)
 
 	return []*player.Track{track}, nil
 }
@@ -156,8 +206,8 @@ func (c *Client) GetVideoInfo(url string) (*player.Track, error) {
 		return nil, fmt.Errorf("failed to parse video info: %w", err)
 	}
 
-	streamURL := extractBestAudioURL(result.Formats)
-	logger.Timing("Video info fetch completed", "url", url, "duration_ms", time.Since(start).Milliseconds(), "has_stream_url", streamURL != "")
+	stream := extractBestAudioStream(result.Formats)
+	logger.Timing("Video info fetch completed", "url", url, "duration_ms", time.Since(start).Milliseconds(), "has_stream_url", stream.URL != "")
 
 	track := &player.Track{
 		ID:        result.ID,
@@ -168,8 +218,8 @@ func (c *Client) GetVideoInfo(url string) (*player.Track, error) {
 		Source:    player.SourceYouTube,
 		Thumbnail: result.Thumbnail,
 		IsLive:    result.IsLive,
-		StreamURL: streamURL,
 	}
+	track.SetPrefetchedStream(stream.URL, stream.Headers, stream.ExpiresAt)
 
 	return track, nil
 }
@@ -287,7 +337,8 @@ func (c *Client) prefetchStreamURLs(tracks []*player.Track, count int) {
 				return
 			}
 
-			track.StreamURL = extractBestAudioURL(result.Formats)
+			stream := extractBestAudioStream(result.Formats)
+			track.SetPrefetchedStream(stream.URL, stream.Headers, stream.ExpiresAt)
 			// Also update title if it was missing from flat playlist
 			if track.Title == "" && result.Title != "" {
 				track.Title = result.Title
@@ -353,7 +404,8 @@ func (c *Client) GetStreamURL(url string) (string, error) {
 		return "", fmt.Errorf("failed to get stream URL: %w", err)
 	}
 
-	return strings.TrimSpace(string(output)), nil
+	stream := strings.TrimSpace(string(output))
+	return stream, nil
 }
 
 // IsPlaylist checks if a URL is a playlist

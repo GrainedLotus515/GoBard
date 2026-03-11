@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"io"
 	"os/exec"
+	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -201,6 +203,53 @@ func buildStreamingFFmpegArgs(sampleRate, channels int, startOffset time.Duratio
 		"pipe:1",
 	)
 	return args
+}
+
+func buildDirectStreamingFFmpegArgs(source string, headers map[string]string, sampleRate, channels int, startOffset time.Duration) []string {
+	args := make([]string, 0, 24)
+	if headerArg := formatFFmpegHeaders(headers); headerArg != "" {
+		args = append(args, "-headers", headerArg)
+	}
+
+	args = append(args,
+		"-reconnect", "1",
+		"-reconnect_streamed", "1",
+		"-reconnect_delay_max", "5",
+		"-i", source,
+	)
+	if startOffset > 0 {
+		args = append(args, "-ss", formatFFmpegTimestamp(startOffset))
+	}
+	args = append(args,
+		"-f", "s16le",
+		"-ar", fmt.Sprintf("%d", sampleRate),
+		"-ac", fmt.Sprintf("%d", channels),
+		"-loglevel", "error",
+		"pipe:1",
+	)
+	return args
+}
+
+func formatFFmpegHeaders(headers map[string]string) string {
+	if len(headers) == 0 {
+		return ""
+	}
+
+	keys := make([]string, 0, len(headers))
+	for key := range headers {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+
+	var builder strings.Builder
+	for _, key := range keys {
+		builder.WriteString(key)
+		builder.WriteString(": ")
+		builder.WriteString(headers[key])
+		builder.WriteString("\r\n")
+	}
+
+	return builder.String()
 }
 
 func formatFFmpegTimestamp(d time.Duration) string {

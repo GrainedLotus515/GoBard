@@ -31,6 +31,37 @@ func TestBuildStreamingFFmpegArgsIncludesSeekOffset(t *testing.T) {
 	}
 }
 
+func TestBuildDirectStreamingFFmpegArgsIncludesHeadersAndReconnect(t *testing.T) {
+	args := buildDirectStreamingFFmpegArgs(
+		"https://media.example/audio.webm",
+		map[string]string{
+			"User-Agent": "test-agent",
+			"Accept":     "*/*",
+		},
+		48000,
+		2,
+		5*time.Second,
+	)
+
+	if !containsSubsequence(args, []string{"-reconnect", "1", "-reconnect_streamed", "1", "-reconnect_delay_max", "5"}) {
+		t.Fatalf("buildDirectStreamingFFmpegArgs() args = %v, expected reconnect options", args)
+	}
+
+	if !containsSubsequence(args, []string{"-i", "https://media.example/audio.webm"}) {
+		t.Fatalf("buildDirectStreamingFFmpegArgs() args = %v, expected direct input URL", args)
+	}
+
+	headerIndex := slices.Index(args, "-headers")
+	if headerIndex == -1 || headerIndex+1 >= len(args) {
+		t.Fatalf("buildDirectStreamingFFmpegArgs() args = %v, expected -headers argument", args)
+	}
+
+	wantHeader := "Accept: */*\r\nUser-Agent: test-agent\r\n"
+	if got := args[headerIndex+1]; got != wantHeader {
+		t.Fatalf("header arg = %q, want %q", got, wantHeader)
+	}
+}
+
 func TestFormatFFmpegTimestamp(t *testing.T) {
 	got := formatFFmpegTimestamp(2*time.Hour + 3*time.Minute + 4*time.Second + 567*time.Millisecond)
 	if got != "02:03:04.567" {

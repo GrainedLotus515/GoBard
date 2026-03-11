@@ -371,6 +371,82 @@ func TestPlaybackSignalsCloseDoneOnEncoderFailureWithoutStarted(t *testing.T) {
 	}
 }
 
+func TestPlayTrackFallsBackWhenPrefetchedStreamEndsBeforeFirstFrame(t *testing.T) {
+	originalNewStreamingEncoder := newStreamingEncoder
+	originalSleepVoiceReady := sleepVoiceReady
+	t.Cleanup(func() {
+		newStreamingEncoder = originalNewStreamingEncoder
+		sleepVoiceReady = originalSleepVoiceReady
+	})
+
+	var callCount int
+	firstEncoder := &stubEncoder{}
+	secondEncoder := &stubEncoder{
+		frames: [][]byte{
+			[]byte("frame-1"),
+		},
+	}
+
+	newStreamingEncoder = func(url, streamURL string, streamHeaders map[string]string, sampleRate, channels int, startOffset time.Duration) (EncoderInterface, error) {
+		callCount++
+		switch callCount {
+		case 1:
+			if streamURL == "" {
+				t.Fatal("first streaming attempt should use the prefetched stream URL")
+			}
+			if len(streamHeaders) == 0 {
+				t.Fatal("first streaming attempt should include prefetched stream headers")
+			}
+			return firstEncoder, nil
+		case 2:
+			if streamURL != "" {
+				t.Fatal("fallback streaming attempt should resolve live without a prefetched URL")
+			}
+			return secondEncoder, nil
+		default:
+			t.Fatalf("unexpected streaming encoder call %d", callCount)
+			return nil, nil
+		}
+	}
+	sleepVoiceReady = func() {}
+
+	p := NewManager().GetPlayer("guild-prefetch-fallback")
+	vc := &stubVoiceConnection{}
+	p.SetVoiceConnection(vc)
+
+	session := newPlaybackSession()
+	p.activePlayback = session
+	p.lastPlayback = session
+	p.Playing = true
+	p.playbackStartedAt = time.Now()
+
+	track := &Track{
+		Title:    "fallback-track",
+		URL:      "https://www.youtube.com/watch?v=test",
+		Duration: time.Minute,
+	}
+	track.SetPrefetchedStream(
+		"https://media.example/audio.webm",
+		map[string]string{"User-Agent": "test-agent"},
+		time.Now().Add(10*time.Minute),
+	)
+
+	p.playTrack(session, track, 0)
+
+	if callCount != 2 {
+		t.Fatalf("streaming encoder calls = %d, want 2", callCount)
+	}
+	if got := len(vc.frames); got != 1 {
+		t.Fatalf("sent frames = %d, want 1", got)
+	}
+	if !firstEncoder.cleaned {
+		t.Fatal("prefetched stream encoder was not cleaned up before fallback")
+	}
+	if track.StreamURL != "" {
+		t.Fatal("prefetched stream metadata should be cleared after fallback")
+	}
+}
+
 func TestLatePlaybackCannotClearNewerSessionState(t *testing.T) {
 	originalNewCustomEncoder := newCustomEncoder
 	originalSleepVoiceReady := sleepVoiceReady

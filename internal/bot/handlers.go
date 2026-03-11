@@ -281,8 +281,8 @@ func (b *Bot) playLoop(guildID string, channelID string) {
 
 			logger.Warn("First play attempt failed, retrying", "err", err, "title", track.Title)
 
-			// Clear stream URL to force fresh fetch on retry
-			track.StreamURL = ""
+			// Clear the pre-fetched stream metadata to force a fresh live resolution on retry.
+			track.ClearPrefetchedStream()
 
 			// Retry once
 			err = b.playTrackForGuild(p)
