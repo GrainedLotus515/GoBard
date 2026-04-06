@@ -132,6 +132,7 @@ type GuildPlayer struct {
 	GuildID         string
 	Queue           *Queue
 	VoiceConnection voiceconn.Connection
+	voiceReadyWait  bool
 
 	// Playback state
 	Playing         bool
@@ -442,10 +443,14 @@ func (p *GuildPlayer) playTrack(session *playbackSession, track *Track, startOff
 	}
 	logPlaybackPath(playbackPath)
 
-	logger.PlaybackVoiceWaiting()
-	sleepVoiceReady()
-	if startupTrace != nil {
-		startupTrace.Step("Voice ready wait completed")
+	if p.consumeVoiceReadyWait() {
+		logger.PlaybackVoiceWaiting()
+		sleepVoiceReady()
+		if startupTrace != nil {
+			startupTrace.Step("Voice ready wait completed")
+		}
+	} else if startupTrace != nil {
+		startupTrace.Step("Voice ready wait skipped", "reason", "existing_voice_connection")
 	}
 
 	if session.isStopped() {
@@ -724,6 +729,7 @@ func (p *GuildPlayer) SetVoiceConnection(vc voiceconn.Connection) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.VoiceConnection = vc
+	p.voiceReadyWait = vc != nil
 }
 
 // GetCurrentPosition safely returns the current playback position.
@@ -783,6 +789,7 @@ func (p *GuildPlayer) Disconnect() error {
 	session := p.stopPlaybackLocked(true)
 	vc := p.VoiceConnection
 	p.VoiceConnection = nil
+	p.voiceReadyWait = false
 	p.mu.Unlock()
 
 	if session != nil {
@@ -835,6 +842,19 @@ func (p *GuildPlayer) ClearVoiceConnection() {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.VoiceConnection = nil
+	p.voiceReadyWait = false
+}
+
+func (p *GuildPlayer) consumeVoiceReadyWait() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if p.VoiceConnection == nil || !p.voiceReadyWait {
+		return false
+	}
+
+	p.voiceReadyWait = false
+	return true
 }
 
 func (p *GuildPlayer) stopPlaybackLocked(resetPosition bool) *playbackSession {

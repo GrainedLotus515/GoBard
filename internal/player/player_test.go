@@ -519,6 +519,61 @@ func TestLatePlaybackCannotClearNewerSessionState(t *testing.T) {
 	}
 }
 
+func TestPlayTrackWaitsForVoiceReadyOnlyOncePerConnection(t *testing.T) {
+	originalNewCustomEncoder := newCustomEncoder
+	originalSleepVoiceReady := sleepVoiceReady
+	t.Cleanup(func() {
+		newCustomEncoder = originalNewCustomEncoder
+		sleepVoiceReady = originalSleepVoiceReady
+	})
+
+	var waitCalls atomic.Int32
+	newCustomEncoder = func(string, int, int, time.Duration) (EncoderInterface, error) {
+		return &stubEncoder{
+			frames: [][]byte{
+				[]byte("frame-1"),
+			},
+		}, nil
+	}
+	sleepVoiceReady = func() {
+		waitCalls.Add(1)
+	}
+
+	p := NewManager().GetPlayer("guild-voice-wait-once")
+	p.SetVoiceConnection(&stubVoiceConnection{})
+
+	runPlayback := func(title string) {
+		session := newPlaybackSession()
+		p.activePlayback = session
+		p.lastPlayback = session
+		p.Playing = true
+		p.playbackStartedAt = time.Now()
+
+		p.playTrack(session, &Track{
+			Title:     title,
+			LocalPath: "/tmp/" + title + ".opus",
+		}, 0)
+	}
+
+	runPlayback("first")
+	if got := waitCalls.Load(); got != 1 {
+		t.Fatalf("voice ready waits after first playback = %d, want 1", got)
+	}
+
+	runPlayback("second")
+	if got := waitCalls.Load(); got != 1 {
+		t.Fatalf("voice ready waits after second playback on same connection = %d, want 1", got)
+	}
+
+	p.ClearVoiceConnection()
+	p.SetVoiceConnection(&stubVoiceConnection{})
+
+	runPlayback("third")
+	if got := waitCalls.Load(); got != 2 {
+		t.Fatalf("voice ready waits after reconnect playback = %d, want 2", got)
+	}
+}
+
 func TestStartLoopIfIdleIsAtomic(t *testing.T) {
 	p := NewManager().GetPlayer("guild-loop")
 
