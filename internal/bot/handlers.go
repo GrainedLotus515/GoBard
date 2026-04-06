@@ -18,12 +18,21 @@ import (
 // handlePlay handles the play command
 func (b *Bot) handlePlay(s *discordgo.Session, i *discordgo.InteractionCreate) error {
 	query := i.ApplicationCommandData().Options[0].StringValue()
+	trace := logger.NewTrace(
+		"play_command",
+		"guild", i.GuildID,
+		"user", i.Member.User.ID,
+		"query", query,
+	)
 
 	// Get user's voice channel
+	trace.Step("Looking up caller voice channel")
 	channelID, err := b.GetVoiceChannel(i.GuildID, i.Member.User.ID)
 	if err != nil {
+		trace.Finish("Caller voice channel lookup failed", "err", err)
 		return fmt.Errorf("you must be in a voice channel to play music")
 	}
+	trace.Step("Caller voice channel resolved", "channel_id", channelID)
 
 	// Get or create player
 	p := b.PlayerManager.GetPlayer(i.GuildID)
@@ -31,21 +40,27 @@ func (b *Bot) handlePlay(s *discordgo.Session, i *discordgo.InteractionCreate) e
 
 	// Join voice channel if not already connected
 	if !p.IsVoiceConnected() {
+		trace.Step("Joining voice channel", "channel_id", channelID)
 		vc, err := b.JoinVoiceChannel(i.GuildID, channelID)
 		if err != nil {
+			trace.Finish("Voice channel join failed", "channel_id", channelID, "err", err)
 			return err
 		}
 		p.SetVoiceConnection(vc)
+		trace.Step("Voice channel joined", "channel_id", channelID)
 	}
 
 	// Defer the response since this might take a while
 	s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
 		Type: discordgo.InteractionResponseDeferredChannelMessageWithSource,
 	})
+	trace.Step("Deferred interaction response sent")
 
 	// Parse the query and get tracks
+	trace.Step("Resolving play query")
 	tracks, err := b.resolveQuery(query, i.Member.User.ID)
 	if err != nil {
+		trace.Finish("Play query resolution failed", "err", err)
 		b.editDeferredEmbedComponents(s, i, botui.BuildStatusCard(botui.StatusCardSpec{
 			Title:       "Command Failed",
 			Description: err.Error(),
@@ -55,6 +70,7 @@ func (b *Bot) handlePlay(s *discordgo.Session, i *discordgo.InteractionCreate) e
 	}
 
 	if len(tracks) == 0 {
+		trace.Finish("Play query returned no tracks")
 		b.editDeferredEmbedComponents(s, i, botui.BuildStatusCard(botui.StatusCardSpec{
 			Title:       "Nothing Found",
 			Description: "No songs matched that query.",
@@ -62,19 +78,58 @@ func (b *Bot) handlePlay(s *discordgo.Session, i *discordgo.InteractionCreate) e
 		}), nil)
 		return nil
 	}
+	trace.Step("Play query resolved", "track_count", len(tracks))
+
+	fastPathTrack := len(tracks) == 1 && tracks[0].MetadataPending
+	pendingMode := ""
+	if fastPathTrack {
+		logger.Info(
+			"Fast URL path selected",
+			"trace_id", trace.ID(),
+			"raw_url", query,
+			"canonical_url", tracks[0].URL,
+			"video_id", tracks[0].ID,
+		)
+		if wasIdle {
+			pendingMode = pendingInteractionModeStartingPlayback
+		} else {
+			pendingMode = pendingInteractionModeQueuedSingle
+		}
+	}
 
 	// Add tracks to queue
 	for _, track := range tracks {
+		if track.RequestTraceID == "" {
+			track.RequestTraceID = trace.ID()
+		}
+		if track.RequestedAt.IsZero() {
+			track.RequestedAt = trace.StartedAt()
+		}
 		p.Queue.Add(track)
 	}
 
+	if fastPathTrack {
+		b.registerPendingInteractionResponse(
+			trace.ID(),
+			i.Interaction,
+			i.GuildID,
+			i.ChannelID,
+			tracks[0],
+			pendingMode,
+		)
+	}
+
 	// Start playing if playback loop is not already running.
-	if p.StartLoopIfIdle() {
+	shouldStartPlayback := p.StartLoopIfIdle()
+	delayLoopStartForFastPath := fastPathTrack && wasIdle && shouldStartPlayback
+	if shouldStartPlayback && !delayLoopStartForFastPath {
+		trace.Step("Starting playback loop")
 		go b.playLoop(i.GuildID, i.ChannelID)
 	}
 
 	queueLength := p.Queue.Length()
 	loopEnabled := p.Queue.IsLoopEnabled()
+	trace.Step("Tracks queued", "queue_length", queueLength, "was_idle", wasIdle)
 
 	if wasIdle {
 		contextValue := "Starting playback"
@@ -92,6 +147,14 @@ func (b *Bot) handlePlay(s *discordgo.Session, i *discordgo.InteractionCreate) e
 			true,
 		)
 		b.editDeferredEmbedComponents(s, i, embed, components)
+		if delayLoopStartForFastPath {
+			trace.Step("Starting playback loop")
+			go b.playLoop(i.GuildID, i.ChannelID)
+		}
+		if fastPathTrack {
+			b.hydrateFastURLTrackAsync(trace.ID(), tracks[0])
+		}
+		trace.Finish("Play command completed", "status", "starting_playback", "first_track", tracks[0].Title)
 		return nil
 	}
 
@@ -106,6 +169,10 @@ func (b *Bot) handlePlay(s *discordgo.Session, i *discordgo.InteractionCreate) e
 			false,
 		)
 		b.editDeferredEmbedComponents(s, i, embed, components)
+		if fastPathTrack {
+			b.hydrateFastURLTrackAsync(trace.ID(), tracks[0])
+		}
+		trace.Finish("Play command completed", "status", "queued", "first_track", tracks[0].Title, "queue_position", queueLength)
 		return nil
 	}
 
@@ -115,6 +182,7 @@ func (b *Bot) handlePlay(s *discordgo.Session, i *discordgo.InteractionCreate) e
 		Description: fmt.Sprintf("Queued %d tracks starting at #%d; first added was %s.", len(tracks), startPosition, tracks[0].Title),
 		Color:       botui.ColorSuccess,
 	}), nil)
+	trace.Finish("Play command completed", "status", "queued_batch", "track_count", len(tracks), "start_position", startPosition)
 
 	return nil
 }
@@ -180,6 +248,23 @@ func (b *Bot) resolveQuery(query, userID string) ([]*player.Track, error) {
 
 	// Check if it's a YouTube URL
 	if youtube.IsYouTubeURL(query) {
+		if canonicalURL, videoID, ok := youtube.NormalizeSingleVideoURL(query); ok {
+			return []*player.Track{
+				{
+					ID:              videoID,
+					Title:           "Loading track...",
+					Artist:          "YouTube",
+					URL:             canonicalURL,
+					Duration:        0,
+					Source:          player.SourceYouTube,
+					Thumbnail:       "",
+					IsLive:          false,
+					RequestedBy:     userID,
+					MetadataPending: true,
+				},
+			}, nil
+		}
+
 		if youtube.IsPlaylist(query) {
 			tracks, err := b.YouTube.GetPlaylistInfo(query)
 			if err != nil {
@@ -190,7 +275,7 @@ func (b *Bot) resolveQuery(query, userID string) ([]*player.Track, error) {
 			}
 			return tracks, nil
 		} else {
-			track, err := b.YouTube.GetVideoInfo(query)
+			track, err := b.getVideoInfo(query)
 			if err != nil {
 				return nil, err
 			}
@@ -247,6 +332,15 @@ func (b *Bot) playLoop(guildID string, channelID string) {
 
 		logger.Info("Processing track", "title", track.Title)
 		trackSelectedAt := time.Now()
+		startupTrace := logger.ResumeTrace(track.RequestTraceID, "track_startup", track.RequestedAt)
+		if startupTrace != nil {
+			startupTrace.Step(
+				"Playback loop selected track",
+				"title", track.Title,
+				"url", track.URL,
+				"queue_wait_ms", time.Since(track.RequestedAt).Milliseconds(),
+			)
+		}
 
 		// Check if track is already cached
 		cacheKey := cache.GenerateKey(track.URL)
@@ -256,6 +350,9 @@ func (b *Bot) playLoop(guildID string, channelID string) {
 			logger.Timing("Cache hit before playback", "title", track.Title, "key", cacheKey)
 			logger.PlaybackCached(cachedPath)
 			track.LocalPath = cachedPath
+			if startupTrace != nil {
+				startupTrace.Step("Cache hit before playback", "cache_key", cacheKey)
+			}
 		} else {
 			// Not cached - stream immediately and defer download until playback begins
 			logger.Timing("Cache miss before playback", "title", track.Title, "key", cacheKey)
@@ -263,16 +360,90 @@ func (b *Bot) playLoop(guildID string, channelID string) {
 			logger.Info("Track not cached, streaming immediately")
 			track.LocalPath = "" // Empty path triggers streaming encoder
 			cacheMiss = true
+			if startupTrace != nil {
+				startupTrace.Step("Cache miss before playback", "cache_key", cacheKey)
+			}
+
+			now := time.Now()
+			if track.MetadataPending {
+				logger.Info(
+					"Skipping blocking metadata fetch for fast URL path",
+					"trace_id", track.RequestTraceID,
+					"title", track.Title,
+					"url", track.URL,
+					"reason", "metadata_pending_fast_path",
+				)
+				if startupTrace != nil {
+					startupTrace.Step(
+						"Skipping blocking metadata fetch for fast URL path",
+						"reason", "metadata_pending_fast_path",
+						"title", track.Title,
+						"url", track.URL,
+					)
+				}
+			} else if track.URL != "" && !track.IsLive && !track.CanUsePrefetchedStream(now, 0) {
+				if skipRefresh, age := b.shouldSkipStreamMetadataRefresh(track, now); skipRefresh {
+					logger.Info(
+						"Skipping stream metadata refresh",
+						"reason", "recent_resolution_no_stream_url",
+						"age_ms", age.Milliseconds(),
+						"trace_id", track.RequestTraceID,
+						"title", track.Title,
+						"url", track.URL,
+					)
+					if startupTrace != nil {
+						startupTrace.Step(
+							"Skipping stream metadata refresh",
+							"reason", "recent_resolution_no_stream_url",
+							"age_ms", age.Milliseconds(),
+							"title", track.Title,
+							"url", track.URL,
+						)
+					}
+				} else {
+					refreshStart := time.Now()
+					logger.Info("Refreshing stream metadata before playback", "title", track.Title, "url", track.URL)
+					if startupTrace != nil {
+						startupTrace.Step("Refreshing stream metadata before playback", "url", track.URL)
+					}
+					if err := b.hydrateTrackStreamInfo(track); err != nil {
+						logger.Warn("Stream metadata refresh failed before playback", "title", track.Title, "err", err)
+						if startupTrace != nil {
+							startupTrace.Step("Stream metadata refresh failed before playback", "err", err)
+						}
+					} else {
+						logger.Timing(
+							"Stream metadata refreshed before playback",
+							"title", track.Title,
+							"elapsed_ms", time.Since(refreshStart).Milliseconds(),
+							"expires_at", track.StreamExpiresAt,
+						)
+						if startupTrace != nil {
+							startupTrace.Step(
+								"Stream metadata refreshed before playback",
+								"refresh_ms", time.Since(refreshStart).Milliseconds(),
+								"expires_at", track.StreamExpiresAt,
+							)
+						}
+					}
+				}
+			}
 		}
 
 		// Play the track with retry logic
 		logger.Info("Starting playback")
+		if startupTrace != nil {
+			startupTrace.Step("Invoking player playback", "cache_miss", cacheMiss)
+		}
 		err := b.playTrackForGuild(p)
 
 		if err != nil {
 			// Check if error is due to voice connection being lost
 			if err.Error() == "not connected to voice channel" {
 				logger.Error("Voice connection lost, cannot play track", "title", track.Title)
+				if startupTrace != nil {
+					startupTrace.Finish("Playback aborted because voice connection was lost", "err", err)
+				}
 				p.Queue.ClearAll()
 				p.SetLoopRunning(false)
 				p.Disconnect()
@@ -280,6 +451,9 @@ func (b *Bot) playLoop(guildID string, channelID string) {
 			}
 
 			logger.Warn("First play attempt failed, retrying", "err", err, "title", track.Title)
+			if startupTrace != nil {
+				startupTrace.Step("First playback attempt failed", "err", err)
+			}
 
 			// Clear the pre-fetched stream metadata to force a fresh live resolution on retry.
 			track.ClearPrefetchedStream()
@@ -287,13 +461,21 @@ func (b *Bot) playLoop(guildID string, channelID string) {
 			// Retry once
 			err = b.playTrackForGuild(p)
 			if err != nil {
+				b.failPendingInteractionResponse(track.RequestTraceID, track.Title, err)
+
 				// Send failure notification to Discord
 				errMsg := fmt.Sprintf("❌ **Track Failed:** %s\n**Reason:** %v", track.Title, err)
-				b.Session.ChannelMessageSend(channelID, errMsg)
+				_ = b.sendChannelMessage(channelID, errMsg)
 
 				logger.Error("Track failed after retry", "title", track.Title, "err", err)
+				if startupTrace != nil {
+					startupTrace.Finish("Track startup failed after retry", "err", err)
+				}
 				p.Queue.Next()
 				continue
+			}
+			if startupTrace != nil {
+				startupTrace.Step("Playback retry succeeded")
 			}
 		}
 

@@ -11,6 +11,7 @@ import (
 
 	"github.com/GrainedLotus515/gobard/internal/cache"
 	"github.com/GrainedLotus515/gobard/internal/player"
+	"github.com/bwmarrin/discordgo"
 )
 
 func TestPlayLoopSeekReplaysCurrentTrackBeforeAdvancing(t *testing.T) {
@@ -281,6 +282,270 @@ func TestPlayLoopRetryStartsDeferredCacheOnceAfterSuccessfulAttempt(t *testing.T
 	}
 	if got := atomic.LoadInt32(&cacheCalls); got != 1 {
 		t.Fatalf("cache download calls = %d, want 1", got)
+	}
+}
+
+func TestPlayLoopRefreshesStreamMetadataBeforePlaybackWhenMissing(t *testing.T) {
+	cacheStore, manager, p := newPlayLoopTestEnv(t)
+	track := &player.Track{
+		Title: "track-refresh",
+		URL:   "https://www.youtube.com/watch?v=refresh",
+	}
+	p.Queue.Add(track)
+
+	var hydrateCalls int32
+
+	b := &Bot{
+		PlayerManager: manager,
+		Cache:         cacheStore,
+	}
+	b.hydrateStreamInfoFn = func(tk *player.Track) error {
+		atomic.AddInt32(&hydrateCalls, 1)
+		tk.SetPrefetchedStream(
+			"https://media.example/audio.webm",
+			map[string]string{"User-Agent": "test-agent"},
+			time.Now().Add(10*time.Minute),
+		)
+		return nil
+	}
+	b.playTrackFn = func(gp *player.GuildPlayer) error {
+		current := gp.Queue.Current()
+		if current == nil {
+			return fmt.Errorf("expected current track before playback")
+		}
+		if current.StreamURL == "" {
+			return fmt.Errorf("expected refreshed stream URL before playback")
+		}
+		if len(current.StreamHeaders) == 0 {
+			return fmt.Errorf("expected refreshed stream headers before playback")
+		}
+		return nil
+	}
+	b.waitForCompletionFn = func(gp *player.GuildPlayer) {
+		gp.ClearVoiceConnection()
+	}
+
+	done := runPlayLoopAsync(b, p.GuildID)
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("playLoop did not finish in time")
+	}
+
+	if got := atomic.LoadInt32(&hydrateCalls); got != 1 {
+		t.Fatalf("hydrate stream calls = %d, want 1", got)
+	}
+}
+
+func TestPlayLoopSkipsStreamMetadataRefreshAfterRecentNoStreamResolution(t *testing.T) {
+	cacheStore, manager, p := newPlayLoopTestEnv(t)
+	track := &player.Track{
+		Title: "track-skip-refresh",
+		URL:   "https://www.youtube.com/watch?v=skip",
+	}
+	track.SetPrefetchedStream("", nil, time.Time{})
+	p.Queue.Add(track)
+
+	var hydrateCalls int32
+
+	b := &Bot{
+		PlayerManager: manager,
+		Cache:         cacheStore,
+	}
+	b.hydrateStreamInfoFn = func(*player.Track) error {
+		atomic.AddInt32(&hydrateCalls, 1)
+		return nil
+	}
+	b.playTrackFn = func(*player.GuildPlayer) error { return nil }
+	b.waitForCompletionFn = func(gp *player.GuildPlayer) {
+		gp.ClearVoiceConnection()
+	}
+
+	done := runPlayLoopAsync(b, p.GuildID)
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("playLoop did not finish in time")
+	}
+
+	if got := atomic.LoadInt32(&hydrateCalls); got != 0 {
+		t.Fatalf("hydrate stream calls = %d, want 0", got)
+	}
+}
+
+func TestPlayLoopRefreshesStreamMetadataWhenRecentNoStreamResolutionIsStale(t *testing.T) {
+	cacheStore, manager, p := newPlayLoopTestEnv(t)
+	track := &player.Track{
+		Title: "track-stale-refresh",
+		URL:   "https://www.youtube.com/watch?v=stale",
+	}
+	track.SetPrefetchedStream("", nil, time.Time{})
+	track.MetadataFetchedAt = time.Now().Add(-(recentStreamMetadataSkipWindow + time.Second))
+	p.Queue.Add(track)
+
+	var hydrateCalls int32
+
+	b := &Bot{
+		PlayerManager: manager,
+		Cache:         cacheStore,
+	}
+	b.hydrateStreamInfoFn = func(tk *player.Track) error {
+		atomic.AddInt32(&hydrateCalls, 1)
+		tk.SetPrefetchedStream(
+			"https://media.example/audio.webm",
+			map[string]string{"User-Agent": "test-agent"},
+			time.Now().Add(10*time.Minute),
+		)
+		return nil
+	}
+	b.playTrackFn = func(gp *player.GuildPlayer) error {
+		current := gp.Queue.Current()
+		if current == nil {
+			return fmt.Errorf("expected current track before playback")
+		}
+		if current.StreamURL == "" {
+			return fmt.Errorf("expected refreshed stream URL before playback")
+		}
+		return nil
+	}
+	b.waitForCompletionFn = func(gp *player.GuildPlayer) {
+		gp.ClearVoiceConnection()
+	}
+
+	done := runPlayLoopAsync(b, p.GuildID)
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("playLoop did not finish in time")
+	}
+
+	if got := atomic.LoadInt32(&hydrateCalls); got != 1 {
+		t.Fatalf("hydrate stream calls = %d, want 1", got)
+	}
+}
+
+func TestPlayLoopSkipsBlockingMetadataFetchForMetadataPendingTrack(t *testing.T) {
+	cacheStore, manager, p := newPlayLoopTestEnv(t)
+	track := &player.Track{
+		Title:           "Loading track...",
+		URL:             "https://www.youtube.com/watch?v=fastpath",
+		MetadataPending: true,
+	}
+	p.Queue.Add(track)
+
+	var hydrateCalls int32
+
+	b := &Bot{
+		PlayerManager: manager,
+		Cache:         cacheStore,
+	}
+	b.hydrateStreamInfoFn = func(*player.Track) error {
+		atomic.AddInt32(&hydrateCalls, 1)
+		return nil
+	}
+	b.playTrackFn = func(gp *player.GuildPlayer) error {
+		current := gp.Queue.Current()
+		if current == nil {
+			return fmt.Errorf("expected current track before playback")
+		}
+		if !current.MetadataPending {
+			return fmt.Errorf("expected MetadataPending track to remain pending during playback start")
+		}
+		return nil
+	}
+	b.waitForCompletionFn = func(gp *player.GuildPlayer) {
+		gp.ClearVoiceConnection()
+	}
+
+	done := runPlayLoopAsync(b, p.GuildID)
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("playLoop did not finish in time")
+	}
+
+	if got := atomic.LoadInt32(&hydrateCalls); got != 0 {
+		t.Fatalf("hydrate stream calls = %d, want 0", got)
+	}
+}
+
+func TestPlayLoopFailureUpdatesPendingInteractionResponseAndSendsChannelNotice(t *testing.T) {
+	cacheStore, manager, p := newPlayLoopTestEnv(t)
+	track := &player.Track{
+		Title:           "Loading track...",
+		URL:             "https://www.youtube.com/watch?v=broken",
+		RequestTraceID:  "trace-playloop-failure",
+		RequestedAt:     time.Now(),
+		MetadataPending: true,
+	}
+	p.Queue.Add(track)
+
+	editCalls := make(chan *discordgo.WebhookEdit, 1)
+	var channelCalls int32
+
+	b := &Bot{
+		PlayerManager: manager,
+		Cache:         cacheStore,
+		nowFn:         time.Now,
+	}
+	b.playTrackFn = func(*player.GuildPlayer) error {
+		return fmt.Errorf("stream unavailable")
+	}
+	b.interactionResponseEditFn = func(_ *discordgo.Interaction, edit *discordgo.WebhookEdit) (*discordgo.Message, error) {
+		editCalls <- edit
+		return &discordgo.Message{}, nil
+	}
+	b.channelMessageSendFn = func(_ string, _ string) (*discordgo.Message, error) {
+		atomic.AddInt32(&channelCalls, 1)
+		p.ClearVoiceConnection()
+		return &discordgo.Message{}, nil
+	}
+
+	b.registerPendingInteractionResponse(
+		track.RequestTraceID,
+		&discordgo.Interaction{ID: "interaction-failure"},
+		p.GuildID,
+		"channel-1",
+		track,
+		pendingInteractionModeStartingPlayback,
+	)
+
+	done := runPlayLoopAsync(b, p.GuildID)
+
+	var edit *discordgo.WebhookEdit
+	select {
+	case edit = <-editCalls:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for failure response edit")
+	}
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("playLoop did not finish in time")
+	}
+
+	if got := atomic.LoadInt32(&channelCalls); got != 1 {
+		t.Fatalf("channel message sends = %d, want 1", got)
+	}
+
+	if edit.Embeds == nil || len(*edit.Embeds) != 1 {
+		t.Fatalf("edit embeds = %#v, want exactly one embed", edit.Embeds)
+	}
+	embed := (*edit.Embeds)[0]
+	if embed.Title != "Command Failed" {
+		t.Fatalf("embed.Title = %q, want %q", embed.Title, "Command Failed")
+	}
+	if embed.Description != "stream unavailable" {
+		t.Fatalf("embed.Description = %q, want %q", embed.Description, "stream unavailable")
+	}
+
+	if _, ok := b.getPendingInteractionResponse(track.RequestTraceID); ok {
+		t.Fatal("pending interaction response still present after playback failure update")
 	}
 }
 

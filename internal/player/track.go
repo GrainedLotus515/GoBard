@@ -30,6 +30,12 @@ type Track struct {
 	StreamURL       string // Pre-fetched direct stream URL for faster playback
 	StreamHeaders   map[string]string
 	StreamExpiresAt time.Time
+	RequestTraceID  string    // Correlates debug logs for startup tracing
+	RequestedAt     time.Time // When the play command queued this track
+
+	MetadataFetchedAt       time.Time // When stream metadata was last resolved
+	DirectStreamUnavailable bool      // Whether the last stream metadata resolution found no direct stream URL
+	MetadataPending         bool      // Whether title/artist/duration/thumbnail are placeholder values awaiting hydration
 }
 
 const prefetchedStreamSafetyMargin = 2 * time.Minute
@@ -39,6 +45,8 @@ func (t *Track) SetPrefetchedStream(url string, headers map[string]string, expir
 	t.StreamURL = url
 	t.StreamHeaders = cloneStringMap(headers)
 	t.StreamExpiresAt = expiresAt
+	t.MetadataFetchedAt = time.Now()
+	t.DirectStreamUnavailable = url == ""
 }
 
 // ClearPrefetchedStream removes any previously resolved direct stream metadata.
@@ -182,6 +190,67 @@ func (q *Queue) Remove(index int) bool {
 	}
 
 	return true
+}
+
+// ReplaceTrack swaps a queued/current track by pointer identity.
+func (q *Queue) ReplaceTrack(target *Track, replacement *Track) bool {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+
+	if target == nil || replacement == nil {
+		return false
+	}
+
+	for idx, track := range q.Tracks {
+		if track == target {
+			q.Tracks[idx] = replacement
+			return true
+		}
+	}
+
+	return false
+}
+
+// RemoveTrack removes a queued/current track by pointer identity.
+func (q *Queue) RemoveTrack(target *Track) bool {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+
+	if target == nil {
+		return false
+	}
+
+	for idx, track := range q.Tracks {
+		if track != target {
+			continue
+		}
+
+		q.Tracks = append(q.Tracks[:idx], q.Tracks[idx+1:]...)
+		if q.CurrentIndex >= idx {
+			q.CurrentIndex--
+		}
+		return true
+	}
+
+	return false
+}
+
+// FindTrack locates a queued/current track by pointer identity.
+func (q *Queue) FindTrack(target *Track) (index int, isCurrent bool, ok bool) {
+	q.mu.RLock()
+	defer q.mu.RUnlock()
+
+	if target == nil {
+		return -1, false, false
+	}
+
+	for idx, track := range q.Tracks {
+		if track == target {
+			return idx, idx == q.CurrentIndex, true
+		}
+	}
+
+	return -1, false, false
 }
 
 // Move moves a track from one position to another

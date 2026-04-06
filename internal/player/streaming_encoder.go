@@ -121,7 +121,7 @@ func NewStreamingEncoder(url, streamURL string, streamHeaders map[string]string,
 		channels:    channels,
 		sampleRate:  sampleRate,
 		done:        false,
-		frameChan:   make(chan []byte, 300), // Increased from 100 to 300 (~6 seconds buffer)
+		frameChan:   make(chan []byte, 1000), // Increased from 100 to 1000 (~20 seconds buffer)
 		stopChan:    make(chan bool, 1),
 	}
 
@@ -152,6 +152,7 @@ func (e *StreamingEncoder) monitorFFmpegErrors(stderr io.Reader) {
 // encodeLoop reads PCM data from FFmpeg and encodes to Opus frames
 func (e *StreamingEncoder) encodeLoop(reader io.Reader) {
 	defer close(e.frameChan)
+	debugPlayback := isDebugPlaybackEnabled()
 
 	logger.Info("Starting encode loop")
 
@@ -174,19 +175,15 @@ func (e *StreamingEncoder) encodeLoop(reader io.Reader) {
 		}
 
 		// Read PCM data from FFmpeg
-		n, err := reader.Read(pcmBuffer)
-		if err != nil {
-			// Handle both EOF and unexpected EOF as end of stream
-			if err == io.EOF || err == io.ErrUnexpectedEOF {
-				logger.Info("Stream ended normally", "frames_encoded", frameCount)
-			} else {
-				logger.Error("FFmpeg read error", "err", err, "frames_encoded", frameCount)
-			}
+		n, readErr := io.ReadFull(reader, pcmBuffer)
+		if readErr != nil && readErr != io.EOF && readErr != io.ErrUnexpectedEOF {
+			logger.Error("FFmpeg read error", "err", readErr, "frames_encoded", frameCount)
 			return
 		}
 
 		if n == 0 {
-			continue
+			logger.Info("Stream ended normally", "frames_encoded", frameCount)
+			return
 		}
 
 		if frameCount == 0 {
@@ -218,6 +215,17 @@ func (e *StreamingEncoder) encodeLoop(reader io.Reader) {
 				if frameCount == 1 {
 					logger.Timing("First opus frame ready", "duration_ms", time.Since(firstFrameTime).Milliseconds())
 				}
+				if debugPlayback && frameCount%100 == 0 {
+					buffered, capacity := len(e.frameChan), cap(e.frameChan)
+					if buffered < capacity/10 {
+						logger.Warn(
+							"Encoder buffer running low",
+							"frames_encoded", frameCount,
+							"buffered_frames", buffered,
+							"buffer_capacity", capacity,
+						)
+					}
+				}
 				if frameCount%500 == 0 {
 					logger.Info("Streaming progress", "frames_encoded", frameCount)
 				}
@@ -227,6 +235,11 @@ func (e *StreamingEncoder) encodeLoop(reader io.Reader) {
 				stopProcess(e.ytdlpCmd)
 				return
 			}
+		}
+
+		if readErr == io.EOF || readErr == io.ErrUnexpectedEOF {
+			logger.Info("Stream ended normally", "frames_encoded", frameCount)
+			return
 		}
 	}
 }
@@ -238,6 +251,11 @@ func (e *StreamingEncoder) OpusFrame() ([]byte, error) {
 		return nil, io.EOF
 	}
 	return frame, nil
+}
+
+// BufferLevel reports the number of buffered frames and channel capacity.
+func (e *StreamingEncoder) BufferLevel() (int, int) {
+	return len(e.frameChan), cap(e.frameChan)
 }
 
 // Cleanup stops the encoder and releases resources

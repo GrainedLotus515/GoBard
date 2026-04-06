@@ -3,8 +3,10 @@ package bot
 import (
 	"context"
 	"fmt"
+	"sync"
 	"time"
 
+	"github.com/GrainedLotus515/gobard/internal/botui"
 	"github.com/GrainedLotus515/gobard/internal/cache"
 	"github.com/GrainedLotus515/gobard/internal/config"
 	"github.com/GrainedLotus515/gobard/internal/discordvoice"
@@ -27,11 +29,36 @@ type Bot struct {
 	Spotify       *spotify.Client
 	Commands      []*discordgo.ApplicationCommand
 
-	playTrackFn            func(*player.GuildPlayer) error
-	waitForCompletionFn    func(*player.GuildPlayer)
-	cacheTrackFn           func(url, path string) error
-	waitForPlaybackStartFn func(*player.GuildPlayer) bool
+	pendingInteractionResponses   map[string]*pendingInteractionResponse
+	pendingInteractionResponsesMu sync.Mutex
+
+	playTrackFn               func(*player.GuildPlayer) error
+	waitForCompletionFn       func(*player.GuildPlayer)
+	cacheTrackFn              func(url, path string) error
+	hydrateStreamInfoFn       func(*player.Track) error
+	waitForPlaybackStartFn    func(*player.GuildPlayer) bool
+	getVideoInfoFn            func(string) (*player.Track, error)
+	interactionResponseEditFn func(*discordgo.Interaction, *discordgo.WebhookEdit) (*discordgo.Message, error)
+	channelMessageSendFn      func(string, string) (*discordgo.Message, error)
+	nowFn                     func() time.Time
 }
+
+type pendingInteractionResponse struct {
+	Interaction *discordgo.Interaction
+	GuildID     string
+	ChannelID   string
+	TrackRef    *player.Track
+	Mode        string
+	CreatedAt   time.Time
+}
+
+const (
+	recentStreamMetadataSkipWindow = 15 * time.Second
+	pendingInteractionResponseTTL  = 15 * time.Minute
+
+	pendingInteractionModeStartingPlayback = "starting_playback"
+	pendingInteractionModeQueuedSingle     = "queued_single"
+)
 
 // New creates a new bot instance
 func New(cfg *config.Config) (*Bot, error) {
@@ -66,6 +93,7 @@ func New(cfg *config.Config) (*Bot, error) {
 		Cache:         cacheManager,
 		YouTube:       ytClient,
 		Spotify:       spotifyClient,
+		nowFn:         time.Now,
 	}
 
 	// Register handlers
@@ -253,6 +281,386 @@ func (b *Bot) cacheTrack(url, path string) error {
 		return b.cacheTrackFn(url, path)
 	}
 	return b.YouTube.Download(url, path)
+}
+
+func (b *Bot) currentTime() time.Time {
+	if b != nil && b.nowFn != nil {
+		return b.nowFn()
+	}
+	return time.Now()
+}
+
+func cloneStringMap(src map[string]string) map[string]string {
+	if len(src) == 0 {
+		return nil
+	}
+
+	dst := make(map[string]string, len(src))
+	for key, value := range src {
+		dst[key] = value
+	}
+
+	return dst
+}
+
+func webhookEditForEmbedComponents(embed *discordgo.MessageEmbed, components []discordgo.MessageComponent) *discordgo.WebhookEdit {
+	embeds := []*discordgo.MessageEmbed{embed}
+	return &discordgo.WebhookEdit{
+		Content:    ptrString(""),
+		Embeds:     &embeds,
+		Components: &components,
+	}
+}
+
+func (b *Bot) getVideoInfo(url string) (*player.Track, error) {
+	if b.getVideoInfoFn != nil {
+		return b.getVideoInfoFn(url)
+	}
+	if b.YouTube == nil {
+		return nil, fmt.Errorf("youtube client is not initialized")
+	}
+	return b.YouTube.GetVideoInfo(url)
+}
+
+func (b *Bot) editInteractionResponse(interaction *discordgo.Interaction, edit *discordgo.WebhookEdit) error {
+	if b.interactionResponseEditFn != nil {
+		_, err := b.interactionResponseEditFn(interaction, edit)
+		return err
+	}
+	if b.Session == nil {
+		return fmt.Errorf("discord session is not initialized")
+	}
+	_, err := b.Session.InteractionResponseEdit(interaction, edit)
+	return err
+}
+
+func (b *Bot) sendChannelMessage(channelID, content string) error {
+	if b.channelMessageSendFn != nil {
+		_, err := b.channelMessageSendFn(channelID, content)
+		return err
+	}
+	if b.Session == nil {
+		return fmt.Errorf("discord session is not initialized")
+	}
+	_, err := b.Session.ChannelMessageSend(channelID, content)
+	return err
+}
+
+func (b *Bot) cleanupExpiredPendingInteractionResponses(now time.Time) {
+	b.pendingInteractionResponsesMu.Lock()
+	defer b.pendingInteractionResponsesMu.Unlock()
+	b.cleanupExpiredPendingInteractionResponsesLocked(now)
+}
+
+func (b *Bot) cleanupExpiredPendingInteractionResponsesLocked(now time.Time) {
+	if len(b.pendingInteractionResponses) == 0 {
+		return
+	}
+
+	for traceID, pending := range b.pendingInteractionResponses {
+		if pending == nil {
+			delete(b.pendingInteractionResponses, traceID)
+			continue
+		}
+
+		age := now.Sub(pending.CreatedAt)
+		if age < 0 {
+			age = 0
+		}
+		if age > pendingInteractionResponseTTL {
+			delete(b.pendingInteractionResponses, traceID)
+		}
+	}
+}
+
+func (b *Bot) registerPendingInteractionResponse(
+	traceID string,
+	interaction *discordgo.Interaction,
+	guildID string,
+	channelID string,
+	track *player.Track,
+	mode string,
+) {
+	if traceID == "" || interaction == nil || track == nil || mode == "" {
+		return
+	}
+
+	now := b.currentTime()
+
+	b.pendingInteractionResponsesMu.Lock()
+	defer b.pendingInteractionResponsesMu.Unlock()
+
+	if b.pendingInteractionResponses == nil {
+		b.pendingInteractionResponses = make(map[string]*pendingInteractionResponse)
+	}
+	b.cleanupExpiredPendingInteractionResponsesLocked(now)
+	b.pendingInteractionResponses[traceID] = &pendingInteractionResponse{
+		Interaction: interaction,
+		GuildID:     guildID,
+		ChannelID:   channelID,
+		TrackRef:    track,
+		Mode:        mode,
+		CreatedAt:   now,
+	}
+}
+
+func (b *Bot) getPendingInteractionResponse(traceID string) (*pendingInteractionResponse, bool) {
+	if traceID == "" {
+		return nil, false
+	}
+
+	now := b.currentTime()
+
+	b.pendingInteractionResponsesMu.Lock()
+	defer b.pendingInteractionResponsesMu.Unlock()
+
+	b.cleanupExpiredPendingInteractionResponsesLocked(now)
+	pending, ok := b.pendingInteractionResponses[traceID]
+	if !ok {
+		return nil, false
+	}
+
+	return pending, true
+}
+
+func (b *Bot) removePendingInteractionResponse(traceID string) {
+	if traceID == "" {
+		return
+	}
+
+	b.pendingInteractionResponsesMu.Lock()
+	defer b.pendingInteractionResponsesMu.Unlock()
+	delete(b.pendingInteractionResponses, traceID)
+}
+
+func (b *Bot) updatePendingInteractionResponseTrackRef(traceID string, track *player.Track) {
+	if traceID == "" || track == nil {
+		return
+	}
+
+	b.pendingInteractionResponsesMu.Lock()
+	defer b.pendingInteractionResponsesMu.Unlock()
+
+	if pending, ok := b.pendingInteractionResponses[traceID]; ok && pending != nil {
+		pending.TrackRef = track
+	}
+}
+
+func buildHydratedFastURLTrack(placeholder *player.Track, refreshed *player.Track) *player.Track {
+	if placeholder == nil {
+		return nil
+	}
+
+	replacement := *placeholder
+	replacement.MetadataPending = false
+
+	if refreshed == nil {
+		return &replacement
+	}
+
+	if refreshed.ID != "" {
+		replacement.ID = refreshed.ID
+	}
+	if refreshed.Title != "" {
+		replacement.Title = refreshed.Title
+	}
+	if refreshed.Artist != "" {
+		replacement.Artist = refreshed.Artist
+	}
+	if refreshed.Duration > 0 {
+		replacement.Duration = refreshed.Duration
+	}
+	if refreshed.Thumbnail != "" {
+		replacement.Thumbnail = refreshed.Thumbnail
+	}
+
+	replacement.IsLive = refreshed.IsLive
+	replacement.StreamURL = refreshed.StreamURL
+	replacement.StreamHeaders = cloneStringMap(refreshed.StreamHeaders)
+	replacement.StreamExpiresAt = refreshed.StreamExpiresAt
+	replacement.MetadataFetchedAt = refreshed.MetadataFetchedAt
+	replacement.DirectStreamUnavailable = refreshed.DirectStreamUnavailable
+
+	return &replacement
+}
+
+func (b *Bot) hydrateFastURLTrackAsync(traceID string, placeholder *player.Track) {
+	if traceID == "" || placeholder == nil || placeholder.URL == "" {
+		return
+	}
+
+	go func() {
+		logger.Info("Background URL metadata hydration started", "trace_id", traceID, "url", placeholder.URL)
+
+		refreshed, err := b.getVideoInfo(placeholder.URL)
+		if err != nil {
+			logger.Warn("Background URL metadata hydration failed", "trace_id", traceID, "url", placeholder.URL, "err", err)
+			return
+		}
+
+		replacement := buildHydratedFastURLTrack(placeholder, refreshed)
+		logger.Info(
+			"Background URL metadata hydration succeeded",
+			"trace_id", traceID,
+			"url", placeholder.URL,
+			"title", replacement.Title,
+			"has_stream_url", replacement.StreamURL != "",
+		)
+
+		pending, ok := b.getPendingInteractionResponse(traceID)
+		if !ok {
+			return
+		}
+
+		guildPlayer := b.PlayerManager.GetPlayer(pending.GuildID)
+		if !guildPlayer.Queue.ReplaceTrack(placeholder, replacement) {
+			logger.Info("Skipping response update because track is no longer queued", "trace_id", traceID, "mode", pending.Mode)
+			b.removePendingInteractionResponse(traceID)
+			return
+		}
+
+		b.updatePendingInteractionResponseTrackRef(traceID, replacement)
+		b.updatePendingInteractionResponseAfterHydration(traceID, replacement)
+	}()
+}
+
+func (b *Bot) updatePendingInteractionResponseAfterHydration(traceID string, hydratedTrack *player.Track) {
+	if traceID == "" || hydratedTrack == nil {
+		return
+	}
+
+	pending, ok := b.getPendingInteractionResponse(traceID)
+	if !ok {
+		return
+	}
+
+	guildPlayer := b.PlayerManager.GetPlayer(pending.GuildID)
+	index, isCurrent, ok := guildPlayer.Queue.FindTrack(hydratedTrack)
+	if !ok {
+		logger.Info("Skipping response update because track is no longer queued", "trace_id", traceID, "mode", pending.Mode)
+		b.removePendingInteractionResponse(traceID)
+		return
+	}
+
+	state := b.getPlaybackState(pending.GuildID)
+	paused := state.Paused && isCurrent
+
+	var (
+		embed      *discordgo.MessageEmbed
+		components []discordgo.MessageComponent
+	)
+
+	switch pending.Mode {
+	case pendingInteractionModeStartingPlayback:
+		embed, components = b.buildPlaybackCard(
+			hydratedTrack,
+			state.TotalTracks,
+			paused,
+			state.LoopEnabled,
+			"Status",
+			"Starting playback",
+			true,
+		)
+	case pendingInteractionModeQueuedSingle:
+		contextLabel := "Queued"
+		contextValue := fmt.Sprintf("Queue position #%d", index+1)
+		if isCurrent {
+			contextLabel = "Status"
+			contextValue = "Now playing"
+		}
+		embed, components = b.buildPlaybackCard(
+			hydratedTrack,
+			state.TotalTracks,
+			paused,
+			state.LoopEnabled,
+			contextLabel,
+			contextValue,
+			false,
+		)
+	default:
+		b.removePendingInteractionResponse(traceID)
+		return
+	}
+
+	if err := b.editInteractionResponse(pending.Interaction, webhookEditForEmbedComponents(embed, components)); err != nil {
+		logger.Warn("Failed to update original interaction response after hydration", "trace_id", traceID, "mode", pending.Mode, "err", err)
+		b.removePendingInteractionResponse(traceID)
+		return
+	}
+
+	logger.Info("Original interaction response updated after hydration", "trace_id", traceID, "mode", pending.Mode, "title", hydratedTrack.Title)
+	b.removePendingInteractionResponse(traceID)
+}
+
+func (b *Bot) failPendingInteractionResponse(traceID string, title string, err error) {
+	if traceID == "" || err == nil {
+		return
+	}
+
+	pending, ok := b.getPendingInteractionResponse(traceID)
+	if !ok {
+		return
+	}
+
+	embed := botui.BuildStatusCard(botui.StatusCardSpec{
+		Title:       "Command Failed",
+		Description: err.Error(),
+		Color:       botui.ColorError,
+	})
+
+	if editErr := b.editInteractionResponse(pending.Interaction, webhookEditForEmbedComponents(embed, nil)); editErr != nil {
+		logger.Warn("Failed to update original interaction response after playback failure", "trace_id", traceID, "title", title, "err", editErr)
+		b.removePendingInteractionResponse(traceID)
+		return
+	}
+
+	logger.Info("Original interaction response updated after playback failure", "trace_id", traceID, "err", err)
+	b.removePendingInteractionResponse(traceID)
+}
+
+func (b *Bot) shouldSkipStreamMetadataRefresh(track *player.Track, now time.Time) (bool, time.Duration) {
+	if track == nil || track.IsLive || !track.DirectStreamUnavailable || track.MetadataFetchedAt.IsZero() {
+		return false, 0
+	}
+
+	age := now.Sub(track.MetadataFetchedAt)
+	if age < 0 {
+		age = 0
+	}
+
+	return age <= recentStreamMetadataSkipWindow, age
+}
+
+func (b *Bot) hydrateTrackStreamInfo(track *player.Track) error {
+	if b.hydrateStreamInfoFn != nil {
+		return b.hydrateStreamInfoFn(track)
+	}
+
+	refreshed, err := b.getVideoInfo(track.URL)
+	if err != nil {
+		return err
+	}
+
+	track.SetPrefetchedStream(refreshed.StreamURL, refreshed.StreamHeaders, refreshed.StreamExpiresAt)
+	if track.Title == "" && refreshed.Title != "" {
+		track.Title = refreshed.Title
+	}
+	if track.Artist == "" && refreshed.Artist != "" {
+		track.Artist = refreshed.Artist
+	}
+	if track.Duration == 0 && refreshed.Duration > 0 {
+		track.Duration = refreshed.Duration
+	}
+	if track.Thumbnail == "" && refreshed.Thumbnail != "" {
+		track.Thumbnail = refreshed.Thumbnail
+	}
+	track.IsLive = track.IsLive || refreshed.IsLive
+
+	if track.StreamURL == "" {
+		return fmt.Errorf("no direct stream URL found")
+	}
+
+	return nil
 }
 
 func (b *Bot) waitForPlaybackStart(p *player.GuildPlayer, started <-chan struct{}, done <-chan struct{}) bool {

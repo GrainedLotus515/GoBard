@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"os"
+	"strconv"
 	"sync"
 	"time"
 
@@ -25,12 +27,28 @@ var (
 	sleepVoiceReady = func() {
 		time.Sleep(200 * time.Millisecond)
 	}
+	debugPlaybackOnce    sync.Once
+	debugPlaybackEnabled bool
 )
 
 // EncoderInterface defines the interface for audio encoders
 type EncoderInterface interface {
 	OpusFrame() ([]byte, error)
 	Cleanup() error
+}
+
+type bufferLevelReporter interface {
+	BufferLevel() (int, int)
+}
+
+func isDebugPlaybackEnabled() bool {
+	debugPlaybackOnce.Do(func() {
+		enabled, err := strconv.ParseBool(os.Getenv("DEBUG_PLAYBACK"))
+		if err == nil {
+			debugPlaybackEnabled = enabled
+		}
+	})
+	return debugPlaybackEnabled
 }
 
 type playbackSession struct {
@@ -226,15 +244,27 @@ func (p *GuildPlayer) Play() error {
 // playTrack handles the actual playback of a track
 func (p *GuildPlayer) playTrack(session *playbackSession, track *Track, startOffset time.Duration) {
 	logger.PlaybackStart(track.Title)
+	debugPlayback := isDebugPlaybackEnabled()
+	startupTrace := logger.ResumeTrace(track.RequestTraceID, "track_startup", track.RequestedAt)
+	firstFrameSentLogged := false
 
 	var (
 		vc                   voiceconn.Connection
 		encoder              EncoderInterface
+		bufferReporter       bufferLevelReporter
 		encoderBound         bool
 		speaking             bool
 		frameCount           int
+		playbackPath         string
 		prefetchedStreamUsed bool
 	)
+
+	logPlaybackPath := func(path string) {
+		logger.Info("Playback path selected", "path", path, "title", track.Title, "trace_id", track.RequestTraceID)
+		if startupTrace != nil {
+			startupTrace.Step("Playback path selected", "path", path, "title", track.Title)
+		}
+	}
 
 	defer func() {
 		if speaking && vc != nil {
@@ -261,6 +291,15 @@ func (p *GuildPlayer) playTrack(session *playbackSession, track *Track, startOff
 		session.signalDone()
 	}()
 
+	if startupTrace != nil {
+		startupTrace.Step(
+			"Player playback goroutine started",
+			"title", track.Title,
+			"start_offset_ms", startOffset.Milliseconds(),
+			"has_local_path", track.LocalPath != "",
+		)
+	}
+
 	if session.isStopped() {
 		logger.PlaybackStopped(frameCount)
 		return
@@ -282,27 +321,42 @@ func (p *GuildPlayer) playTrack(session *playbackSession, track *Track, startOff
 
 	var err error
 	if track.LocalPath != "" {
+		playbackPath = "cached_file"
 		logger.Info("Using cached file", "path", track.LocalPath)
 		logger.PlaybackEncodingStart(track.LocalPath)
+		if startupTrace != nil {
+			startupTrace.Step("Creating file encoder", "source", track.LocalPath)
+		}
 		encoder, err = newCustomEncoder(track.LocalPath, 48000, 2, startOffset)
 	} else {
+		playbackPath = "ytdlp_fallback"
 		logger.Info("Streaming from URL", "url", track.URL)
 		logger.PlaybackEncodingStart(track.URL)
 		streamURL := ""
 		var streamHeaders map[string]string
 		if track.CanUsePrefetchedStream(time.Now(), startOffset) {
+			playbackPath = "prefetched_direct"
 			streamURL = track.StreamURL
 			streamHeaders = track.StreamHeaders
 			prefetchedStreamUsed = true
 			logger.Info("Using prefetched stream URL", "title", track.Title, "expires_at", track.StreamExpiresAt)
+			if startupTrace != nil {
+				startupTrace.Step("Creating direct stream encoder", "expires_at", track.StreamExpiresAt)
+			}
 		} else if track.StreamURL != "" {
 			logger.Info("Prefetched stream URL unavailable, resolving live at playback", "title", track.Title, "expires_at", track.StreamExpiresAt)
+		}
+		if startupTrace != nil && !prefetchedStreamUsed {
+			startupTrace.Step("Creating yt-dlp fallback stream encoder", "url", track.URL)
 		}
 		encoder, err = newStreamingEncoder(track.URL, streamURL, streamHeaders, 48000, 2, startOffset)
 	}
 
 	if err != nil {
 		logger.PlaybackEncodingError(err)
+		if startupTrace != nil {
+			startupTrace.Finish("Encoder creation failed", "err", err)
+		}
 		return
 	}
 
@@ -316,19 +370,34 @@ func (p *GuildPlayer) playTrack(session *playbackSession, track *Track, startOff
 		return
 	}
 	encoderBound = true
+	if debugPlayback {
+		if reporter, ok := encoder.(bufferLevelReporter); ok {
+			bufferReporter = reporter
+		}
+	}
 	logger.PlaybackEncodingSuccess()
+	if startupTrace != nil {
+		startupTrace.Step("Encoder created", "prefetched_stream_used", prefetchedStreamUsed)
+	}
 
 	nextFrameDeadline := nowOpusFrame()
 	firstFrame, err := encoder.OpusFrame()
 	if err != nil && prefetchedStreamUsed && !session.isStopped() {
 		logger.Warn("Prefetched stream failed before first frame, retrying with yt-dlp", "title", track.Title, "err", err)
+		if startupTrace != nil {
+			startupTrace.Step("Prefetched stream failed before first frame; retrying with yt-dlp", "err", err)
+		}
 		session.cleanupEncoder()
 		encoderBound = false
 		track.ClearPrefetchedStream()
+		playbackPath = "ytdlp_fallback"
 
 		encoder, err = newStreamingEncoder(track.URL, "", nil, 48000, 2, startOffset)
 		if err != nil {
 			logger.PlaybackEncodingError(err)
+			if startupTrace != nil {
+				startupTrace.Finish("Fallback encoder creation failed", "err", err)
+			}
 			return
 		}
 
@@ -344,7 +413,17 @@ func (p *GuildPlayer) playTrack(session *playbackSession, track *Track, startOff
 			return
 		}
 		encoderBound = true
+		if debugPlayback {
+			if reporter, ok := encoder.(bufferLevelReporter); ok {
+				bufferReporter = reporter
+			} else {
+				bufferReporter = nil
+			}
+		}
 		logger.PlaybackEncodingSuccess()
+		if startupTrace != nil {
+			startupTrace.Step("Fallback encoder created")
+		}
 		firstFrame, err = encoder.OpusFrame()
 	}
 	if err != nil {
@@ -353,11 +432,21 @@ func (p *GuildPlayer) playTrack(session *playbackSession, track *Track, startOff
 		} else {
 			logger.PlaybackFramesComplete(frameCount)
 		}
+		if startupTrace != nil {
+			startupTrace.Finish("Failed to obtain first opus frame", "err", err)
+		}
 		return
 	}
+	if startupTrace != nil {
+		startupTrace.Step("First opus frame ready")
+	}
+	logPlaybackPath(playbackPath)
 
 	logger.PlaybackVoiceWaiting()
 	sleepVoiceReady()
+	if startupTrace != nil {
+		startupTrace.Step("Voice ready wait completed")
+	}
 
 	if session.isStopped() {
 		logger.PlaybackStopped(frameCount)
@@ -369,6 +458,9 @@ func (p *GuildPlayer) playTrack(session *playbackSession, track *Track, startOff
 		logger.PlaybackSpeakingError(err)
 	}
 	speaking = true
+	if startupTrace != nil {
+		startupTrace.Step("Speaking state enabled")
+	}
 
 	logger.PlaybackFrameStart()
 
@@ -420,13 +512,46 @@ func (p *GuildPlayer) playTrack(session *playbackSession, track *Track, startOff
 			return
 		}
 
-		if err := vc.SendOpusFrame(frame); err != nil {
-			logger.Error("Failed sending opus frame", "err", err)
-			return
+		if debugPlayback {
+			sendStartedAt := time.Now()
+			if err := vc.SendOpusFrame(frame); err != nil {
+				logger.Error("Failed sending opus frame", "err", err)
+				return
+			}
+			if sendDuration := time.Since(sendStartedAt); sendDuration > 5*time.Millisecond {
+				logger.Warn(
+					"Discord voice send stalled",
+					"frame_count", frameCount+1,
+					"send_duration_ms", sendDuration.Milliseconds(),
+				)
+			}
+		} else {
+			if err := vc.SendOpusFrame(frame); err != nil {
+				logger.Error("Failed sending opus frame", "err", err)
+				return
+			}
+		}
+		if startupTrace != nil && !firstFrameSentLogged {
+			startupTrace.Finish("First frame sent")
+			firstFrameSentLogged = true
 		}
 
 		session.signalStarted()
 		frameCount++
+		if debugPlayback && bufferReporter != nil && frameCount%500 == 0 {
+			buffered, capacity := bufferReporter.BufferLevel()
+			bufferFillPct := 0
+			if capacity > 0 {
+				bufferFillPct = buffered * 100 / capacity
+			}
+			logger.Info(
+				"Playback buffer level",
+				"frame_count", frameCount,
+				"buffered_frames", buffered,
+				"buffer_capacity", capacity,
+				"buffer_fill_pct", bufferFillPct,
+			)
+		}
 		if frameCount%1000 == 0 {
 			logger.PlaybackFramesMilestone(frameCount)
 		}
@@ -435,6 +560,13 @@ func (p *GuildPlayer) playTrack(session *playbackSession, track *Track, startOff
 		if delay := nextFrameDeadline.Sub(nowOpusFrame()); delay > 0 {
 			sleepOpusFrame(delay)
 		} else if delay < -(3 * opusFrameInterval) {
+			if debugPlayback {
+				logger.Warn(
+					"Playback deadline reset; this is the strongest signal for the ~600ms audio drop",
+					"frame_count", frameCount,
+					"drift_ms", (-delay).Milliseconds(),
+				)
+			}
 			nextFrameDeadline = nowOpusFrame()
 		}
 	}

@@ -70,7 +70,7 @@ func NewCustomEncoder(source string, sampleRate, channels int, startOffset time.
 		channels:    channels,
 		sampleRate:  sampleRate,
 		done:        false,
-		frameChan:   make(chan []byte, 300), // Increased from 100 to 300 (~6 seconds buffer)
+		frameChan:   make(chan []byte, 1000), // Increased from 100 to 1000 (~20 seconds buffer)
 		stopChan:    make(chan bool, 1),
 	}
 
@@ -83,11 +83,13 @@ func NewCustomEncoder(source string, sampleRate, channels int, startOffset time.
 // encodeLoop reads PCM data and encodes to Opus frames
 func (e *CustomEncoder) encodeLoop() {
 	defer close(e.frameChan)
+	debugPlayback := isDebugPlaybackEnabled()
 
 	// PCM buffer: frameSize samples * channels * 2 bytes per sample
 	pcmBufferSize := e.frameSize * e.channels * 2
 	pcmBuffer := make([]byte, pcmBufferSize)
 	pcmSamples := make([]int16, e.frameSize*e.channels)
+	frameCount := 0
 
 	for {
 		select {
@@ -98,16 +100,14 @@ func (e *CustomEncoder) encodeLoop() {
 		}
 
 		// Read PCM data from FFmpeg
-		n, err := e.stdout.Read(pcmBuffer)
-		if err != nil {
-			if err != io.EOF {
-				logger.Error("FFmpeg read error", "err", err)
-			}
+		n, readErr := io.ReadFull(e.stdout, pcmBuffer)
+		if readErr != nil && readErr != io.EOF && readErr != io.ErrUnexpectedEOF {
+			logger.Error("FFmpeg read error", "err", readErr)
 			return
 		}
 
 		if n == 0 {
-			continue
+			return
 		}
 
 		// Convert bytes to int16 samples
@@ -130,10 +130,28 @@ func (e *CustomEncoder) encodeLoop() {
 			opusFrame := opusFrameBuffer[:n]
 			select {
 			case e.frameChan <- opusFrame:
+				if debugPlayback {
+					frameCount++
+					if frameCount%100 == 0 {
+						buffered, capacity := len(e.frameChan), cap(e.frameChan)
+						if buffered < capacity/10 {
+							logger.Warn(
+								"Encoder buffer running low",
+								"frames_encoded", frameCount,
+								"buffered_frames", buffered,
+								"buffer_capacity", capacity,
+							)
+						}
+					}
+				}
 			case <-e.stopChan:
 				e.cmd.Process.Kill()
 				return
 			}
+		}
+
+		if readErr == io.EOF || readErr == io.ErrUnexpectedEOF {
+			return
 		}
 	}
 }
@@ -145,6 +163,11 @@ func (e *CustomEncoder) OpusFrame() ([]byte, error) {
 		return nil, io.EOF
 	}
 	return frame, nil
+}
+
+// BufferLevel reports the number of buffered frames and channel capacity.
+func (e *CustomEncoder) BufferLevel() (int, int) {
+	return len(e.frameChan), cap(e.frameChan)
 }
 
 // Cleanup stops the encoder and releases resources

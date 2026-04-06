@@ -15,6 +15,7 @@ func init() {
 	Logger = log.New(os.Stderr)
 	Logger.SetReportCaller(false)
 	Logger.SetReportTimestamp(true)
+	Logger.SetTimeFormat(log.DefaultTimeFormat)
 
 	// Default to Info level, DEBUG env var will override via SetDebugMode
 	Logger.SetLevel(log.InfoLevel)
@@ -24,9 +25,11 @@ func init() {
 func SetDebugMode(enabled bool) {
 	debugMode = enabled
 	if enabled {
+		Logger.SetTimeFormat("2006/01/02 15:04:05.000")
 		Logger.SetLevel(log.DebugLevel)
 		Logger.Info("Debug mode enabled")
 	} else {
+		Logger.SetTimeFormat(log.DefaultTimeFormat)
 		Logger.SetLevel(log.InfoLevel)
 	}
 }
