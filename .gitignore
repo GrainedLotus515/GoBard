@@ -45,3 +45,6 @@ Thumbs.db
 # Documentation and planning (local only)
 /docs/
 /plans/
+
+# AI assistant directory
+.codex
