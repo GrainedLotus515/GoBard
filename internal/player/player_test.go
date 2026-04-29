@@ -161,7 +161,7 @@ func TestPlayTrackStopsBeforeSendingBufferedFrame(t *testing.T) {
 			}
 		},
 	}
-	newCustomEncoder = func(string, int, int, time.Duration) (EncoderInterface, error) {
+	newCustomEncoder = func(string, int, int, time.Duration, *atomic.Int32) (EncoderInterface, error) {
 		return encoder, nil
 	}
 	sleepVoiceReady = func() {}
@@ -177,7 +177,7 @@ func TestPlayTrackStopsBeforeSendingBufferedFrame(t *testing.T) {
 		LocalPath: "/tmp/buffered-stop.opus",
 	}
 
-	p.playTrack(session, track, 0)
+	p.playTrack(session, track, 0, &p.volumeAtomic)
 
 	if got := len(vc.frames); got != 1 {
 		t.Fatalf("sent frames = %d, want 1", got)
@@ -211,7 +211,7 @@ func TestPlayTrackPacesOpusFrames(t *testing.T) {
 			fakeNow = fakeNow.Add(d)
 		},
 	}
-	newCustomEncoder = func(string, int, int, time.Duration) (EncoderInterface, error) {
+	newCustomEncoder = func(string, int, int, time.Duration, *atomic.Int32) (EncoderInterface, error) {
 		return encoder, nil
 	}
 	nowOpusFrame = func() time.Time {
@@ -245,7 +245,7 @@ func TestPlayTrackPacesOpusFrames(t *testing.T) {
 		LocalPath: "/tmp/paced.opus",
 	}
 
-	p.playTrack(session, track, 0)
+	p.playTrack(session, track, 0, &p.volumeAtomic)
 
 	if got := len(vc.frames); got != 3 {
 		t.Fatalf("sent frames = %d, want 3", got)
@@ -278,7 +278,7 @@ func TestPlaybackSignalsCloseStartedBeforeDone(t *testing.T) {
 
 	secondFrameBlocked := make(chan struct{})
 	releaseSecondFrame := make(chan struct{})
-	newCustomEncoder = func(string, int, int, time.Duration) (EncoderInterface, error) {
+	newCustomEncoder = func(string, int, int, time.Duration, *atomic.Int32) (EncoderInterface, error) {
 		return &stubEncoder{
 			frames: [][]byte{
 				[]byte("frame-1"),
@@ -343,7 +343,7 @@ func TestPlaybackSignalsCloseDoneOnEncoderFailureWithoutStarted(t *testing.T) {
 		sleepVoiceReady = originalSleepVoiceReady
 	})
 
-	newCustomEncoder = func(string, int, int, time.Duration) (EncoderInterface, error) {
+	newCustomEncoder = func(string, int, int, time.Duration, *atomic.Int32) (EncoderInterface, error) {
 		return nil, errors.New("boom")
 	}
 	sleepVoiceReady = func() {}
@@ -387,7 +387,7 @@ func TestPlayTrackFallsBackWhenPrefetchedStreamEndsBeforeFirstFrame(t *testing.T
 		},
 	}
 
-	newStreamingEncoder = func(url, streamURL string, streamHeaders map[string]string, sampleRate, channels int, startOffset time.Duration) (EncoderInterface, error) {
+	newStreamingEncoder = func(url, streamURL string, streamHeaders map[string]string, sampleRate, channels int, startOffset time.Duration, vol *atomic.Int32) (EncoderInterface, error) {
 		callCount++
 		switch callCount {
 		case 1:
@@ -431,7 +431,7 @@ func TestPlayTrackFallsBackWhenPrefetchedStreamEndsBeforeFirstFrame(t *testing.T
 		time.Now().Add(10*time.Minute),
 	)
 
-	p.playTrack(session, track, 0)
+	p.playTrack(session, track, 0, &p.volumeAtomic)
 
 	if callCount != 2 {
 		t.Fatalf("streaming encoder calls = %d, want 2", callCount)
@@ -456,7 +456,7 @@ func TestLatePlaybackCannotClearNewerSessionState(t *testing.T) {
 	})
 
 	encoder1 := newBlockingEncoder()
-	newCustomEncoder = func(string, int, int, time.Duration) (EncoderInterface, error) {
+	newCustomEncoder = func(string, int, int, time.Duration, *atomic.Int32) (EncoderInterface, error) {
 		return encoder1, nil
 	}
 	sleepVoiceReady = func() {}
@@ -472,7 +472,7 @@ func TestLatePlaybackCannotClearNewerSessionState(t *testing.T) {
 
 	done1 := make(chan struct{})
 	go func() {
-		p.playTrack(session1, &Track{Title: "first", LocalPath: "/tmp/first.opus"}, 0)
+		p.playTrack(session1, &Track{Title: "first", LocalPath: "/tmp/first.opus"}, 0, &p.volumeAtomic)
 		close(done1)
 	}()
 
@@ -528,7 +528,7 @@ func TestPlayTrackWaitsForVoiceReadyOnlyOncePerConnection(t *testing.T) {
 	})
 
 	var waitCalls atomic.Int32
-	newCustomEncoder = func(string, int, int, time.Duration) (EncoderInterface, error) {
+	newCustomEncoder = func(string, int, int, time.Duration, *atomic.Int32) (EncoderInterface, error) {
 		return &stubEncoder{
 			frames: [][]byte{
 				[]byte("frame-1"),
@@ -552,7 +552,7 @@ func TestPlayTrackWaitsForVoiceReadyOnlyOncePerConnection(t *testing.T) {
 		p.playTrack(session, &Track{
 			Title:     title,
 			LocalPath: "/tmp/" + title + ".opus",
-		}, 0)
+		}, 0, &p.volumeAtomic)
 	}
 
 	runPlayback("first")
@@ -613,7 +613,7 @@ func TestWaitForCompletionUnblocksWhenDoneChannelCloses(t *testing.T) {
 		sleepVoiceReady = originalSleepVoiceReady
 	})
 
-	newCustomEncoder = func(string, int, int, time.Duration) (EncoderInterface, error) {
+	newCustomEncoder = func(string, int, int, time.Duration, *atomic.Int32) (EncoderInterface, error) {
 		return &stubEncoder{
 			frames: [][]byte{
 				[]byte("frame-1"),

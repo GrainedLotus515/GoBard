@@ -138,6 +138,27 @@ func (q *Queue) Next() *Track {
 	return q.Tracks[q.CurrentIndex]
 }
 
+// TryAdvance atomically checks and advances to the next track, returning it.
+// Returns nil if at end of queue or if looping is active (caller should check
+// IsLoopEnabled first).  Safe against concurrent queue modifications.
+func (q *Queue) TryAdvance() *Track {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+
+	if q.Loop && q.CurrentIndex >= 0 && q.CurrentIndex < len(q.Tracks) {
+		return q.Tracks[q.CurrentIndex]
+	}
+
+	nextIdx := q.CurrentIndex + 1
+	if nextIdx >= len(q.Tracks) {
+		q.CurrentIndex = -1
+		return nil
+	}
+
+	q.CurrentIndex = nextIdx
+	return q.Tracks[q.CurrentIndex]
+}
+
 // Current returns the current track
 func (q *Queue) Current() *Track {
 	q.mu.RLock()

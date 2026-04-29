@@ -153,6 +153,10 @@ func TestHydrateFastURLTrackAsyncReplacesQueuedTrackAndEditsPendingResponse(t *t
 		t.Fatalf("context field value = %q, want %q", embed.Fields[2].Value, "Queue position #2")
 	}
 
+	// The async goroutine calls removePendingInteractionResponse after the edit
+	// returns.  Give it a moment to complete to avoid the race.
+	time.Sleep(50 * time.Millisecond)
+
 	if _, ok := b.getPendingInteractionResponse(placeholder.RequestTraceID); ok {
 		t.Fatal("pending interaction response still present after successful hydration update")
 	}

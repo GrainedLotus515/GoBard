@@ -3,6 +3,7 @@ package main
 import (
 	"io"
 	"log"
+	"sync/atomic"
 	"time"
 
 	"github.com/GrainedLotus515/gobard/internal/player"
@@ -11,9 +12,12 @@ import (
 func main() {
 	source := "cache/810f032aadd125db6d1785c9d709f63c.webm"
 
+	var vol atomic.Int32
+	vol.Store(100)
+
 	log.Println("=== Testing Custom Encoder ===")
 	log.Printf("Creating encoder for: %s", source)
-	encoder, err := player.NewCustomEncoder(source, 48000, 2, 0)
+	encoder, err := player.NewCustomEncoder(source, 48000, 2, 0, &vol)
 	if err != nil {
 		log.Fatalf("Failed to create encoder: %v", err)
 	}

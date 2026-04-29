@@ -7,6 +7,7 @@ import (
 	"os"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/GrainedLotus515/gobard/internal/logger"
@@ -16,11 +17,11 @@ import (
 const opusFrameInterval = 20 * time.Millisecond
 
 var (
-	newCustomEncoder = func(inputPath string, sampleRate, channels int, startOffset time.Duration) (EncoderInterface, error) {
-		return NewCustomEncoder(inputPath, sampleRate, channels, startOffset)
+	newCustomEncoder = func(inputPath string, sampleRate, channels int, startOffset time.Duration, vol *atomic.Int32) (EncoderInterface, error) {
+		return NewCustomEncoder(inputPath, sampleRate, channels, startOffset, vol)
 	}
-	newStreamingEncoder = func(url, streamURL string, streamHeaders map[string]string, sampleRate, channels int, startOffset time.Duration) (EncoderInterface, error) {
-		return NewStreamingEncoder(url, streamURL, streamHeaders, sampleRate, channels, startOffset)
+	newStreamingEncoder = func(url, streamURL string, streamHeaders map[string]string, sampleRate, channels int, startOffset time.Duration, vol *atomic.Int32) (EncoderInterface, error) {
+		return NewStreamingEncoder(url, streamURL, streamHeaders, sampleRate, channels, startOffset, vol)
 	}
 	nowOpusFrame    = time.Now
 	sleepOpusFrame  = time.Sleep
@@ -146,6 +147,9 @@ type GuildPlayer struct {
 	ReduceOnVoiceTarget int
 	OriginalVolume      int
 
+	volumeAtomic  atomic.Int32
+	activeSpeakers map[string]struct{}
+
 	seekRequested        bool
 	requestedStartOffset time.Duration
 	playbackStartedAt    time.Time
@@ -178,10 +182,12 @@ func (m *Manager) GetPlayer(guildID string) *GuildPlayer {
 	}
 
 	player := &GuildPlayer{
-		GuildID: guildID,
-		Queue:   NewQueue(),
-		Volume:  100,
+		GuildID:       guildID,
+		Queue:         NewQueue(),
+		Volume:        100,
+		activeSpeakers: make(map[string]struct{}),
 	}
+	player.volumeAtomic.Store(100)
 
 	m.players[guildID] = player
 	return player
@@ -237,13 +243,14 @@ func (p *GuildPlayer) Play() error {
 	p.activePlayback = session
 	p.lastPlayback = session
 
-	go p.playTrack(session, track, startOffset)
+	vol := &p.volumeAtomic
+	go p.playTrack(session, track, startOffset, vol)
 
 	return nil
 }
 
 // playTrack handles the actual playback of a track
-func (p *GuildPlayer) playTrack(session *playbackSession, track *Track, startOffset time.Duration) {
+func (p *GuildPlayer) playTrack(session *playbackSession, track *Track, startOffset time.Duration, vol *atomic.Int32) {
 	logger.PlaybackStart(track.Title)
 	debugPlayback := isDebugPlaybackEnabled()
 	startupTrace := logger.ResumeTrace(track.RequestTraceID, "track_startup", track.RequestedAt)
@@ -328,7 +335,7 @@ func (p *GuildPlayer) playTrack(session *playbackSession, track *Track, startOff
 		if startupTrace != nil {
 			startupTrace.Step("Creating file encoder", "source", track.LocalPath)
 		}
-		encoder, err = newCustomEncoder(track.LocalPath, 48000, 2, startOffset)
+		encoder, err = newCustomEncoder(track.LocalPath, 48000, 2, startOffset, vol)
 	} else {
 		playbackPath = "ytdlp_fallback"
 		logger.Info("Streaming from URL", "url", track.URL)
@@ -350,7 +357,7 @@ func (p *GuildPlayer) playTrack(session *playbackSession, track *Track, startOff
 		if startupTrace != nil && !prefetchedStreamUsed {
 			startupTrace.Step("Creating yt-dlp fallback stream encoder", "url", track.URL)
 		}
-		encoder, err = newStreamingEncoder(track.URL, streamURL, streamHeaders, 48000, 2, startOffset)
+		encoder, err = newStreamingEncoder(track.URL, streamURL, streamHeaders, 48000, 2, startOffset, vol)
 	}
 
 	if err != nil {
@@ -393,7 +400,7 @@ func (p *GuildPlayer) playTrack(session *playbackSession, track *Track, startOff
 		track.ClearPrefetchedStream()
 		playbackPath = "ytdlp_fallback"
 
-		encoder, err = newStreamingEncoder(track.URL, "", nil, 48000, 2, startOffset)
+		encoder, err = newStreamingEncoder(track.URL, "", nil, 48000, 2, startOffset, vol)
 		if err != nil {
 			logger.PlaybackEncodingError(err)
 			if startupTrace != nil {
@@ -696,6 +703,7 @@ func (p *GuildPlayer) SetVolume(volume int) error {
 	}
 
 	p.Volume = volume
+	p.volumeAtomic.Store(int32(volume))
 	return nil
 }
 
@@ -710,6 +718,7 @@ func (p *GuildPlayer) ReduceVolume() {
 
 	p.OriginalVolume = p.Volume
 	p.Volume = p.ReduceOnVoiceTarget
+	p.volumeAtomic.Store(int32(p.ReduceOnVoiceTarget))
 }
 
 // RestoreVolume restores volume after speaking ends
@@ -722,6 +731,32 @@ func (p *GuildPlayer) RestoreVolume() {
 	}
 
 	p.Volume = p.OriginalVolume
+	p.volumeAtomic.Store(int32(p.OriginalVolume))
+}
+
+// SpeakerStarted tracks a user starting to speak and ducks volume if first speaker.
+func (p *GuildPlayer) SpeakerStarted(userID string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	p.activeSpeakers[userID] = struct{}{}
+	if len(p.activeSpeakers) == 1 && p.ReduceOnVoice && p.Playing {
+		p.OriginalVolume = p.Volume
+		p.Volume = p.ReduceOnVoiceTarget
+		p.volumeAtomic.Store(int32(p.ReduceOnVoiceTarget))
+	}
+}
+
+// SpeakerStopped tracks a user stopping speaking and restores volume if no speakers remain.
+func (p *GuildPlayer) SpeakerStopped(userID string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	delete(p.activeSpeakers, userID)
+	if len(p.activeSpeakers) == 0 && p.ReduceOnVoice && p.Playing {
+		p.Volume = p.OriginalVolume
+		p.volumeAtomic.Store(int32(p.OriginalVolume))
+	}
 }
 
 // SetVoiceConnection safely sets the voice connection reference.

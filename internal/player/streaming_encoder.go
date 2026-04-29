@@ -3,8 +3,10 @@ package player
 import (
 	"fmt"
 	"io"
+	"math"
 	"os/exec"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/GrainedLotus515/gobard/internal/logger"
@@ -24,10 +26,11 @@ type StreamingEncoder struct {
 	done        bool
 	frameChan   chan []byte
 	stopChan    chan bool
+	volume      *atomic.Int32
 }
 
 // NewStreamingEncoder creates a new streaming audio encoder
-func NewStreamingEncoder(url, streamURL string, streamHeaders map[string]string, sampleRate, channels int, startOffset time.Duration) (*StreamingEncoder, error) {
+func NewStreamingEncoder(url, streamURL string, streamHeaders map[string]string, sampleRate, channels int, startOffset time.Duration, vol *atomic.Int32) (*StreamingEncoder, error) {
 	start := time.Now()
 
 	frameSize := 960 // 20ms at 48kHz
@@ -123,6 +126,7 @@ func NewStreamingEncoder(url, streamURL string, streamHeaders map[string]string,
 		done:        false,
 		frameChan:   make(chan []byte, 1000), // Increased from 100 to 1000 (~20 seconds buffer)
 		stopChan:    make(chan bool, 1),
+		volume:      vol,
 	}
 
 	// Start stderr monitoring goroutine
@@ -196,6 +200,8 @@ func (e *StreamingEncoder) encodeLoop(reader io.Reader) {
 			pcmSamples[i] = int16(pcmBuffer[i*2]) | (int16(pcmBuffer[i*2+1]) << 8)
 		}
 
+		e.applyVolume(pcmSamples[:n/2])
+
 		// Encode full frames
 		samplesPerFrame := e.frameSize * e.channels
 		for i := 0; i+samplesPerFrame <= n/2; i += samplesPerFrame {
@@ -256,6 +262,21 @@ func (e *StreamingEncoder) OpusFrame() ([]byte, error) {
 // BufferLevel reports the number of buffered frames and channel capacity.
 func (e *StreamingEncoder) BufferLevel() (int, int) {
 	return len(e.frameChan), cap(e.frameChan)
+}
+
+func (e *StreamingEncoder) applyVolume(samples []int16) {
+	vol := float64(e.volume.Load()) / 100.0
+	if vol < 0.999 || vol > 1.001 {
+		for i, s := range samples {
+			scaled := float64(s) * vol
+			if scaled > math.MaxInt16 {
+				scaled = math.MaxInt16
+			} else if scaled < math.MinInt16 {
+				scaled = math.MinInt16
+			}
+			samples[i] = int16(scaled)
+		}
+	}
 }
 
 // Cleanup stops the encoder and releases resources

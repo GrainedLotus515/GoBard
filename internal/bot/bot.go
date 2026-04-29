@@ -202,20 +202,22 @@ func (b *Bot) voiceStateUpdate(s *discordgo.Session, vsu *discordgo.VoiceStateUp
 	}
 
 	// Handle volume reduction when someone speaks
+	player := b.PlayerManager.GetPlayer(vsu.GuildID)
+	if player == nil {
+		return
+	}
+
 	if vsu.VoiceState.SelfMute || vsu.VoiceState.SelfDeaf {
+		player.SpeakerStopped(vsu.UserID)
 		return
 	}
 
-	p := b.PlayerManager.GetPlayer(vsu.GuildID)
-	if p == nil {
-		return
-	}
-
-	// If user is speaking, reduce volume
+	// Track speaking state to avoid premature volume restoration
+	// when multiple people are talking simultaneously.
 	if !vsu.VoiceState.Mute && !vsu.VoiceState.Deaf {
-		p.ReduceVolume()
+		player.SpeakerStarted(vsu.UserID)
 	} else {
-		p.RestoreVolume()
+		player.SpeakerStopped(vsu.UserID)
 	}
 }
 
@@ -431,6 +433,21 @@ func (b *Bot) removePendingInteractionResponse(traceID string) {
 	b.pendingInteractionResponsesMu.Lock()
 	defer b.pendingInteractionResponsesMu.Unlock()
 	delete(b.pendingInteractionResponses, traceID)
+}
+
+func (b *Bot) cleanupGuildPendingResponses(guildID string) {
+	if guildID == "" {
+		return
+	}
+
+	b.pendingInteractionResponsesMu.Lock()
+	defer b.pendingInteractionResponsesMu.Unlock()
+
+	for traceID, pending := range b.pendingInteractionResponses {
+		if pending != nil && pending.GuildID == guildID {
+			delete(b.pendingInteractionResponses, traceID)
+		}
+	}
 }
 
 func (b *Bot) updatePendingInteractionResponseTrackRef(traceID string, track *player.Track) {

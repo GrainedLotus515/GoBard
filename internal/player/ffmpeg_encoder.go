@@ -4,10 +4,12 @@ import (
 	"bytes"
 	"fmt"
 	"io"
+	"math"
 	"os/exec"
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/GrainedLotus515/gobard/internal/logger"
@@ -26,10 +28,11 @@ type CustomEncoder struct {
 	done        bool
 	frameChan   chan []byte
 	stopChan    chan bool
+	volume      *atomic.Int32
 }
 
 // NewCustomEncoder creates a new audio encoder using FFmpeg + libopus
-func NewCustomEncoder(source string, sampleRate, channels int, startOffset time.Duration) (*CustomEncoder, error) {
+func NewCustomEncoder(source string, sampleRate, channels int, startOffset time.Duration, vol *atomic.Int32) (*CustomEncoder, error) {
 	frameSize := 960 // 20ms at 48kHz
 	if sampleRate != 48000 {
 		frameSize = (sampleRate * 20) / 1000
@@ -72,6 +75,7 @@ func NewCustomEncoder(source string, sampleRate, channels int, startOffset time.
 		done:        false,
 		frameChan:   make(chan []byte, 1000), // Increased from 100 to 1000 (~20 seconds buffer)
 		stopChan:    make(chan bool, 1),
+		volume:      vol,
 	}
 
 	// Start the encoding goroutine
@@ -114,6 +118,8 @@ func (e *CustomEncoder) encodeLoop() {
 		for i := 0; i < n/2; i++ {
 			pcmSamples[i] = int16(pcmBuffer[i*2]) | (int16(pcmBuffer[i*2+1]) << 8)
 		}
+
+		e.applyVolume(pcmSamples[:n/2])
 
 		// Encode full frames
 		samplesPerFrame := e.frameSize * e.channels
@@ -168,6 +174,21 @@ func (e *CustomEncoder) OpusFrame() ([]byte, error) {
 // BufferLevel reports the number of buffered frames and channel capacity.
 func (e *CustomEncoder) BufferLevel() (int, int) {
 	return len(e.frameChan), cap(e.frameChan)
+}
+
+func (e *CustomEncoder) applyVolume(samples []int16) {
+	vol := float64(e.volume.Load()) / 100.0
+	if vol < 0.999 || vol > 1.001 {
+		for i, s := range samples {
+			scaled := float64(s) * vol
+			if scaled > math.MaxInt16 {
+				scaled = math.MaxInt16
+			} else if scaled < math.MinInt16 {
+				scaled = math.MinInt16
+			}
+			samples[i] = int16(scaled)
+		}
+	}
 }
 
 // Cleanup stops the encoder and releases resources

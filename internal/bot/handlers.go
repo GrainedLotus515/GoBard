@@ -257,6 +257,7 @@ func (b *Bot) playLoop(guildID string, channelID string) {
 		// Check if voice connection is still valid before processing next track
 		if !p.IsVoiceConnected() {
 			logger.Info("Voice connection lost, stopping playback loop", "guild", guildID)
+			b.cleanupGuildPendingResponses(guildID)
 			p.Queue.ClearAll()
 			p.SetLoopRunning(false)
 			return
@@ -271,6 +272,7 @@ func (b *Bot) playLoop(guildID string, channelID string) {
 				// Instead of waiting and risking a dead connection, disconnect now
 				// so a fresh connection can be created when new songs are added
 				logger.PlaybackQueueEmpty()
+				b.cleanupGuildPendingResponses(guildID)
 				p.Queue.ClearAll() // Clear all tracks when queue is empty
 				p.SetLoopRunning(false)
 				p.Disconnect()
@@ -419,7 +421,11 @@ func (b *Bot) playLoop(guildID string, channelID string) {
 				if startupTrace != nil {
 					startupTrace.Finish("Track startup failed after retry", "err", err)
 				}
-				p.Queue.Next()
+				if p.Queue.TryAdvance() == nil {
+					b.cleanupGuildPendingResponses(guildID)
+					p.SetLoopRunning(false)
+					return
+				}
 				continue
 			}
 			if startupTrace != nil {
@@ -447,6 +453,7 @@ func (b *Bot) playLoop(guildID string, channelID string) {
 			// Verify voice connection is still valid before replaying
 			if !p.IsVoiceConnected() {
 				logger.Info("Voice connection lost during loop, stopping playback", "guild", guildID)
+				b.cleanupGuildPendingResponses(guildID)
 				p.Queue.ClearAll()
 				p.SetLoopRunning(false)
 				return
@@ -455,17 +462,15 @@ func (b *Bot) playLoop(guildID string, channelID string) {
 			continue
 		}
 
-		// Check if there are more tracks without advancing
-		if p.Queue.Peek() == nil {
+		// Check if there are more tracks and advance atomically
+		if next := p.Queue.TryAdvance(); next == nil {
 			logger.Info("Queue finished, ending playback loop")
+			b.cleanupGuildPendingResponses(guildID)
 			p.Queue.ClearAll() // Clear all tracks when queue finishes
 			p.SetLoopRunning(false)
 			p.Disconnect()
 			return
 		}
-
-		// Advance to next track
-		p.Queue.Next()
 	}
 }
 
