@@ -519,7 +519,7 @@ func TestLatePlaybackCannotClearNewerSessionState(t *testing.T) {
 	}
 }
 
-func TestPlayTrackWaitsForVoiceReadyOnlyOncePerConnection(t *testing.T) {
+func TestPlayTrackWaitsForVoiceReadyAfterEachTrack(t *testing.T) {
 	originalNewCustomEncoder := newCustomEncoder
 	originalSleepVoiceReady := sleepVoiceReady
 	t.Cleanup(func() {
@@ -539,7 +539,7 @@ func TestPlayTrackWaitsForVoiceReadyOnlyOncePerConnection(t *testing.T) {
 		waitCalls.Add(1)
 	}
 
-	p := NewManager().GetPlayer("guild-voice-wait-once")
+	p := NewManager().GetPlayer("guild-voice-wait-after-each")
 	p.SetVoiceConnection(&stubVoiceConnection{})
 
 	runPlayback := func(title string) {
@@ -561,16 +561,16 @@ func TestPlayTrackWaitsForVoiceReadyOnlyOncePerConnection(t *testing.T) {
 	}
 
 	runPlayback("second")
-	if got := waitCalls.Load(); got != 1 {
-		t.Fatalf("voice ready waits after second playback on same connection = %d, want 1", got)
+	if got := waitCalls.Load(); got != 2 {
+		t.Fatalf("voice ready waits after second playback on same connection = %d, want 2", got)
 	}
 
 	p.ClearVoiceConnection()
 	p.SetVoiceConnection(&stubVoiceConnection{})
 
 	runPlayback("third")
-	if got := waitCalls.Load(); got != 2 {
-		t.Fatalf("voice ready waits after reconnect playback = %d, want 2", got)
+	if got := waitCalls.Load(); got != 3 {
+		t.Fatalf("voice ready waits after reconnect playback = %d, want 3", got)
 	}
 }
 

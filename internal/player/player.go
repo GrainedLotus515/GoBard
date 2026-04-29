@@ -293,6 +293,7 @@ func (p *GuildPlayer) playTrack(session *playbackSession, track *Track, startOff
 			p.Paused = false
 			p.playbackStartedAt = time.Time{}
 			p.activePlayback = nil
+			p.voiceReadyWait = true
 		}
 		p.mu.Unlock()
 
