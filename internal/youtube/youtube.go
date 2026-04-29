@@ -582,7 +582,14 @@ func (c *Client) GetPlaylistInfo(url string) ([]*player.Track, error) {
 			continue // Skip malformed entries
 		}
 
-		tracks = append(tracks, buildTrackFromResult(result))
+		track := buildTrackFromResult(result)
+		// Drop entries with no resolvable URL/ID (e.g. deleted or
+		// private videos that appear in a playlist).
+		if track.URL == "" && track.ID == "" {
+			continue
+		}
+
+		tracks = append(tracks, track)
 	}
 
 	logger.Timing("Playlist fetch completed", "url", url, "track_count", len(tracks), "duration_ms", time.Since(start).Milliseconds())
@@ -595,7 +602,9 @@ func (c *Client) GetPlaylistInfo(url string) ([]*player.Track, error) {
 	return tracks, nil
 }
 
-// prefetchStreamURLs fetches stream URLs for the first N tracks in parallel
+// prefetchStreamURLs fetches stream URLs for the first N tracks in parallel.
+// Results are collected locally in each goroutine and applied after all
+// workers finish to avoid racing with concurrent readers of the tracks.
 func (c *Client) prefetchStreamURLs(tracks []*player.Track, count int) {
 	if count > len(tracks) {
 		count = len(tracks)
@@ -605,6 +614,18 @@ func (c *Client) prefetchStreamURLs(tracks []*player.Track, count int) {
 	var wg sync.WaitGroup
 	var successCount int
 	var mu sync.Mutex
+
+	type prefetchResult struct {
+		track           *player.Track
+		streamURL       string
+		streamHeaders   map[string]string
+		streamExpiresAt time.Time
+		title           string
+		artist          string
+		ok              bool
+	}
+
+	results := make([]prefetchResult, count)
 
 	for i := 0; i < count; i++ {
 		wg.Add(1)
@@ -641,22 +662,41 @@ func (c *Client) prefetchStreamURLs(tracks []*player.Track, count int) {
 			}
 
 			stream := extractBestAudioStream(result.Formats)
-			track.SetPrefetchedStream(stream.URL, stream.Headers, stream.ExpiresAt)
+			res := prefetchResult{track: track, ok: true}
+			res.streamURL = stream.URL
+			res.streamHeaders = stream.Headers
+			res.streamExpiresAt = stream.ExpiresAt
 			// Also update title if it was missing from flat playlist
 			if track.Title == "" && result.Title != "" {
-				track.Title = result.Title
+				res.title = result.Title
 			}
 			if track.Artist == "" && result.Uploader != "" {
-				track.Artist = result.Uploader
+				res.artist = result.Uploader
 			}
 
 			mu.Lock()
+			results[index] = res
 			successCount++
 			mu.Unlock()
 		}(tracks[i], i)
 	}
 
 	wg.Wait()
+
+	// Apply all mutations sequentially now that workers are done.
+	for _, res := range results {
+		if !res.ok {
+			continue
+		}
+		res.track.SetPrefetchedStream(res.streamURL, res.streamHeaders, res.streamExpiresAt)
+		if res.title != "" {
+			res.track.Title = res.title
+		}
+		if res.artist != "" {
+			res.track.Artist = res.artist
+		}
+	}
+
 	logger.Timing("Playlist prefetch completed", "requested", count, "success", successCount, "duration_ms", time.Since(start).Milliseconds())
 }
 
@@ -711,9 +751,28 @@ func (c *Client) GetStreamURL(url string) (string, error) {
 	return stream, nil
 }
 
-// IsPlaylist checks if a URL is a playlist
-func IsPlaylist(url string) bool {
-	return strings.Contains(url, "playlist") || strings.Contains(url, "list=")
+// IsPlaylist checks if a URL is a YouTube playlist.
+// It parses the URL and requires a known YouTube host plus a valid
+// playlist indicator (either the /playlist path or a non-empty list= query
+// parameter).  This avoids false positives on search results or channel
+// pages that happen to contain the word "playlist".
+func IsPlaylist(raw string) bool {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil {
+		return false
+	}
+
+	host := strings.ToLower(u.Hostname())
+	switch host {
+	case "youtube.com", "www.youtube.com", "music.youtube.com":
+		if u.Path == "/playlist" {
+			return true
+		}
+	case "youtu.be":
+		// Short links never host playlists.
+	}
+
+	return strings.TrimSpace(u.Query().Get("list")) != ""
 }
 
 // NormalizeSingleVideoURL extracts a locally resolvable YouTube video ID and

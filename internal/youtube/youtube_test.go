@@ -37,6 +37,31 @@ func TestYouTubeHelperProcess(t *testing.T) {
 	os.Exit(exitCode)
 }
 
+func TestIsPlaylist(t *testing.T) {
+	tests := []struct {
+		name string
+		url  string
+		want bool
+	}{
+		{"playlist path", "https://www.youtube.com/playlist?list=PL123", true},
+		{"watch with list param", "https://www.youtube.com/watch?v=abc&list=PL123", true},
+		{"music with list param", "https://music.youtube.com/watch?v=abc&list=PL123", true},
+		{"plain video", "https://www.youtube.com/watch?v=abc123", false},
+		{"search result containing playlist word", "https://www.youtube.com/results?search_query=playlist", false},
+		{"channel playlists page", "https://www.youtube.com/channel/UC123/playlists?view=list", false},
+		{"youtu.be short link", "https://youtu.be/abc123", false},
+		{"short link with playlist param", "https://youtu.be/abc123?list=PL123", true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := IsPlaylist(tt.url); got != tt.want {
+				t.Fatalf("IsPlaylist(%q) = %v, want %v", tt.url, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestNormalizeSearchKey(t *testing.T) {
 	got := normalizeSearchKey("  Foo\tBAR   baz  ")
 	if got != "foo bar baz" {

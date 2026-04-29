@@ -173,23 +173,27 @@ func (q *Queue) ClearAll() {
 	q.CurrentIndex = -1
 }
 
-// Remove removes a track at the specified index
-func (q *Queue) Remove(index int) bool {
+// Remove removes a track at the specified index and reports whether the
+// removed track was the currently-playing one.
+func (q *Queue) Remove(index int) (success bool, wasCurrent bool) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 
 	if index < 0 || index >= len(q.Tracks) {
-		return false
+		return false, false
 	}
 
+	wasCurrent = q.CurrentIndex == index
 	q.Tracks = append(q.Tracks[:index], q.Tracks[index+1:]...)
 
-	// Adjust current index if necessary
-	if q.CurrentIndex >= index {
+	// Adjust current index if necessary.  Use > instead of >= so that
+	// removing the current track keeps CurrentIndex pointing at the next
+	// track (which slides into the same slot).
+	if q.CurrentIndex > index {
 		q.CurrentIndex--
 	}
 
-	return true
+	return true, wasCurrent
 }
 
 // ReplaceTrack swaps a queued/current track by pointer identity.
@@ -211,13 +215,14 @@ func (q *Queue) ReplaceTrack(target *Track, replacement *Track) bool {
 	return false
 }
 
-// RemoveTrack removes a queued/current track by pointer identity.
-func (q *Queue) RemoveTrack(target *Track) bool {
+// RemoveTrack removes a queued/current track by pointer identity and reports
+// whether the removed track was the currently-playing one.
+func (q *Queue) RemoveTrack(target *Track) (success bool, wasCurrent bool) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 
 	if target == nil {
-		return false
+		return false, false
 	}
 
 	for idx, track := range q.Tracks {
@@ -225,14 +230,15 @@ func (q *Queue) RemoveTrack(target *Track) bool {
 			continue
 		}
 
+		wasCurrent = q.CurrentIndex == idx
 		q.Tracks = append(q.Tracks[:idx], q.Tracks[idx+1:]...)
-		if q.CurrentIndex >= idx {
+		if q.CurrentIndex > idx {
 			q.CurrentIndex--
 		}
-		return true
+		return true, wasCurrent
 	}
 
-	return false
+	return false, false
 }
 
 // FindTrack locates a queued/current track by pointer identity.

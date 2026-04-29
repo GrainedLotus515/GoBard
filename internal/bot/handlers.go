@@ -191,59 +191,7 @@ func (b *Bot) handlePlay(s *discordgo.Session, i *discordgo.InteractionCreate) e
 func (b *Bot) resolveQuery(query, userID string) ([]*player.Track, error) {
 	// Check if it's a Spotify URL
 	if spotify.IsSpotifyURL(query) {
-		if b.Spotify == nil {
-			return nil, fmt.Errorf("Spotify integration is not configured")
-		}
-
-		spotifyType, id, err := spotify.ParseSpotifyURL(query)
-		if err != nil {
-			return nil, err
-		}
-
-		var spotifyTracks []*player.Track
-
-		switch spotifyType {
-		case "track":
-			track, err := b.Spotify.GetTrackInfo(id)
-			if err != nil {
-				return nil, err
-			}
-			spotifyTracks = []*player.Track{track}
-		case "playlist":
-			tracks, err := b.Spotify.GetPlaylistTracks(id)
-			if err != nil {
-				return nil, err
-			}
-			spotifyTracks = tracks
-		case "album":
-			tracks, err := b.Spotify.GetAlbumTracks(id)
-			if err != nil {
-				return nil, err
-			}
-			spotifyTracks = tracks
-		case "artist":
-			tracks, err := b.Spotify.GetArtistTopTracks(id)
-			if err != nil {
-				return nil, err
-			}
-			spotifyTracks = tracks
-		default:
-			return nil, fmt.Errorf("unsupported Spotify type: %s", spotifyType)
-		}
-
-		// Convert Spotify tracks to YouTube
-		tracks := make([]*player.Track, 0)
-		for _, st := range spotifyTracks {
-			searchQuery := fmt.Sprintf("%s %s", st.Artist, st.Title)
-			ytTracks, err := b.YouTube.Search(searchQuery)
-			if err != nil || len(ytTracks) == 0 {
-				continue
-			}
-			ytTracks[0].RequestedBy = userID
-			tracks = append(tracks, ytTracks[0])
-		}
-
-		return tracks, nil
+		return nil, fmt.Errorf("Spotify playback is no longer supported due to API changes. Please use YouTube links or search queries instead.")
 	}
 
 	// Check if it's a YouTube URL
@@ -754,8 +702,15 @@ func (b *Bot) handleRemove(s *discordgo.Session, i *discordgo.InteractionCreate)
 	position := int(i.ApplicationCommandData().Options[0].IntValue()) - 1
 
 	p := b.PlayerManager.GetPlayer(i.GuildID)
-	if !p.Queue.Remove(position) {
+	removed, wasCurrent := p.Queue.Remove(position)
+	if !removed {
 		return fmt.Errorf("invalid position")
+	}
+
+	// If the currently-playing track was removed, stop playback so the
+	// playLoop advances to the next track immediately.
+	if wasCurrent {
+		p.Stop()
 	}
 
 	b.respondStatus(s, i, "Track Removed", fmt.Sprintf("Removed track #%d from the queue.", position+1), botui.ColorWarning)
