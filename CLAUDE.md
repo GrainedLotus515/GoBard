@@ -4,16 +4,30 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Commands
 
-### Build and Run
+### Docker Build and Run (Recommended)
+GoBard requires `libdave` for Discord voice connections (DAVE/E2EE), which is difficult to install in a generic environment. Use Docker for all builds and testing.
+
+- `docker build -t gobard .` - Build Docker image with all dependencies
+- `docker-compose up -d` - Run with docker-compose
+- `make docker-build` - Build Docker image using Makefile
+- `make docker-run` - Run with docker-compose
+- `make docker-logs` - Show Docker container logs
+- `make docker-stop` - Stop Docker container
+
+### Native Build (Requires libdave)
+Only use native builds if `libdave` is already installed. See [DEVELOPMENT.md](DEVELOPMENT.md) for full native setup instructions.
+
 - `go build -o gobard ./cmd/gobard` - Build the main binary
 - `go run ./cmd/gobard` - Run the application directly
 - `make build` - Build using Makefile
 - `make run` - Run using Makefile
 
 ### Testing
-- `go test ./...` - Run all tests
-- `go test -v -race -coverprofile=coverage.out ./...` - Run tests with race detection and coverage
-- `make test` - Run tests using Makefile
+- `go test ./...` - Run all tests (requires native libdave)
+- `go test -v -race -coverprofile=coverage.out ./...` - Run tests with race detection and coverage (requires native libdave)
+- `make test` - Run tests using Makefile (requires native libdave)
+
+> **Note:** `docker build` validates compilation and serves as the primary build test in containerised workflows. For running unit tests in CI, use the native path after installing libdave via `make install-tools`.
 
 ### Linting and Code Quality
 - `golangci-lint run` - Run comprehensive linting (configured in .golangci.yml)
@@ -27,16 +41,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - `go mod tidy` - Clean up dependencies
 - `make deps` - Download and tidy dependencies
 
-### Docker
-- `docker build -t gobard .` - Build Docker image
-- `docker-compose up -d` - Run with docker-compose
-- `make docker-build` - Build Docker image using Makefile
-- `make docker-run` - Run with docker-compose
-- `make docker-logs` - Show Docker container logs
-- `make docker-stop` - Stop Docker container
-
 ### Development Tools
-- `make install-tools` - Install yt-dlp and check FFmpeg availability
+- `make install-tools` - Install yt-dlp, check FFmpeg, and install libdave for native builds
 - `make help` - Show all available Makefile targets
 
 ## Architecture
