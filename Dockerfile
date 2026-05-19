@@ -45,15 +45,21 @@ RUN --mount=type=cache,target=/go/pkg/mod \
 # Runtime stage
 FROM debian:${DEBIAN_VERSION}-slim
 
-# Install runtime dependencies including voice libraries and yt-dlp
+# Install runtime dependencies including voice libraries.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
+    curl \
     ffmpeg \
     libopus0 \
     libopusfile0 \
-    libsodium23 \
-    yt-dlp && \
+    libsodium23 && \
     rm -rf /var/lib/apt/lists/*
+
+# Use the upstream yt-dlp release instead of Debian's package. YouTube
+# extractor fixes are time-sensitive and distro packages often lag.
+RUN curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_linux \
+    -o /usr/local/bin/yt-dlp && \
+    chmod 0755 /usr/local/bin/yt-dlp
 
 # Create non-root user
 RUN groupadd -g 1000 gobard && \

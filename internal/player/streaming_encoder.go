@@ -43,6 +43,7 @@ func NewStreamingEncoder(url, streamURL string, streamHeaders map[string]string,
 		ffmpegCmd    *exec.Cmd
 		ffmpegStdout io.ReadCloser
 		ffmpegStderr io.ReadCloser
+		ytdlpStderr  io.ReadCloser
 		err          error
 	)
 
@@ -67,20 +68,17 @@ func NewStreamingEncoder(url, streamURL string, streamHeaders map[string]string,
 
 		// Use yt-dlp to stream audio directly to FFmpeg.
 		// This avoids 403 errors when a direct media URL is unavailable or stale.
-		ytdlpCmd = exec.Command(
-			"yt-dlp",
-			"-f", "bestaudio",
-			"--no-warnings",
-			"-o", "-", // Output to stdout
-			"--",
-			url,
-		)
+		ytdlpCmd = exec.Command("yt-dlp", buildStreamingYTDLPArgs(url)...)
 
 		ffmpegCmd = exec.Command("ffmpeg", buildStreamingFFmpegArgs(sampleRate, channels, startOffset)...)
 
 		ytdlpStdout, err := ytdlpCmd.StdoutPipe()
 		if err != nil {
 			return nil, fmt.Errorf("failed to create yt-dlp stdout pipe: %w", err)
+		}
+		ytdlpStderr, err = ytdlpCmd.StderrPipe()
+		if err != nil {
+			return nil, fmt.Errorf("failed to create yt-dlp stderr pipe: %w", err)
 		}
 
 		ffmpegCmd.Stdin = ytdlpStdout
@@ -131,6 +129,9 @@ func NewStreamingEncoder(url, streamURL string, streamHeaders map[string]string,
 
 	// Start stderr monitoring goroutine
 	go encoder.monitorFFmpegErrors(ffmpegStderr)
+	if ytdlpStderr != nil {
+		go encoder.monitorYTDLPErrors(ytdlpStderr)
+	}
 
 	// Start the encoding goroutine
 	go encoder.encodeLoop(ffmpegStdout)
@@ -146,6 +147,20 @@ func (e *StreamingEncoder) monitorFFmpegErrors(stderr io.Reader) {
 		n, err := stderr.Read(buf)
 		if n > 0 {
 			logger.Error("FFmpeg error", "output", string(buf[:n]))
+		}
+		if err != nil {
+			return
+		}
+	}
+}
+
+// monitorYTDLPErrors reads and logs yt-dlp stderr output.
+func (e *StreamingEncoder) monitorYTDLPErrors(stderr io.Reader) {
+	buf := make([]byte, 4096)
+	for {
+		n, err := stderr.Read(buf)
+		if n > 0 {
+			logger.Error("yt-dlp error", "output", string(buf[:n]))
 		}
 		if err != nil {
 			return
@@ -325,4 +340,16 @@ func waitProcess(cmd *exec.Cmd) {
 	}
 
 	_ = cmd.Wait()
+}
+
+func buildStreamingYTDLPArgs(url string) []string {
+	return []string{
+		"-f", "bestaudio[ext=webm]/bestaudio",
+		"--quiet",
+		"--no-warnings",
+		"--no-progress",
+		"-o", "-",
+		"--",
+		url,
+	}
 }

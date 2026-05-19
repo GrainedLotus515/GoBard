@@ -62,6 +62,20 @@ func TestBuildDirectStreamingFFmpegArgsIncludesHeadersAndReconnect(t *testing.T)
 	}
 }
 
+func TestBuildStreamingYTDLPArgsOutputsOnlyMediaToStdout(t *testing.T) {
+	args := buildStreamingYTDLPArgs("https://www.youtube.com/watch?v=test")
+
+	for _, want := range []string{"--quiet", "--no-warnings", "--no-progress"} {
+		if !slices.Contains(args, want) {
+			t.Fatalf("buildStreamingYTDLPArgs() args = %v, expected %s", args, want)
+		}
+	}
+
+	if !containsSubsequence(args, []string{"-o", "-", "--", "https://www.youtube.com/watch?v=test"}) {
+		t.Fatalf("buildStreamingYTDLPArgs() args = %v, expected stdout output and URL terminator", args)
+	}
+}
+
 func TestFormatFFmpegTimestamp(t *testing.T) {
 	got := formatFFmpegTimestamp(2*time.Hour + 3*time.Minute + 4*time.Second + 567*time.Millisecond)
 	if got != "02:03:04.567" {
