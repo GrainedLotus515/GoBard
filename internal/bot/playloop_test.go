@@ -285,6 +285,94 @@ func TestPlayLoopRetryStartsDeferredCacheOnceAfterSuccessfulAttempt(t *testing.T
 	}
 }
 
+func TestBackgroundCacheDownloadsAreGloballyThrottledAcrossGuilds(t *testing.T) {
+	originalSlots := backgroundCacheDownloadSlots
+	backgroundCacheDownloadSlots = make(chan struct{}, 1)
+	t.Cleanup(func() {
+		backgroundCacheDownloadSlots = originalSlots
+	})
+
+	cacheStore, err := cache.NewCache(t.TempDir(), 64*1024*1024)
+	if err != nil {
+		t.Fatalf("NewCache() error = %v", err)
+	}
+
+	manager := player.NewManager()
+	guildOne := manager.GetPlayer("guild-one")
+	guildOne.SetVoiceConnection(stubVoiceConn{})
+	guildOne.Queue.Add(&player.Track{
+		Title: "guild-one-track",
+		URL:   "https://example.com/guild-one",
+	})
+
+	guildTwo := manager.GetPlayer("guild-two")
+	guildTwo.SetVoiceConnection(stubVoiceConn{})
+	guildTwo.Queue.Add(&player.Track{
+		Title: "guild-two-track",
+		URL:   "https://example.com/guild-two",
+	})
+
+	cacheStarted := make(chan string, 2)
+	releaseFirstDownload := make(chan struct{})
+	var cacheCalls int32
+
+	b := &Bot{
+		PlayerManager: manager,
+		Cache:         cacheStore,
+	}
+	b.playTrackFn = func(*player.GuildPlayer) error { return nil }
+	b.waitForPlaybackStartFn = func(*player.GuildPlayer) bool { return true }
+	b.cacheTrackFn = func(url string, path string) error {
+		call := atomic.AddInt32(&cacheCalls, 1)
+		cacheStarted <- url
+		if call == 1 {
+			<-releaseFirstDownload
+		}
+		return os.WriteFile(path, []byte("cached-audio"), 0o644)
+	}
+	b.waitForCompletionFn = func(gp *player.GuildPlayer) {
+		gp.ClearVoiceConnection()
+	}
+
+	doneOne := runPlayLoopAsync(b, guildOne.GuildID)
+	doneTwo := runPlayLoopAsync(b, guildTwo.GuildID)
+
+	select {
+	case <-cacheStarted:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("first background cache download did not start")
+	}
+
+	select {
+	case url := <-cacheStarted:
+		t.Fatalf("second background cache download started before first released slot: %s", url)
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	close(releaseFirstDownload)
+
+	select {
+	case <-cacheStarted:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("second background cache download did not start after first released slot")
+	}
+
+	select {
+	case <-doneOne:
+	case <-time.After(2 * time.Second):
+		t.Fatal("first playLoop did not finish in time")
+	}
+	select {
+	case <-doneTwo:
+	case <-time.After(2 * time.Second):
+		t.Fatal("second playLoop did not finish in time")
+	}
+
+	if got := atomic.LoadInt32(&cacheCalls); got != 2 {
+		t.Fatalf("cache download calls = %d, want 2", got)
+	}
+}
+
 func TestPlayLoopRefreshesStreamMetadataBeforePlaybackWhenMissing(t *testing.T) {
 	cacheStore, manager, p := newPlayLoopTestEnv(t)
 	track := &player.Track{

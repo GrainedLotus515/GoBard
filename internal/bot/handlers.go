@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/GrainedLotus515/gobard/internal/botui"
@@ -14,6 +15,10 @@ import (
 	"github.com/GrainedLotus515/gobard/internal/youtube"
 	"github.com/bwmarrin/discordgo"
 )
+
+const backgroundCacheDownloadConcurrency = 1
+
+var backgroundCacheDownloadSlots = make(chan struct{}, backgroundCacheDownloadConcurrency)
 
 // handlePlay handles the play command
 func (b *Bot) handlePlay(s *discordgo.Session, i *discordgo.InteractionCreate) error {
@@ -34,6 +39,13 @@ func (b *Bot) handlePlay(s *discordgo.Session, i *discordgo.InteractionCreate) e
 	}
 	trace.Step("Caller voice channel resolved", "channel_id", channelID)
 
+	// Defer before voice join or metadata work. Voice joins can exceed
+	// Discord's initial interaction deadline when another guild is busy.
+	s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+		Type: discordgo.InteractionResponseDeferredChannelMessageWithSource,
+	})
+	trace.Step("Deferred interaction response sent")
+
 	// Get or create player
 	p := b.PlayerManager.GetPlayer(i.GuildID)
 	wasIdle := p.Queue.Current() == nil && p.Queue.IsEmpty()
@@ -44,17 +56,16 @@ func (b *Bot) handlePlay(s *discordgo.Session, i *discordgo.InteractionCreate) e
 		vc, err := b.JoinVoiceChannel(i.GuildID, channelID)
 		if err != nil {
 			trace.Finish("Voice channel join failed", "channel_id", channelID, "err", err)
-			return err
+			b.editDeferredEmbedComponents(s, i, botui.BuildStatusCard(botui.StatusCardSpec{
+				Title:       "Command Failed",
+				Description: err.Error(),
+				Color:       botui.ColorError,
+			}), nil)
+			return nil
 		}
 		p.SetVoiceConnection(vc)
 		trace.Step("Voice channel joined", "channel_id", channelID)
 	}
-
-	// Defer the response since this might take a while
-	s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
-		Type: discordgo.InteractionResponseDeferredChannelMessageWithSource,
-	})
-	trace.Step("Deferred interaction response sent")
 
 	// Parse the query and get tracks
 	trace.Step("Resolving play query")
@@ -496,6 +507,9 @@ func (b *Bot) deferBackgroundCacheUntilPlaybackStarts(
 			return
 		}
 
+		releaseCacheSlot := acquireBackgroundCacheDownloadSlot()
+		defer releaseCacheSlot()
+
 		logger.Timing(
 			"Background cache started after playback began",
 			"title", title,
@@ -514,6 +528,17 @@ func (b *Bot) deferBackgroundCacheUntilPlaybackStarts(
 
 		logger.Info("Background download completed", "title", title)
 	}()
+}
+
+func acquireBackgroundCacheDownloadSlot() func() {
+	backgroundCacheDownloadSlots <- struct{}{}
+
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			<-backgroundCacheDownloadSlots
+		})
+	}
 }
 
 // handlePause handles the pause command
