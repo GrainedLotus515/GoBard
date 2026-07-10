@@ -1,179 +1,110 @@
-# GoBard 🎧
+# GoBard
 
-[![Build Status](https://git.grainedlotus.com/GrainedLotus515/GoBard/actions/workflows/go-test.yml/badge.svg)](https://git.grainedlotus.com/GrainedLotus515/GoBard/actions)
-[![Docker Build](https://git.grainedlotus.com/GrainedLotus515/GoBard/actions/workflows/docker-build.yml/badge.svg)](https://git.grainedlotus.com/GrainedLotus515/GoBard/actions)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+GoBard is a self-hosted Discord music bot for **YouTube searches, videos, and playlists**. It is packaged as a hardened `linux/amd64` container with Discord DAVE/libdave voice support.
 
-> A self‑hosted Discord music bot that just works. Play YouTube, Spotify, or any audio URL in your server with simple slash commands.
+It does not support Spotify, SponsorBlock, YouTube API keys, arbitrary audio URLs, DMs, or automatic host deployment.
 
----
+## Quick start
 
-## Table of Contents
-
-- [Features](#features)
-- [Quick Start](#quick-start)
-- [Configuration](#configuration)
-- [Commands](#commands)
-- [Troubleshooting](#troubleshooting)
-- [Contributing](#contributing)
-- [License](#license)
-
----
-
-## Features
-
-- 🎵 **Play anything** — YouTube videos, Spotify tracks, playlists, albums, or direct audio URLs
-- ⏩ **Seek and skip** — Fast‑forward, rewind, or jump to a timestamp
-- 🔄 **Queue control** — Shuffle, loop, move, and remove tracks
-- 🎚️ **Smart volume** — Auto‑duck when people speak in voice chat
-- 💾 **Local cache** — Frequently played songs stay on disk for instant playback
-- 🔍 **SponsorBlock** — Automatically skip non‑music segments
-- 📦 **Docker ready** — One command and you're running
-- 🌐 **Slash commands** — Clean, modern Discord integration
-
----
-
-## Quick Start
-
-The easiest way to run GoBard is with Docker.
-
-### 1. Grab the code
+Create a private configuration file and start the published image:
 
 ```bash
-git clone https://git.grainedlotus.com/GrainedLotus515/GoBard.git
+git clone https://github.com/GrainedLotus515/GoBard.git
 cd GoBard
 cp .env.example .env
+chmod 600 .env
+# Set DISCORD_TOKEN in .env.
+docker compose up -d
 ```
 
-### 2. Add your Discord token
+The base Compose file pulls `ghcr.io/grainedlotus515/gobard:latest`. It creates `./cache` on the host and runs a one-shot `cache-init` service to give the mount directory to the container user. Existing cache contents are deliberately not recursively re-owned.
 
-Edit `.env` and set at least:
+To use a token file instead, comment out `DISCORD_TOKEN` in `.env`, set `DISCORD_TOKEN_FILE_HOST` to an absolute host path in `.env`, and add the secret override. The application receives the file at `/run/secrets/discord_token`:
 
 ```bash
-DISCORD_TOKEN=your_bot_token_here
+docker compose -f docker-compose.yml -f docker-compose.secrets.yml up -d
 ```
 
-> **Need a bot token?** Head to the [Discord Developer Portal](https://discord.com/developers/applications), create an app, enable the **Bot** scope, and copy the token. Don't forget to invite the bot to your server with the `bot` and `application.commands` scopes.
+Compose file-source secrets are bind mounts, so Docker may not apply requested UID/GID/mode values. Before startup, ensure the host token file and its parent directory are traversable/readable by container UID 1000; for example, use owner `1000:1000` and mode `0400`. Do not relax that file to world-readable permissions.
 
-### 3. Run it
+After changing `.env`, recreate the container so Docker applies the new environment:
 
 ```bash
-docker-compose up -d
+docker compose up -d --force-recreate
 ```
 
-Or with plain Docker:
+Check startup with `docker compose ps`, `docker compose logs -f gobard`, or `docker inspect --format '{{.State.Health.Status}}' gobard`. The health probe calls the application’s `/ready` endpoint; it does not merely look for a process.
+
+## Images and verification
+
+Release images are published only to GitHub Container Registry and only for `linux/amd64`. Production operators should pin an image digest rather than `latest`:
 
 ```bash
-docker build -t gobard .
-docker run -d --name gobard --env-file .env gobard
+export GOBARD_IMAGE=ghcr.io/grainedlotus515/gobard@sha256:<published-digest>
+docker compose up -d
 ```
 
-That's it! The bot should appear online in your server and respond to `/play`.
+Published images are signed and carry SPDX SBOM and SLSA provenance attestations. Before the first release, the maintainer must commit the public half of the configured signing key as `cosign.pub`; the workflow fails closed if it is absent or does not match `COSIGN_PRIVATE_KEY`. Verify a digest with that trusted key before deployment:
 
-### Optional extras
+```bash
+cosign verify --key cosign.pub "$GOBARD_IMAGE"
+cosign verify-attestation --key cosign.pub --type spdxjson "$GOBARD_IMAGE"
+```
 
-- **YouTube search** — Add a `YOUTUBE_API_KEY` for faster, more reliable searches
-- **Spotify** — Add `SPOTIFY_CLIENT_ID` and `SPOTIFY_CLIENT_SECRET` to play Spotify links
-
-See [`.env.example`](.env.example) for every available option.
-
----
+There is no deployment automation in this repository. CI validates and publishes an image; rollout and rollback remain operator actions.
 
 ## Configuration
 
-All settings are environment variables. The ones you'll care about most:
+GoBard validates supplied values at startup and exits on invalid configuration. Set exactly one credential source:
 
-| Variable | Required? | Description |
-|----------|-----------|-------------|
-| `DISCORD_TOKEN` | **Yes** | Your Discord bot token |
-| `YOUTUBE_API_KEY` | No | Faster YouTube search |
-| `SPOTIFY_CLIENT_ID` | No | Spotify integration |
-| `SPOTIFY_CLIENT_SECRET` | No | Spotify integration |
-| `CACHE_DIR` | No | Where to store cached audio (default: `./cache`) |
-| `CACHE_LIMIT` | No | Max cache size, e.g. `2GB` |
-| `DEFAULT_VOLUME` | No | Default playback volume `0`–`100` |
-| `REDUCE_VOL_WHEN_VOICE` | No | Duck audio when someone speaks (`true`/`false`) |
-| `ENABLE_SPONSORBLOCK` | No | Skip sponsor segments (`true`/`false`) |
+| Variable | Default | Notes |
+| --- | --- | --- |
+| `DISCORD_TOKEN` | required | Discord bot token. Keep `.env` mode `0600`. |
+| `DISCORD_TOKEN_FILE` | unset | Alternative regular file containing the token; mutually exclusive with `DISCORD_TOKEN`. Use `docker-compose.secrets.yml` for a Compose mount. |
+| `CACHE_DIR` | `./cache` | Compose sets this to `/app/cache`. |
+| `CACHE_LIMIT` | `2GB` | Positive `KB`, `MB`, or `GB` value. |
+| `DEFAULT_VOLUME` | `100` | Integer from 0 to 100. |
+| `REDUCE_VOL_WHEN_VOICE` | `false` | Enable speaking-based volume ducking. |
+| `REDUCE_VOL_WHEN_VOICE_TARGET` | `70` | Integer from 0 to 100. |
+| `MAX_PLAYLIST_TRACKS` | `500` | Integer from 1 to 500. |
+| `YTDLP_MAX_CONCURRENCY` | `4` | Shared integer cap from 1 to 16 for every yt-dlp path: metadata, playlist work, cache downloads, and streaming fallback. |
+| `HEALTH_LISTEN_ADDR` | `127.0.0.1:8080` | Loopback-only health listener. |
+| `REGISTER_COMMANDS_ON_BOT` | `false` | Use global command registration instead of guild-by-guild reconciliation. |
+| `BOT_STATUS` | `online` | `online`, `idle`, `dnd`, `invisible`, or `offline`. |
+| `BOT_ACTIVITY_TYPE` | `LISTENING` | `PLAYING`, `STREAMING`, `LISTENING`, `WATCHING`, or `COMPETING`. |
+| `BOT_ACTIVITY` | `music` | Non-empty activity text. |
+| `BOT_ACTIVITY_URL` | unset | Optional URL used for streaming activity. |
+| `DEBUG`, `DEBUG_PLAYBACK` | `false` | Enable diagnostic logging only when troubleshooting. |
 
-> **Tip:** After changing `.env`, run `docker-compose restart` to pick up the new settings.
+Compose hardening defaults can be changed without editing the file:
 
----
+| Variable | Default |
+| --- | --- |
+| `GOBARD_MEMORY_LIMIT` | `1g` |
+| `GOBARD_CPUS` | `2.0` |
+| `GOBARD_PIDS_LIMIT` | `256` |
+| `GOBARD_TMPFS_SIZE` | `128m` |
 
-## Commands
+The bot container has a read-only root filesystem, no Linux capabilities, `no-new-privileges`, and a bounded `noexec,nosuid` `/tmp`. It writes persistent audio only to the cache mount.
 
-All commands are Discord slash commands. Type `/` in any text channel to see them.
+## Commands and access
 
-### Playback
+Commands are guild-only. `/play` accepts a search query or an exact HTTPS YouTube URL (`youtube.com`, `www.youtube.com`, `music.youtube.com`, or `youtu.be`); other URLs are rejected.
 
-| Command | What it does |
-|---------|-------------|
-| `/play <query>` | Search or queue a track, playlist, or URL |
-| `/pause` | Pause the music |
-| `/resume` | Resume playback |
-| `/skip` | Skip to the next track |
-| `/stop` | Stop and clear the queue |
-| `/disconnect` | Leave the voice channel |
+`/queue` and `/now-playing` are read-only. Playback controls and queue mutations require the caller to be in the bot’s active voice channel. Changing `/config` requires the `Manage Guild` permission. `/disconnect` intentionally leaves voice while preserving the queue; the next `/play` reconnects and resumes the preserved queue before appending the new request. `/stop` clears the queue and disconnects.
 
-### Queue
+Available controls include `/play`, `/pause`, `/resume`, `/skip`, `/stop`, `/disconnect`, `/queue`, `/now-playing`, `/clear`, `/shuffle`, `/loop`, `/volume`, `/seek`, `/fseek`, `/move`, `/remove`, and `/config`.
 
-| Command | What it does |
-|---------|-------------|
-| `/queue` | See what's coming up |
-| `/now-playing` | See the current track |
-| `/shuffle` | Randomise the queue |
-| `/loop` | Toggle looping the current track |
-| `/move <from> <to>` | Reorder a track |
-| `/remove <position>` | Delete a track from the queue |
-| `/clear` | Clear the queue (keeps the current track) |
+## Development
 
-### Playback control
+Docker is the supported development environment because it supplies libdave. Do not rely on a native build unless libdave is intentionally installed and configured.
 
-| Command | What it does |
-|---------|-------------|
-| `/volume <level>` | Set volume (`0`–`100`) |
-| `/seek <timestamp>` | Jump to a time, e.g. `1:30` or `90s` |
-| `/fseek <seconds>` | Fast‑forward by that many seconds |
+```bash
+make docker-test    # Go tests with -race
+make docker-lint    # gofmt check, vet, golangci-lint
+make docker-build   # hardened runtime image
+make docker-smoke   # final-image tools and permission checks
+make docker-run     # checkout + docker-compose.local.yml
+```
 
-### Bot settings
-
-| Command | What it does |
-|---------|-------------|
-| `/config show` | See current settings |
-| `/config set-reduce-vol-when-voice <enabled>` | Toggle auto‑ducking |
-| `/config set-reduce-vol-when-voice-target <volume>` | Ducking volume level |
-
----
-
-## Troubleshooting
-
-| Problem | Likely cause | Fix |
-|---------|------------|-----|
-| Bot won't join voice | Missing permissions | Give the bot **Connect** and **Speak** in the channel |
-| No audio | FFmpeg or yt‑dlp missing | This shouldn't happen in Docker; restart the container |
-| YouTube search is slow | No API key | Add `YOUTUBE_API_KEY` to `.env` |
-| Spotify links don't work | Missing credentials | Add `SPOTIFY_CLIENT_ID` and `SPOTIFY_CLIENT_SECRET` |
-| Commands don't show up | Registration delay | Wait up to an hour for global commands, or restart the bot |
-
-Still stuck? Open an issue or check out [DEVELOPMENT.md](DEVELOPMENT.md) for more technical details.
-
----
-
-## Contributing
-
-PRs are welcome! A few guidelines:
-
-1. Fork the repo and create a feature branch.
-2. Make your changes.
-3. Submit a pull request with a clear description.
-
-See [DEVELOPMENT.md](DEVELOPMENT.md) for the full development workflow, architecture, and CI details.
-
----
-
-## License
-
-MIT — see the [LICENSE](LICENSE) file.
-
----
-
-**Made with ❤️ and Go**
+`docker-compose.yml` is the production-image definition. `docker-compose.local.yml` is an explicit override for building this checkout. See [DEVELOPMENT.md](DEVELOPMENT.md) and [CONTRIBUTING.md](CONTRIBUTING.md) for contributor workflow and CI details.

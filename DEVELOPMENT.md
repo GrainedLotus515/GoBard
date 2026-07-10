@@ -1,261 +1,69 @@
 # Development Guide
 
-This document covers the technical details of GoBard — architecture, project structure, building from source, testing, and the CI/CD pipeline.
+## Supported environment
 
----
-
-## Table of Contents
-
-- [Architecture Overview](#architecture-overview)
-- [Project Structure](#project-structure)
-- [Building from Source](#building-from-source)
-  - [Prerequisites](#prerequisites)
-  - [Native Build](#native-build)
-  - [Docker Build](#docker-build)
-- [Development Workflow](#development-workflow)
-  - [Building](#building)
-  - [Testing](#testing)
-  - [Linting](#linting)
-- [CI/CD Pipeline](#cicd-pipeline)
-- [Comparison with Muse](#comparison-with-muse)
-- [Contributing](#contributing)
-
----
-
-## Architecture Overview
-
-GoBard is written in Go with a modular, service-oriented architecture.
-
-```
-GoBard
-├── cmd/gobard          # Application bootstrap
-├── internal
-│   ├── bot             # Discord bot core (commands, handlers, lifecycle)
-│   ├── player          # Queue + playback logic (one per guild)
-│   ├── cache           # LRU file cache with size limits
-│   ├── youtube         # yt-dlp integration for YouTube content
-│   ├── spotify         # Spotify Web API → YouTube conversion
-│   └── config          # Environment-driven configuration
-└── scripts
-    └── scripts.sh      # Helper scripts (e.g. libdave installer)
-```
-
-### Key Patterns
-
-- **Service-Oriented Design** — Each subsystem (YouTube, Spotify, Cache, Player) is an isolated service with clean interfaces and dependency injection through the main `Bot` struct.
-- **Concurrent Playback** — Each Discord guild owns a dedicated `Player` goroutine that manages its own queue and audio stream. Queue operations are protected by `RWMutex`.
-- **Double-Checked Locking** — `Cache.GetOrCreate()` avoids race conditions and redundant downloads when multiple guilds request the same track simultaneously.
-- **Graceful Stop** — `Player.Stop()` flushes buffers, signals goroutines, and drains channels before shutting down.
-- **Dual Encoding** — Cached files are encoded with a custom FFmpeg pipeline; live streams use a streaming encoder (yt-dlp → FFmpeg → Opus).
-
-### Player System Details
-
-The player system is the heart of GoBard:
-
-- **Guild-specific** — Every Discord server gets its own isolated player instance.
-- **playLoop** — A main goroutine handles queue advancement and track transitions.
-- **playTrack** — Individual tracks run in their own goroutine with proper stop signaling via `stopChan`.
-- **State Safety** — Always check `p.Queue.Next()` return values to prevent infinite loops when the queue ends. Use `p.Stop()` before starting new playback in seek operations to avoid duplicate streams.
-
----
-
-## Project Structure
-
-```
-gobard/
-├── cmd/
-│   └── gobard/
-│       └── main.go          # Application entry point
-├── internal/
-│   ├── bot/
-│   │   ├── bot.go           # Bot lifecycle & session management
-│   │   ├── commands.go      # Slash command registration
-│   │   └── handlers.go      # Interaction handlers
-│   ├── cache/
-│   │   └── cache.go         # LRU file cache with GetOrCreate()
-│   ├── config/
-│   │   └── config.go        # Environment variable loading
-│   ├── player/
-│   │   ├── player.go        # Queue & playback logic
-│   │   ├── track.go         # Track metadata & state
-│   │   ├── ffmpeg_encoder.go # Cached file encoding
-│   │   └── streaming_encoder.go # Live stream encoding
-│   ├── spotify/
-│   │   └── spotify.go       # Spotify → YouTube conversion
-│   └── youtube/
-│       └── youtube.go       # yt-dlp integration
-├── scripts/
-│   └── install-libdave.sh   # libdave E2EE library installer
-├── .env.example
-├── Dockerfile
-├── docker-compose.yml
-├── Makefile
-├── go.mod
-├── go.sum
-├── LICENSE
-├── README.md
-└── DEVELOPMENT.md
-```
-
----
-
-## Building from Source
-
-### Prerequisites
-
-| Component | Minimum Version | Notes |
-|-----------|-----------------|-------|
-| Go | 1.21+ | Currently using 1.25.2 |
-| FFmpeg | 4.1+ | Required for audio processing |
-| yt-dlp | Latest | Required for YouTube support |
-| libdave | 1.1.0+ | Required for Discord voice connections (DAVE/E2EE) |
-
-### Native Build
-
-> ⚠️ **Note:** Native builds require `libdave` because Discord non-Stage voice channels now require DAVE/E2EE encryption. This is the main reason Docker is recommended for most users.
+Use Docker for builds, tests, linting, and smoke checks. Discord voice connections require libdave, and the Dockerfile is the reproducible environment used by CI. The release target is `linux/amd64` only.
 
 ```bash
-git clone https://git.grainedlotus.com/GrainedLotus515/GoBard.git
-cd GoBard
-go mod download
-
-# Install libdave (required for voice connections)
-sh ./scripts/install-libdave.sh
-
-# Make libdave discoverable
-export PKG_CONFIG_PATH="$HOME/.local/lib/pkgconfig:$PKG_CONFIG_PATH"
-export LD_LIBRARY_PATH="$HOME/.local/lib:$LD_LIBRARY_PATH"
-
-# Build
-go build -o gobard ./cmd/gobard
-
-# Run
-./gobard
+make docker-test
+make docker-lint
+make docker-build
+make docker-smoke
 ```
 
-The `Makefile` includes these environment variables for convenience:
+`docker-test` runs `go test -race ./...`. `docker-lint` verifies formatting without rewriting files, then runs `go vet` and the pinned golangci-lint v2 release. Both targets use Docker stages so a workstation does not need a native libdave installation.
+
+For an interactive local container, create `.env`, secure it, and use the local override:
 
 ```bash
-make build    # Build the binary
-make run      # Run directly
-make all      # Clean, deps, lint, build
+cp .env.example .env
+chmod 600 .env
+make docker-run
+make docker-logs
+make docker-stop
 ```
 
-### Docker Build
+`make docker-run` uses `docker-compose.local.yml` and builds `gobard:local`. The base Compose definition is for the published GHCR image. Do not use `docker compose restart` after changing environment variables; run `docker compose up -d --force-recreate` instead.
 
-For a hassle-free build with all dependencies handled:
+For a file-backed Discord token, comment `DISCORD_TOKEN` in `.env`, set `DISCORD_TOKEN_FILE_HOST` to an absolute host path, and add `docker-compose.secrets.yml` (or use `make docker-run-secrets`). The override mounts that host file read-only at `/run/secrets/discord_token` and sets the matching application variable. Compose file-source secrets are bind mounts, so set host ownership/mode explicitly: the file and parent directory must be traversable/readable by UID 1000 (for example `1000:1000`, mode `0400`). Do not place the token itself in any Compose file or make it world-readable.
 
-```bash
-docker build -t gobard .
+## Container build contract
+
+The Dockerfile has independent stages:
+
+- `test`: race-enabled Go test suite with libdave.
+- `lint`: read-only `gofmt`, vet, and golangci-lint checks.
+- `vulncheck`: reachable vulnerability analysis with govulncheck.
+- `runtime`: minimal non-root production image.
+
+The builder and runtime base manifests, libdave archive, yt-dlp binary, and golangci-lint binary are versioned and checksum-verified. Runtime keeps `/app/gobard` root-owned and read-only, leaves `/app/cache` writable to UID/GID 1000, and assumes a read-only root filesystem with `/tmp` supplied as a bounded tmpfs.
+
+The application must provide these stable operations for Docker and Compose:
+
+```text
+GET /live                         process/event-loop liveness
+GET /ready                        Discord, command registration, and cache readiness
+gobard healthcheck --url <URL>    short readiness probe used by HEALTHCHECK
 ```
 
-The Dockerfile uses a multi-stage build:
-1. **Builder stage** — Go compiler, build tools, and libdave installation
-2. **Runtime stage** — Minimal Debian image with FFmpeg, yt-dlp, and the compiled binary
+`HEALTH_LISTEN_ADDR` is loopback-only and defaults to `127.0.0.1:8080`; do not publish it through Compose unless an authenticated reverse proxy is deliberately added.
 
-Images are published for `linux/amd64` and `linux/arm64`.
+## Architecture constraints
 
----
+GoBard is a Discord music bot with one guild-scoped playback controller per server. Keep controller transitions explicit: natural completion, skip, seek, removal, stop, intentional disconnect, transport failure, and source failure have distinct outcomes. Background work must receive a context and complete before shutdown returns.
 
-## Development Workflow
+Media input is untrusted. Accept plain search text or exact allowlisted HTTPS YouTube video/playlist URLs only, then canonicalize them before playback; never pass arbitrary URLs, local paths, or private-network addresses to yt-dlp. Preserve URL validation when adding any new source behavior.
 
-### Building
+The cache is transactional and bounded. Active readers hold leases so eviction cannot remove a file that FFmpeg is opening. Do not reintroduce background downloads that survive a skip, disconnect, or application shutdown.
 
-```bash
-go build -o gobard ./cmd/gobard
-```
+## CI and release flow
 
-Or via Make:
+Gitea Actions perform Docker-based quality validation only. They do not build or publish registry artifacts.
 
-```bash
-make build
-```
+GitHub Actions is the sole GHCR publisher. For pull requests it runs Docker test, lint, reachable-vulnerability, runtime-image, Trivy, and SPDX SBOM gates without pushing. On `main` and version tags, it builds the `linux/amd64` image once locally, scans that exact image, generates its SBOM, pushes an unadvertised staging reference, signs and attests its digest, then promotes SHA/semver/`latest` tags by that verified digest only after every gate succeeds.
 
-### Testing
+Release signing requires repository secrets `COSIGN_PRIVATE_KEY` and `COSIGN_PASSWORD`, plus the matching committed `cosign.pub`. The workflow verifies the pair before a registry push and fails closed if it is absent or mismatched. Never commit a private key. Deployment is intentionally outside CI.
 
-```bash
-go test ./...
-```
+## Native builds
 
-With race detection (recommended):
-
-```bash
-go test -v -race -coverprofile=coverage.out ./...
-```
-
-Or via Make:
-
-```bash
-make test
-```
-
-> **Race Detector** — GoBard uses extensive concurrency. Always run tests with `-race` before submitting changes.
-
-### Linting
-
-```bash
-golangci-lint run   # Comprehensive linting (see .golangci.yml)
-go fmt ./...        # Format code
-go vet ./...        # Static analysis
-```
-
-Or via Make:
-
-```bash
-make lint           # Runs fmt + vet
-make all            # Full pipeline: clean, deps, lint, build
-```
-
-### Development Tools
-
-```bash
-make install-tools  # Install yt-dlp, check FFmpeg, install libdave
-make help           # Show all available targets
-```
-
----
-
-## CI/CD Pipeline
-
-GoBard uses **Gitea Actions** (`.gitea/workflows/`):
-
-- **Go Tests** — Run against Go 1.24 and 1.25 with race detection enabled.
-- **Linting** — `golangci-lint` enforces style, security, and complexity checks.
-- **Security Scanning** — `trivy` scans Docker images for vulnerabilities.
-- **Docker Build** — Multi-platform images (`linux/amd64`, `linux/arm64`) built and published to the registry.
-- **Auto-Deploy** — Pushes to `main` trigger automatic deployment.
-
-All pull requests must pass the full CI pipeline.
-
----
-
-## Comparison with Muse
-
-GoBard is a feature-complete recreation of [Muse](https://github.com/museofficial/muse) with a different runtime philosophy:
-
-| Aspect | GoBard | Muse |
-|--------|--------|------|
-| Language | Go (compiled, strong typing) | TypeScript (interpreted, dynamic) |
-| Performance | High, low memory overhead | Moderate |
-| Deployment | Single static binary or Docker | Node.js environment required |
-| Runtime Safety | Built-in race detector | N/A |
-| Linting | golangci-lint | ESLint |
-| CI | Gitea Actions | GitHub Actions |
-| **Result** | Lightweight, scalable bot | Feature-rich but heavier runtime |
-
----
-
-## Contributing
-
-We welcome contributions! Please follow these guidelines:
-
-1. Fork the repository and create a feature branch.
-2. Run `make test` and `make lint` locally.
-3. Submit a pull request; ensure all CI checks pass.
-4. Provide clear commit messages and PR descriptions.
-
-When adding new functionality:
-- Follow the existing concurrent patterns (RWMutex, channel signaling).
-- Ensure thread-safe queue operations.
-- Add tests alongside source files (`*_test.go`).
-- Run tests with `-race` to catch concurrency issues.
+Native work is unsupported by the standard workflow. If you deliberately need it, install libdave with `scripts/install-libdave.sh`, configure `PKG_CONFIG_PATH` and `LD_LIBRARY_PATH`, then use Go tooling manually. Native output is not a replacement for the Docker validation gates.
