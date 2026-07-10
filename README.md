@@ -14,10 +14,19 @@ cd GoBard
 cp .env.example .env
 chmod 600 .env
 # Set DISCORD_TOKEN in .env.
+# This pulls the image, initializes ./cache, and then starts GoBard.
 docker compose up -d
 ```
 
-The base Compose file pulls `ghcr.io/grainedlotus515/gobard:latest`. It creates `./cache` on the host and runs a one-shot `cache-init` service to give the mount directory to the container user. Existing cache contents are deliberately not recursively re-owned.
+### Cache installation
+
+Cache preparation is built into the installation command above; no host `sudo`, `mkdir`, or `chown` command is required. The base Compose file pulls `ghcr.io/grainedlotus515/gobard:latest`, then runs the one-shot `cache-init` service before starting `gobard`. The initializer creates the `./cache` bind-mount directory when needed, assigns the mount point to container UID/GID `1000:1000`, and exits. Compose starts the bot only after that step succeeds.
+
+The initializer is safe to run again during later `docker compose up -d` operations. It changes only the cache mount point and deliberately does not recursively change ownership of existing cache contents. To confirm the installation step completed, run:
+
+```bash
+docker compose ps -a cache-init
+```
 
 To use a token file instead, comment out `DISCORD_TOKEN` in `.env`, set `DISCORD_TOKEN_FILE_HOST` to an absolute host path in `.env`, and add the secret override. The application receives the file at `/run/secrets/discord_token`:
 

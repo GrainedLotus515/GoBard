@@ -7,7 +7,11 @@ services:
     user: "0:0"
     read_only: true
     entrypoint: ["/bin/sh", "-ec"]
-    command: "mkdir -p /app/cache && chown 1000:1000 /app/cache"
+    # Keep the shell program as one argv item. A scalar command is split by
+    # Compose and causes `sh -c` to receive only `mkdir` as its program.
+    command: ["mkdir -p /app/cache && chown 1000:1000 /app/cache"]
+    healthcheck:
+      disable: true
     volumes:
       - ./cache:/app/cache
     restart: "no"
