@@ -5,8 +5,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/GrainedLotus515/gobard/internal/player"
 	"github.com/bwmarrin/discordgo"
+
+	"github.com/GrainedLotus515/gobard/internal/player"
 )
 
 func TestResolveQueryUsesPlaceholderForDirectYouTubeURL(t *testing.T) {
@@ -44,6 +45,7 @@ func TestResolveQueryUsesPlaceholderForDirectYouTubeURL(t *testing.T) {
 	}
 }
 
+//nolint:gocyclo // Each assertion documents a distinct field preserved by hydration.
 func TestHydrateFastURLTrackAsyncReplacesQueuedTrackAndEditsPendingResponse(t *testing.T) {
 	manager := player.NewManager()
 	guildID := "guild-fastpath"

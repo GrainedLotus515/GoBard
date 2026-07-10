@@ -6,16 +6,17 @@ import (
 	"sync"
 	"time"
 
+	"github.com/bwmarrin/discordgo"
+
 	"github.com/GrainedLotus515/gobard/internal/botui"
 	"github.com/GrainedLotus515/gobard/internal/cache"
 	"github.com/GrainedLotus515/gobard/internal/config"
 	"github.com/GrainedLotus515/gobard/internal/discordvoice"
 	"github.com/GrainedLotus515/gobard/internal/logger"
 	"github.com/GrainedLotus515/gobard/internal/player"
-	"github.com/GrainedLotus515/gobard/internal/spotify"
+	"github.com/GrainedLotus515/gobard/internal/processlimit"
 	"github.com/GrainedLotus515/gobard/internal/voiceconn"
 	"github.com/GrainedLotus515/gobard/internal/youtube"
-	"github.com/bwmarrin/discordgo"
 )
 
 // Bot represents the Discord bot
@@ -26,11 +27,30 @@ type Bot struct {
 	VoiceManager  *discordvoice.Manager
 	Cache         *cache.Cache
 	YouTube       *youtube.Client
-	Spotify       *spotify.Client
 	Commands      []*discordgo.ApplicationCommand
 
 	pendingInteractionResponses   map[string]*pendingInteractionResponse
 	pendingInteractionResponsesMu sync.Mutex
+	voiceJoinLocks                map[string]*sync.Mutex
+	voiceJoinLocksMu              sync.Mutex
+	botVoiceSessions              map[string]botVoiceSession
+	botVoiceSessionsMu            sync.Mutex
+	intentionalDisconnects        map[string]struct{}
+	intentionalDisconnectsMu      sync.Mutex
+	backgroundCacheMu             sync.Mutex
+	backgroundCacheStopping       bool
+	backgroundCacheWG             sync.WaitGroup
+	asyncWorkMu                   sync.Mutex
+	asyncWorkStopping             bool
+	asyncWorkContext              context.Context
+	asyncWorkCancel               context.CancelFunc
+	asyncWorkWG                   sync.WaitGroup
+
+	readinessMu       sync.RWMutex
+	live              bool
+	discordReady      bool
+	commandsReady     bool
+	voiceManagerReady bool
 
 	playTrackFn               func(*player.GuildPlayer) error
 	waitForCompletionFn       func(*player.GuildPlayer)
@@ -40,6 +60,7 @@ type Bot struct {
 	getVideoInfoFn            func(string) (*player.Track, error)
 	interactionResponseEditFn func(*discordgo.Interaction, *discordgo.WebhookEdit) (*discordgo.Message, error)
 	channelMessageSendFn      func(string, string) (*discordgo.Message, error)
+	commandBulkOverwriteFn    func(string, string, []*discordgo.ApplicationCommand) ([]*discordgo.ApplicationCommand, error)
 	nowFn                     func() time.Time
 }
 
@@ -50,6 +71,12 @@ type pendingInteractionResponse struct {
 	TrackRef    *player.Track
 	Mode        string
 	CreatedAt   time.Time
+}
+
+type botVoiceSession struct {
+	channelID        string
+	sessionID        string
+	expectingSession bool
 }
 
 const (
@@ -74,31 +101,33 @@ func New(cfg *config.Config) (*Bot, error) {
 		return nil, fmt.Errorf("failed to create cache: %w", err)
 	}
 
-	// Create YouTube client
-	ytClient := youtube.NewClient(cfg.YouTubeAPIKey)
+	// Configure one process budget for all yt-dlp paths (metadata, cache
+	// downloads, and direct playback fallbacks) before any clients are created.
+	processlimit.ConfigureGlobal(cfg.YTDLPMaxConcurrency)
 
-	// Create Spotify client (optional)
-	var spotifyClient *spotify.Client
-	if cfg.SpotifyClientID != "" && cfg.SpotifySecret != "" {
-		spotifyClient, err = spotify.NewClient(cfg.SpotifyClientID, cfg.SpotifySecret)
-		if err != nil {
-			logger.Warn("Failed to create Spotify client", "err", err)
-		}
-	}
+	// Create YouTube client with the shared bounded external-tool concurrency.
+	ytClient := youtube.NewClientWithOptions(youtube.Options{
+		MaxPlaylistTracks: cfg.MaxPlaylistTracks,
+		ProcessLimiter:    processlimit.Global(),
+	})
 
 	bot := &Bot{
-		Session:       session,
-		Config:        cfg,
-		PlayerManager: player.NewManager(),
-		Cache:         cacheManager,
-		YouTube:       ytClient,
-		Spotify:       spotifyClient,
-		nowFn:         time.Now,
+		Session: session,
+		Config:  cfg,
+		PlayerManager: player.NewManagerWithDefaults(player.PlaybackDefaults{
+			Volume:              cfg.DefaultVolume,
+			ReduceOnVoice:       cfg.ReduceVolumeOnVoice,
+			ReduceOnVoiceTarget: cfg.ReduceVolumeOnVoiceTarget,
+		}),
+		Cache:   cacheManager,
+		YouTube: ytClient,
+		nowFn:   time.Now,
 	}
 
 	// Register handlers
 	session.AddHandler(bot.ready)
 	session.AddHandler(bot.interactionCreate)
+	session.AddHandler(bot.guildCreate)
 	session.AddHandler(bot.voiceStateUpdate)
 	session.AddHandler(bot.voiceServerUpdate)
 
@@ -118,10 +147,17 @@ func (b *Bot) Start() error {
 
 	voiceManager, err := discordvoice.NewManager(b.Session)
 	if err != nil {
-		_ = b.Session.Close()
+		if closeErr := b.Session.Close(); closeErr != nil {
+			logger.Warn("Failed to close Discord session after voice manager initialization failure", "err", closeErr)
+		}
 		return fmt.Errorf("failed to initialize voice manager: %w", err)
 	}
 	b.VoiceManager = voiceManager
+	voiceManager.SetSpeakingHandler(b.voiceSpeakingUpdate)
+	b.setReadiness(func() {
+		b.live = true
+		b.voiceManagerReady = true
+	})
 
 	logger.Info("🤖 Bot is now running. Press CTRL-C to exit.")
 	return nil
@@ -129,16 +165,39 @@ func (b *Bot) Start() error {
 
 // Stop stops the bot
 func (b *Bot) Stop() error {
+	b.setReadiness(func() {
+		b.live = false
+		b.discordReady = false
+		b.commandsReady = false
+		b.voiceManagerReady = false
+	})
+	// Refuse new asynchronous work and cancel work that can honor a context
+	// before tearing down the media and Discord dependencies underneath it.
+	b.cancelAsyncWork()
+	if b.PlayerManager != nil {
+		// Stop active sessions before waiting: their done signals cancel any
+		// playback-bound cache fills without leaving yt-dlp running on shutdown.
+		b.PlayerManager.StopAll()
+	}
+	b.waitForBackgroundCacheTasks()
+	b.waitForAsyncWork()
 	if b.VoiceManager != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		b.VoiceManager.Close(ctx)
 		cancel()
+	}
+	if b.Session == nil {
+		return nil
 	}
 	return b.Session.Close()
 }
 
 // ready is called when the bot is ready
 func (b *Bot) ready(s *discordgo.Session, event *discordgo.Ready) {
+	b.setReadiness(func() {
+		b.discordReady = true
+		b.commandsReady = false
+	})
 	logger.Info("✅ Logged in", "user", fmt.Sprintf("%v#%v", s.State.User.Username, s.State.User.Discriminator))
 	inviteURL := fmt.Sprintf("https://discord.com/api/oauth2/authorize?client_id=%s&permissions=0&scope=bot%%20applications.commands", s.State.User.ID)
 	logger.Info("Invite the bot using this link", "url", inviteURL)
@@ -157,6 +216,8 @@ func (b *Bot) ready(s *discordgo.Session, event *discordgo.Ready) {
 		activityType = discordgo.ActivityTypeStreaming
 	case "WATCHING":
 		activityType = discordgo.ActivityTypeWatching
+	case "COMPETING":
+		activityType = discordgo.ActivityTypeCompeting
 	}
 
 	err := s.UpdateStatusComplex(discordgo.UpdateStatusData{
@@ -176,49 +237,212 @@ func (b *Bot) ready(s *discordgo.Session, event *discordgo.Ready) {
 	// Register commands
 	if err := b.registerCommands(); err != nil {
 		logger.Error("Error registering commands", "err", err)
+		return
 	}
+	b.setReadiness(func() { b.commandsReady = true })
 }
 
-// voiceStateUpdate handles voice state changes
+// guildCreate reconciles the command surface for servers joined after the
+// Ready event. Global commands are already managed by their single overwrite.
+func (b *Bot) guildCreate(s *discordgo.Session, event *discordgo.GuildCreate) {
+	if b == nil || b.Config == nil || b.Config.RegisterGlobally || s == nil || s.State == nil || s.State.User == nil ||
+		event == nil || event.ID == "" || len(b.Commands) == 0 {
+		return
+	}
+	guildID := event.ID
+	applicationID := s.State.User.ID
+	commands := append([]*discordgo.ApplicationCommand(nil), b.Commands...)
+	if !b.beginAsyncWork() {
+		return
+	}
+	go func() {
+		defer b.asyncWorkWG.Done()
+		if err := b.bulkOverwriteCommands(applicationID, guildID, commands); err != nil {
+			logger.Error("Failed to reconcile commands for newly joined guild", "guild", guildID, "err", err)
+			return
+		}
+		logger.Info("Commands reconciled for newly joined guild", "guild", guildID)
+	}()
+}
+
+// Live implements the process liveness portion of the health checker. It is
+// intentionally independent of Discord readiness so a failed registration can
+// be diagnosed without causing the process manager to restart it in a loop.
+func (b *Bot) Live() error {
+	if b == nil {
+		return fmt.Errorf("bot is not initialized")
+	}
+	b.readinessMu.RLock()
+	live := b.live
+	b.readinessMu.RUnlock()
+	if !live {
+		return fmt.Errorf("bot is not running")
+	}
+	return nil
+}
+
+// Ready implements the readiness portion of the health checker. Command
+// registration is included because a connected bot that cannot receive its
+// command surface is not ready to serve users.
+func (b *Bot) Ready(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if b == nil {
+		return fmt.Errorf("bot is not initialized")
+	}
+	b.readinessMu.RLock()
+	live := b.live
+	discordReady := b.discordReady
+	commandsReady := b.commandsReady
+	voiceManagerReady := b.voiceManagerReady
+	b.readinessMu.RUnlock()
+	if !live || !discordReady || !commandsReady || !voiceManagerReady || b.Cache == nil {
+		return fmt.Errorf("bot is not ready")
+	}
+	return nil
+}
+
+func (b *Bot) setReadiness(update func()) {
+	b.readinessMu.Lock()
+	defer b.readinessMu.Unlock()
+	update()
+}
+
+// voiceStateUpdate handles voice state changes.
+//
+//nolint:gocyclo,nestif // Gateway voice-state processing has intentionally explicit stale/disconnect branches.
 func (b *Bot) voiceStateUpdate(s *discordgo.Session, vsu *discordgo.VoiceStateUpdate) {
+	if b == nil || s == nil || s.State == nil || s.State.User == nil || vsu == nil || vsu.VoiceState == nil {
+		return
+	}
+	botUserID := s.State.User.ID
+	isBotUpdate := vsu.UserID == botUserID
+	if isBotUpdate && !b.acceptBotVoiceStateUpdate(vsu) {
+		logger.Warn("Ignored stale bot voice state update", "guild", vsu.GuildID, "channel", vsu.ChannelID)
+		return
+	}
+
 	if b.VoiceManager != nil {
 		b.VoiceManager.HandleVoiceStateUpdate(vsu)
 	}
 
 	// Check if this is the bot being disconnected from voice
-	if vsu.UserID == s.State.User.ID {
+	if isBotUpdate {
 		if vsu.ChannelID == "" {
-			// Bot was disconnected from voice channel
-			logger.Info("Bot was disconnected from voice channel", "guild", vsu.GuildID)
-			p := b.PlayerManager.GetPlayer(vsu.GuildID)
-			if p != nil {
-				p.Stop()
-				p.SetLoopRunning(false)
-				p.Queue.ClearAll()
-				p.ClearVoiceConnection()
+			intentional := b.consumeIntentionalDisconnect(vsu.GuildID)
+			logger.Info("Bot was disconnected from voice channel", "guild", vsu.GuildID, "intentional", intentional)
+			if b.PlayerManager != nil {
+				p := b.PlayerManager.GetPlayer(vsu.GuildID)
+				// Preserve the queue for an explicit /disconnect and for a
+				// recoverable transport loss. p.Disconnect already stops an
+				// intentional session; ClearVoiceConnection handles external loss.
+				if !intentional {
+					p.ClearVoiceConnection()
+				} else {
+					p.SetLoopRunning(false)
+				}
 			}
 		}
 		return
 	}
 
-	// Handle volume reduction when someone speaks
-	player := b.PlayerManager.GetPlayer(vsu.GuildID)
-	if player == nil {
+	// VoiceStateUpdate is not a speaking event. Treating mute/deaf changes as
+	// speech permanently ducked the bot after ordinary leave/move events. The
+	// voice transport owns real speaking notifications; here we only clear a
+	// speaker that left or moved out of the bot's channel.
+	if b.PlayerManager == nil {
 		return
 	}
-
-	if vsu.VoiceState.SelfMute || vsu.VoiceState.SelfDeaf {
-		player.SpeakerStopped(vsu.UserID)
+	botChannelID, err := b.GetVoiceChannel(vsu.GuildID, botUserID)
+	if err != nil || botChannelID == "" {
 		return
 	}
-
-	// Track speaking state to avoid premature volume restoration
-	// when multiple people are talking simultaneously.
-	if !vsu.VoiceState.Mute && !vsu.VoiceState.Deaf {
-		player.SpeakerStarted(vsu.UserID)
-	} else {
-		player.SpeakerStopped(vsu.UserID)
+	wasInBotChannel := vsu.BeforeUpdate != nil && vsu.BeforeUpdate.ChannelID == botChannelID
+	if vsu.ChannelID == "" || (wasInBotChannel && vsu.ChannelID != botChannelID) {
+		b.PlayerManager.GetPlayer(vsu.GuildID).SpeakerStopped(vsu.UserID)
 	}
+}
+
+// acceptBotVoiceStateUpdate permits disconnects and channel moves, and rejects
+// only same-channel session changes that were not initiated by this process.
+// This keeps disgo from being overwritten by an old Discord gateway event
+// while still accepting the state needed for an intentional reconnect.
+func (b *Bot) acceptBotVoiceStateUpdate(vsu *discordgo.VoiceStateUpdate) bool {
+	b.botVoiceSessionsMu.Lock()
+	defer b.botVoiceSessionsMu.Unlock()
+	if b.botVoiceSessions == nil {
+		b.botVoiceSessions = make(map[string]botVoiceSession)
+	}
+	if vsu.ChannelID == "" {
+		delete(b.botVoiceSessions, vsu.GuildID)
+		return true
+	}
+
+	previous, known := b.botVoiceSessions[vsu.GuildID]
+	if !known || previous.channelID == "" || previous.channelID != vsu.ChannelID || previous.sessionID == "" ||
+		previous.sessionID == vsu.SessionID || previous.expectingSession {
+		b.botVoiceSessions[vsu.GuildID] = botVoiceSession{
+			channelID: vsu.ChannelID,
+			sessionID: vsu.SessionID,
+		}
+		return true
+	}
+	return false
+}
+
+func (b *Bot) expectBotVoiceSession(guildID, channelID string) {
+	b.botVoiceSessionsMu.Lock()
+	defer b.botVoiceSessionsMu.Unlock()
+	if b.botVoiceSessions == nil {
+		b.botVoiceSessions = make(map[string]botVoiceSession)
+	}
+	previous := b.botVoiceSessions[guildID]
+	previous.channelID = channelID
+	previous.expectingSession = true
+	b.botVoiceSessions[guildID] = previous
+}
+
+func (b *Bot) cancelExpectedBotVoiceSession(guildID, channelID string) {
+	b.botVoiceSessionsMu.Lock()
+	defer b.botVoiceSessionsMu.Unlock()
+	previous, ok := b.botVoiceSessions[guildID]
+	if ok && previous.channelID == channelID {
+		previous.expectingSession = false
+		b.botVoiceSessions[guildID] = previous
+	}
+}
+
+func (b *Bot) markIntentionalDisconnect(guildID string) {
+	if b == nil || guildID == "" {
+		return
+	}
+	b.intentionalDisconnectsMu.Lock()
+	if b.intentionalDisconnects == nil {
+		b.intentionalDisconnects = make(map[string]struct{})
+	}
+	b.intentionalDisconnects[guildID] = struct{}{}
+	b.intentionalDisconnectsMu.Unlock()
+}
+
+func (b *Bot) consumeIntentionalDisconnect(guildID string) bool {
+	if b == nil || guildID == "" {
+		return false
+	}
+	b.intentionalDisconnectsMu.Lock()
+	defer b.intentionalDisconnectsMu.Unlock()
+	_, intentional := b.intentionalDisconnects[guildID]
+	delete(b.intentionalDisconnects, guildID)
+	return intentional
+}
+
+func (b *Bot) clearIntentionalDisconnect(guildID string) {
+	if b == nil || guildID == "" {
+		return
+	}
+	b.intentionalDisconnectsMu.Lock()
+	delete(b.intentionalDisconnects, guildID)
+	b.intentionalDisconnectsMu.Unlock()
 }
 
 func (b *Bot) voiceServerUpdate(_ *discordgo.Session, update *discordgo.VoiceServerUpdate) {
@@ -227,8 +451,42 @@ func (b *Bot) voiceServerUpdate(_ *discordgo.Session, update *discordgo.VoiceSer
 	}
 }
 
+// voiceSpeakingUpdate is driven by the Discord Voice Gateway's opcode-5
+// speaking events, not guild mute/deaf state updates. The extra channel check
+// makes a delayed event harmless after the speaker moves elsewhere.
+func (b *Bot) voiceSpeakingUpdate(guildID, userID string, speaking bool) {
+	if b == nil || b.PlayerManager == nil || b.Session == nil || b.Session.State == nil || b.Session.State.User == nil || userID == "" {
+		return
+	}
+	botUserID := b.Session.State.User.ID
+	if userID == botUserID {
+		return
+	}
+	botChannelID, err := b.GetVoiceChannel(guildID, botUserID)
+	if err != nil || botChannelID == "" {
+		return
+	}
+	userChannelID, err := b.GetVoiceChannel(guildID, userID)
+	player := b.PlayerManager.GetPlayer(guildID)
+	if err != nil || userChannelID != botChannelID {
+		player.SpeakerStopped(userID)
+		return
+	}
+	if speaking {
+		player.SpeakerStarted(userID)
+		return
+	}
+	player.SpeakerStopped(userID)
+}
+
 // GetVoiceChannel gets the voice channel a user is in
 func (b *Bot) GetVoiceChannel(guildID, userID string) (string, error) {
+	if b == nil || b.Session == nil || b.Session.State == nil {
+		return "", fmt.Errorf("discord session state is not available")
+	}
+	if guildID == "" || userID == "" {
+		return "", fmt.Errorf("guild and user are required")
+	}
 	guild, err := b.Session.State.Guild(guildID)
 	if err != nil {
 		return "", err
@@ -243,10 +501,26 @@ func (b *Bot) GetVoiceChannel(guildID, userID string) (string, error) {
 	return "", fmt.Errorf("user not in voice channel")
 }
 
+func (b *Bot) guildJoinLock(guildID string) *sync.Mutex {
+	b.voiceJoinLocksMu.Lock()
+	defer b.voiceJoinLocksMu.Unlock()
+	if b.voiceJoinLocks == nil {
+		b.voiceJoinLocks = make(map[string]*sync.Mutex)
+	}
+	lock := b.voiceJoinLocks[guildID]
+	if lock == nil {
+		lock = &sync.Mutex{}
+		b.voiceJoinLocks[guildID] = lock
+	}
+	return lock
+}
+
 // JoinVoiceChannel joins a voice channel
 func (b *Bot) JoinVoiceChannel(guildID, channelID string) (voiceconn.Connection, error) {
-	// Join voice channel: mute=false, deaf=false
-	// Bot needs to hear users for voice ducking feature
+	// Join voice channel: mute=false, deaf=true
+	// Voice ducking uses Voice Gateway opcode-5 speaking events, not guild
+	// mute/deaf state changes. Deafening avoids receiving unprocessed audio
+	// packets while leaving speaking notifications available.
 	if b.VoiceManager == nil {
 		return nil, fmt.Errorf("voice manager is not initialized")
 	}
@@ -254,13 +528,29 @@ func (b *Bot) JoinVoiceChannel(guildID, channelID string) (voiceconn.Connection,
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	vc, err := b.VoiceManager.Join(ctx, guildID, channelID, false, false)
+	b.expectBotVoiceSession(guildID, channelID)
+	vc, err := b.VoiceManager.Join(ctx, guildID, channelID, false, true)
 	if err != nil {
+		b.cancelExpectedBotVoiceSession(guildID, channelID)
 		logger.VoiceConnectionError(err)
 		return nil, wrapVoiceJoinError(err)
 	}
+	b.clearIntentionalDisconnect(guildID)
 
 	return vc, nil
+}
+
+// rejoinVoiceChannel finds the bot's current voice channel from Discord state
+// and rejoins it.  Used to recover from voice gateway disconnects (e.g. 4006).
+func (b *Bot) rejoinVoiceChannel(guildID string) (voiceconn.Connection, error) {
+	if b.Session == nil || b.Session.State == nil || b.Session.State.User == nil {
+		return nil, fmt.Errorf("discord session is not available")
+	}
+	channelID, err := b.GetVoiceChannel(guildID, b.Session.State.User.ID)
+	if err != nil {
+		return nil, fmt.Errorf("could not determine voice channel to rejoin: %w", err)
+	}
+	return b.JoinVoiceChannel(guildID, channelID)
 }
 
 func (b *Bot) playTrackForGuild(p *player.GuildPlayer) error {
@@ -270,19 +560,111 @@ func (b *Bot) playTrackForGuild(p *player.GuildPlayer) error {
 	return p.Play()
 }
 
-func (b *Bot) waitForTrackCompletion(p *player.GuildPlayer) {
+func (b *Bot) waitForTrackResult(p *player.GuildPlayer) player.PlaybackResult {
 	if b.waitForCompletionFn != nil {
 		b.waitForCompletionFn(p)
-		return
+		result := p.LastPlaybackResult()
+		if result.Reason == player.PlaybackEndNone {
+			// Test hooks intentionally bypass GuildPlayer.Play; preserve their
+			// historical natural-completion semantics while production always
+			// waits for the typed session result below.
+			return player.PlaybackResult{Reason: player.PlaybackEndCompleted}
+		}
+		return result
 	}
-	p.WaitForCompletion()
+	return p.WaitForCompletionResult()
 }
 
-func (b *Bot) cacheTrack(url, path string) error {
+func (b *Bot) cacheTrackContext(ctx context.Context, url, path string) error {
 	if b.cacheTrackFn != nil {
 		return b.cacheTrackFn(url, path)
 	}
-	return b.YouTube.Download(url, path)
+	if b.YouTube == nil {
+		return fmt.Errorf("YouTube is not initialized")
+	}
+	return b.YouTube.DownloadContext(ctx, url, path)
+}
+
+// beginBackgroundCacheTask atomically refuses new cache fills once shutdown
+// starts. It pairs every accepted task with waitForBackgroundCacheTasks.
+func (b *Bot) beginBackgroundCacheTask() bool {
+	if b == nil {
+		return false
+	}
+	b.backgroundCacheMu.Lock()
+	defer b.backgroundCacheMu.Unlock()
+	if b.backgroundCacheStopping {
+		return false
+	}
+	b.backgroundCacheWG.Add(1)
+	return true
+}
+
+// waitForBackgroundCacheTasks is used by shutdown/tests to ensure temporary
+// cache creators are no longer touching a cache directory before it is torn
+// down. Playback itself never waits for cache population.
+func (b *Bot) waitForBackgroundCacheTasks() {
+	if b == nil {
+		return
+	}
+	b.backgroundCacheMu.Lock()
+	b.backgroundCacheStopping = true
+	b.backgroundCacheMu.Unlock()
+	b.backgroundCacheWG.Wait()
+}
+
+// beginAsyncWork enrolls short-lived non-cache work in the shutdown barrier.
+// It is deliberately separate from cache work because cache fills have their
+// own playback-bound cancellation path. The mutex prevents WaitGroup.Add from
+// racing with shutdown's Wait call.
+func (b *Bot) beginAsyncWork() bool {
+	if b == nil {
+		return false
+	}
+	b.asyncWorkMu.Lock()
+	defer b.asyncWorkMu.Unlock()
+	if b.asyncWorkStopping {
+		return false
+	}
+	if b.asyncWorkContext == nil {
+		b.asyncWorkContext, b.asyncWorkCancel = context.WithCancel(context.Background())
+	}
+	b.asyncWorkWG.Add(1)
+	return true
+}
+
+func (b *Bot) asyncContext() context.Context {
+	if b == nil {
+		return context.Background()
+	}
+	b.asyncWorkMu.Lock()
+	defer b.asyncWorkMu.Unlock()
+	if b.asyncWorkContext == nil {
+		b.asyncWorkContext, b.asyncWorkCancel = context.WithCancel(context.Background())
+	}
+	return b.asyncWorkContext
+}
+
+func (b *Bot) cancelAsyncWork() {
+	if b == nil {
+		return
+	}
+	b.asyncWorkMu.Lock()
+	b.asyncWorkStopping = true
+	cancel := b.asyncWorkCancel
+	b.asyncWorkMu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+}
+
+// waitForAsyncWork joins playback-loop launches, command reconciliation, and
+// cancellable metadata hydration before the Discord session is closed.
+func (b *Bot) waitForAsyncWork() {
+	if b == nil {
+		return
+	}
+	b.asyncWorkWG.Wait()
 }
 
 func (b *Bot) currentTime() time.Time {
@@ -308,50 +690,79 @@ func cloneStringMap(src map[string]string) map[string]string {
 func webhookEditForEmbedComponents(embed *discordgo.MessageEmbed, components []discordgo.MessageComponent) *discordgo.WebhookEdit {
 	embeds := []*discordgo.MessageEmbed{embed}
 	return &discordgo.WebhookEdit{
-		Content:    ptrString(""),
-		Embeds:     &embeds,
-		Components: &components,
+		Content:         ptrString(""),
+		Embeds:          &embeds,
+		Components:      &components,
+		AllowedMentions: noAllowedMentions(),
 	}
 }
 
 func (b *Bot) getVideoInfo(url string) (*player.Track, error) {
+	return b.getVideoInfoContext(context.Background(), url)
+}
+
+func (b *Bot) getVideoInfoContext(ctx context.Context, url string) (*player.Track, error) {
 	if b.getVideoInfoFn != nil {
 		return b.getVideoInfoFn(url)
 	}
 	if b.YouTube == nil {
 		return nil, fmt.Errorf("youtube client is not initialized")
 	}
-	return b.YouTube.GetVideoInfo(url)
+	return b.YouTube.GetVideoInfoContext(ctx, url)
+}
+
+// startPlaybackLoop enrolls each guild loop in Bot.Stop's shutdown barrier.
+// A loop may only be started while the bot is accepting asynchronous work.
+func (b *Bot) startPlaybackLoop(guildID, channelID string) {
+	if b == nil || !b.beginAsyncWork() {
+		if b != nil && b.PlayerManager != nil {
+			b.PlayerManager.GetPlayer(guildID).SetLoopRunning(false)
+		}
+		return
+	}
+	go func() {
+		defer b.asyncWorkWG.Done()
+		b.playLoop(guildID, channelID)
+	}()
 }
 
 func (b *Bot) editInteractionResponse(interaction *discordgo.Interaction, edit *discordgo.WebhookEdit) error {
 	if b.interactionResponseEditFn != nil {
 		_, err := b.interactionResponseEditFn(interaction, edit)
+		if err != nil {
+			logger.Error("Failed to edit interaction response", "err", err)
+		}
 		return err
 	}
 	if b.Session == nil {
 		return fmt.Errorf("discord session is not initialized")
 	}
 	_, err := b.Session.InteractionResponseEdit(interaction, edit)
+	if err != nil {
+		logger.Error("Failed to edit interaction response", "err", err)
+	}
 	return err
 }
 
 func (b *Bot) sendChannelMessage(channelID, content string) error {
 	if b.channelMessageSendFn != nil {
 		_, err := b.channelMessageSendFn(channelID, content)
+		if err != nil {
+			logger.Error("Failed to send channel message", "channel", channelID, "err", err)
+		}
 		return err
 	}
 	if b.Session == nil {
 		return fmt.Errorf("discord session is not initialized")
 	}
-	_, err := b.Session.ChannelMessageSend(channelID, content)
+	_, err := b.Session.ChannelMessageSendComplex(channelID, &discordgo.MessageSend{
+		Content:         content,
+		AllowedMentions: noAllowedMentions(),
+	})
+	if err != nil {
+		logger.Error("Failed to send channel message", "channel", channelID, "err", err)
+	}
 	return err
-}
-
-func (b *Bot) cleanupExpiredPendingInteractionResponses(now time.Time) {
-	b.pendingInteractionResponsesMu.Lock()
-	defer b.pendingInteractionResponsesMu.Unlock()
-	b.cleanupExpiredPendingInteractionResponsesLocked(now)
 }
 
 func (b *Bot) cleanupExpiredPendingInteractionResponsesLocked(now time.Time) {
@@ -505,11 +916,16 @@ func (b *Bot) hydrateFastURLTrackAsync(traceID string, placeholder *player.Track
 	if traceID == "" || placeholder == nil || placeholder.URL == "" {
 		return
 	}
+	if !b.beginAsyncWork() {
+		return
+	}
+	ctx := b.asyncContext()
 
 	go func() {
+		defer b.asyncWorkWG.Done()
 		logger.Info("Background URL metadata hydration started", "trace_id", traceID, "url", placeholder.URL)
 
-		refreshed, err := b.getVideoInfo(placeholder.URL)
+		refreshed, err := b.getVideoInfoContext(ctx, placeholder.URL)
 		if err != nil {
 			logger.Warn("Background URL metadata hydration failed", "trace_id", traceID, "url", placeholder.URL, "err", err)
 			return

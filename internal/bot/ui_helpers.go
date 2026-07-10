@@ -5,9 +5,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/GrainedLotus515/gobard/internal/botui"
-	"github.com/GrainedLotus515/gobard/internal/player"
 	"github.com/bwmarrin/discordgo"
+
+	"github.com/GrainedLotus515/gobard/internal/botui"
+	"github.com/GrainedLotus515/gobard/internal/logger"
+	"github.com/GrainedLotus515/gobard/internal/player"
 )
 
 type playbackState struct {
@@ -151,9 +153,9 @@ func (b *Bot) buildQueueCard(state playbackState, requestedPage int) (*discordgo
 	return botui.BuildQueueCard(spec)
 }
 
-func idleStatusCard(title, description string) *discordgo.MessageEmbed {
+func idleStatusCard(description string) *discordgo.MessageEmbed {
 	return botui.BuildStatusCard(botui.StatusCardSpec{
-		Title:       title,
+		Title:       "Playback Is Idle",
 		Description: description,
 		Color:       botui.ColorInfo,
 	})
@@ -186,19 +188,42 @@ func (b *Bot) respondEmbed(s *discordgo.Session, i *discordgo.InteractionCreate,
 	b.respondEmbedComponents(s, i, embed, nil)
 }
 
+func (b *Bot) deferInteractionResponse(s *discordgo.Session, i *discordgo.InteractionCreate) error {
+	if s == nil || i == nil || i.Interaction == nil {
+		return fmt.Errorf("missing session or interaction")
+	}
+	err := s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+		Type: discordgo.InteractionResponseDeferredChannelMessageWithSource,
+		Data: &discordgo.InteractionResponseData{
+			AllowedMentions: noAllowedMentions(),
+		},
+	})
+	if err != nil {
+		logger.Error("Failed to defer interaction response", "err", err)
+	}
+	return err
+}
+
 func (b *Bot) respondEmbedComponents(
 	s *discordgo.Session,
 	i *discordgo.InteractionCreate,
 	embed *discordgo.MessageEmbed,
 	components []discordgo.MessageComponent,
 ) {
-	s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+	if s == nil || i == nil || i.Interaction == nil {
+		logger.Error("Unable to respond to interaction", "reason", "missing session or interaction")
+		return
+	}
+	if err := s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
 		Type: discordgo.InteractionResponseChannelMessageWithSource,
 		Data: &discordgo.InteractionResponseData{
-			Embeds:     []*discordgo.MessageEmbed{embed},
-			Components: components,
+			Embeds:          []*discordgo.MessageEmbed{embed},
+			Components:      components,
+			AllowedMentions: noAllowedMentions(),
 		},
-	})
+	}); err != nil {
+		logger.Error("Failed to respond to interaction", "err", err)
+	}
 }
 
 func (b *Bot) editDeferredEmbedComponents(
@@ -208,11 +233,18 @@ func (b *Bot) editDeferredEmbedComponents(
 	components []discordgo.MessageComponent,
 ) {
 	embeds := []*discordgo.MessageEmbed{embed}
-	s.InteractionResponseEdit(i.Interaction, &discordgo.WebhookEdit{
-		Content:    ptrString(""),
-		Embeds:     &embeds,
-		Components: &components,
-	})
+	if s == nil || i == nil || i.Interaction == nil {
+		logger.Error("Unable to edit deferred interaction", "reason", "missing session or interaction")
+		return
+	}
+	if _, err := s.InteractionResponseEdit(i.Interaction, &discordgo.WebhookEdit{
+		Content:         ptrString(""),
+		Embeds:          &embeds,
+		Components:      &components,
+		AllowedMentions: noAllowedMentions(),
+	}); err != nil {
+		logger.Error("Failed to edit deferred interaction", "err", err)
+	}
 }
 
 func (b *Bot) updateComponentMessage(
@@ -221,14 +253,21 @@ func (b *Bot) updateComponentMessage(
 	embed *discordgo.MessageEmbed,
 	components []discordgo.MessageComponent,
 ) {
-	s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+	if s == nil || i == nil || i.Interaction == nil {
+		logger.Error("Unable to update component message", "reason", "missing session or interaction")
+		return
+	}
+	if err := s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
 		Type: discordgo.InteractionResponseUpdateMessage,
 		Data: &discordgo.InteractionResponseData{
-			Content:    "",
-			Embeds:     []*discordgo.MessageEmbed{embed},
-			Components: components,
+			Content:         "",
+			Embeds:          []*discordgo.MessageEmbed{embed},
+			Components:      components,
+			AllowedMentions: noAllowedMentions(),
 		},
-	})
+	}); err != nil {
+		logger.Error("Failed to update component message", "err", err)
+	}
 }
 
 func (b *Bot) respondComponentError(
@@ -237,7 +276,11 @@ func (b *Bot) respondComponentError(
 	title string,
 	description string,
 ) {
-	s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+	if s == nil || i == nil || i.Interaction == nil {
+		logger.Error("Unable to respond to component error", "reason", "missing session or interaction")
+		return
+	}
+	if err := s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
 		Type: discordgo.InteractionResponseChannelMessageWithSource,
 		Data: &discordgo.InteractionResponseData{
 			Embeds: []*discordgo.MessageEmbed{
@@ -247,9 +290,16 @@ func (b *Bot) respondComponentError(
 					Color:       botui.ColorError,
 				}),
 			},
-			Flags: discordgo.MessageFlagsEphemeral,
+			Flags:           discordgo.MessageFlagsEphemeral,
+			AllowedMentions: noAllowedMentions(),
 		},
-	})
+	}); err != nil {
+		logger.Error("Failed to respond to component error", "err", err)
+	}
+}
+
+func noAllowedMentions() *discordgo.MessageAllowedMentions {
+	return &discordgo.MessageAllowedMentions{}
 }
 
 func playbackFooter(track *player.Track, totalTracks int, loopEnabled bool) string {

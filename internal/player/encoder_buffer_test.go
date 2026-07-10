@@ -1,6 +1,9 @@
 package player
 
-import "testing"
+import (
+	"errors"
+	"testing"
+)
 
 func TestCustomEncoderBufferLevel(t *testing.T) {
 	encoder := &CustomEncoder{
@@ -28,5 +31,26 @@ func TestStreamingEncoderBufferLevel(t *testing.T) {
 	buffered, capacity := encoder.BufferLevel()
 	if buffered != 3 || capacity != 6 {
 		t.Fatalf("BufferLevel() = (%d, %d), want (3, 6)", buffered, capacity)
+	}
+}
+
+func TestEncoderReturnsTerminalErrorAfterFramesClose(t *testing.T) {
+	want := errors.New("ffmpeg failed")
+	custom := &CustomEncoder{
+		frameChan:   make(chan []byte),
+		terminalErr: want,
+	}
+	close(custom.frameChan)
+	if _, err := custom.OpusFrame(); !errors.Is(err, want) {
+		t.Fatalf("CustomEncoder.OpusFrame() error = %v, want %v", err, want)
+	}
+
+	streaming := &StreamingEncoder{
+		frameChan:   make(chan []byte),
+		terminalErr: want,
+	}
+	close(streaming.frameChan)
+	if _, err := streaming.OpusFrame(); !errors.Is(err, want) {
+		t.Fatalf("StreamingEncoder.OpusFrame() error = %v, want %v", err, want)
 	}
 }

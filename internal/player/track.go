@@ -93,7 +93,12 @@ type Queue struct {
 	CurrentIndex int
 	Loop         bool
 	Shuffle      bool
-	mu           sync.RWMutex
+	// currentRemoved means the active track was deleted while it was still
+	// playing. CurrentIndex then points to its predecessor, allowing the next
+	// advance to select the immediate successor without replaying or skipping
+	// anything (including when loop mode is enabled).
+	currentRemoved bool
+	mu             sync.RWMutex
 }
 
 // NewQueue creates a new empty queue
@@ -120,7 +125,19 @@ func (q *Queue) Next() *Track {
 
 	if len(q.Tracks) == 0 {
 		q.CurrentIndex = -1
+		q.currentRemoved = false
 		return nil
+	}
+
+	if q.currentRemoved {
+		q.currentRemoved = false
+		nextIndex := q.CurrentIndex + 1
+		if nextIndex >= len(q.Tracks) {
+			q.CurrentIndex = -1
+			return nil
+		}
+		q.CurrentIndex = nextIndex
+		return q.Tracks[q.CurrentIndex]
 	}
 
 	if q.Loop && q.CurrentIndex >= 0 && q.CurrentIndex < len(q.Tracks) {
@@ -140,10 +157,25 @@ func (q *Queue) Next() *Track {
 
 // TryAdvance atomically checks and advances to the next track, returning it.
 // Returns nil if at end of queue or if looping is active (caller should check
-// IsLoopEnabled first).  Safe against concurrent queue modifications.
+// IsLoopEnabled first). It also handles a current-track removal as a
+// one-time bypass of loop mode, selecting the immediate successor. When nil
+// is returned, played tracks are cleared atomically so tracks added
+// concurrently by another goroutine are not wiped.
 func (q *Queue) TryAdvance() *Track {
 	q.mu.Lock()
 	defer q.mu.Unlock()
+
+	if q.currentRemoved {
+		q.currentRemoved = false
+		nextIdx := q.CurrentIndex + 1
+		if nextIdx >= len(q.Tracks) {
+			q.CurrentIndex = -1
+			q.Tracks = make([]*Track, 0)
+			return nil
+		}
+		q.CurrentIndex = nextIdx
+		return q.Tracks[q.CurrentIndex]
+	}
 
 	if q.Loop && q.CurrentIndex >= 0 && q.CurrentIndex < len(q.Tracks) {
 		return q.Tracks[q.CurrentIndex]
@@ -151,12 +183,53 @@ func (q *Queue) TryAdvance() *Track {
 
 	nextIdx := q.CurrentIndex + 1
 	if nextIdx >= len(q.Tracks) {
+		// No more tracks.  Clear played tracks atomically so that tracks
+		// added after this point (by a concurrent Add call) survive.
 		q.CurrentIndex = -1
+		q.Tracks = make([]*Track, 0)
 		return nil
 	}
 
 	q.CurrentIndex = nextIdx
 	return q.Tracks[q.CurrentIndex]
+}
+
+// TryAdvanceBypassingLoop advances to the immediate successor even when
+// one-track loop is enabled. It is used for explicit skip/removal and for a
+// permanently failed source; those user-visible transitions must not replay
+// the current track.
+func (q *Queue) TryAdvanceBypassingLoop() *Track {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+
+	if q.currentRemoved {
+		q.currentRemoved = false
+		nextIdx := q.CurrentIndex + 1
+		if nextIdx >= len(q.Tracks) {
+			q.CurrentIndex = -1
+			q.Tracks = make([]*Track, 0)
+			return nil
+		}
+		q.CurrentIndex = nextIdx
+		return q.Tracks[q.CurrentIndex]
+	}
+
+	nextIdx := q.CurrentIndex + 1
+	if nextIdx >= len(q.Tracks) {
+		q.CurrentIndex = -1
+		q.Tracks = make([]*Track, 0)
+		return nil
+	}
+	q.CurrentIndex = nextIdx
+	return q.Tracks[q.CurrentIndex]
+}
+
+// RewindCurrent is retained for compatibility with older callers. The active
+// queue entry is never advanced on a transport failure, so replaying it after
+// reconnect must leave the current index untouched. The old decrement logic
+// replayed the previous track for every track after the first.
+func (q *Queue) RewindCurrent() {
+	// Intentionally a no-op.
 }
 
 // Current returns the current track
@@ -167,7 +240,19 @@ func (q *Queue) Current() *Track {
 	if q.CurrentIndex < 0 || q.CurrentIndex >= len(q.Tracks) {
 		return nil
 	}
+	if q.currentRemoved {
+		return nil
+	}
 	return q.Tracks[q.CurrentIndex]
+}
+
+// HasPendingCurrentRemoval reports whether the active track was removed and
+// the next transition must select its immediate successor. It is primarily
+// useful to playback controllers deciding how to handle a stopped session.
+func (q *Queue) HasPendingCurrentRemoval() bool {
+	q.mu.RLock()
+	defer q.mu.RUnlock()
+	return q.currentRemoved
 }
 
 // Clear removes all tracks from the queue except the current one
@@ -175,7 +260,7 @@ func (q *Queue) Clear() {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 
-	if q.CurrentIndex >= 0 && q.CurrentIndex < len(q.Tracks) {
+	if !q.currentRemoved && q.CurrentIndex >= 0 && q.CurrentIndex < len(q.Tracks) {
 		current := q.Tracks[q.CurrentIndex]
 		q.Tracks = []*Track{current}
 		q.CurrentIndex = 0
@@ -183,6 +268,7 @@ func (q *Queue) Clear() {
 		q.Tracks = make([]*Track, 0)
 		q.CurrentIndex = -1
 	}
+	q.currentRemoved = false
 }
 
 // ClearAll removes all tracks from the queue including the current one
@@ -192,6 +278,7 @@ func (q *Queue) ClearAll() {
 
 	q.Tracks = make([]*Track, 0)
 	q.CurrentIndex = -1
+	q.currentRemoved = false
 }
 
 // Remove removes a track at the specified index and reports whether the
@@ -204,13 +291,16 @@ func (q *Queue) Remove(index int) (success bool, wasCurrent bool) {
 		return false, false
 	}
 
-	wasCurrent = q.CurrentIndex == index
+	wasCurrent = !q.currentRemoved && q.CurrentIndex == index
 	q.Tracks = append(q.Tracks[:index], q.Tracks[index+1:]...)
 
-	// Adjust current index if necessary.  Use > instead of >= so that
-	// removing the current track keeps CurrentIndex pointing at the next
-	// track (which slides into the same slot).
-	if q.CurrentIndex > index {
+	if wasCurrent {
+		// Keep the predecessor index so the next call to Next/TryAdvance picks
+		// the track that slid into the removed slot. currentRemoved makes
+		// Current return nil and bypasses loop mode exactly once.
+		q.CurrentIndex = index - 1
+		q.currentRemoved = true
+	} else if q.CurrentIndex > index {
 		q.CurrentIndex--
 	}
 
@@ -251,9 +341,12 @@ func (q *Queue) RemoveTrack(target *Track) (success bool, wasCurrent bool) {
 			continue
 		}
 
-		wasCurrent = q.CurrentIndex == idx
+		wasCurrent = !q.currentRemoved && q.CurrentIndex == idx
 		q.Tracks = append(q.Tracks[:idx], q.Tracks[idx+1:]...)
-		if q.CurrentIndex > idx {
+		if wasCurrent {
+			q.CurrentIndex = idx - 1
+			q.currentRemoved = true
+		} else if q.CurrentIndex > idx {
 			q.CurrentIndex--
 		}
 		return true, wasCurrent
@@ -273,7 +366,7 @@ func (q *Queue) FindTrack(target *Track) (index int, isCurrent bool, ok bool) {
 
 	for idx, track := range q.Tracks {
 		if track == target {
-			return idx, idx == q.CurrentIndex, true
+			return idx, !q.currentRemoved && idx == q.CurrentIndex, true
 		}
 	}
 
@@ -289,20 +382,23 @@ func (q *Queue) Move(from, to int) bool {
 		return false
 	}
 
-	track := q.Tracks[from]
-	q.Tracks = append(q.Tracks[:from], q.Tracks[from+1:]...)
-
-	// Insert at new position
-	q.Tracks = append(q.Tracks[:to], append([]*Track{track}, q.Tracks[to:]...)...)
-
-	// Adjust current index
-	if q.CurrentIndex == from {
-		q.CurrentIndex = to
-	} else if from < q.CurrentIndex && to >= q.CurrentIndex {
-		q.CurrentIndex--
-	} else if from > q.CurrentIndex && to <= q.CurrentIndex {
-		q.CurrentIndex++
+	// The current slot and its boundary are controller-owned while playback is
+	// active. Restrict moves to upcoming tracks so a move cannot silently
+	// change the identity of the playing track or corrupt the cursor.
+	if q.currentRemoved || from <= q.CurrentIndex || to <= q.CurrentIndex {
+		return false
 	}
+	if from == to {
+		return true
+	}
+
+	track := q.Tracks[from]
+	if from < to {
+		copy(q.Tracks[from:to], q.Tracks[from+1:to+1])
+	} else {
+		copy(q.Tracks[to+1:from+1], q.Tracks[to:from])
+	}
+	q.Tracks[to] = track
 
 	return true
 }
@@ -314,6 +410,9 @@ func (q *Queue) Snapshot() ([]*Track, int) {
 
 	tracks := make([]*Track, len(q.Tracks))
 	copy(tracks, q.Tracks)
+	if q.currentRemoved {
+		return tracks, -1
+	}
 	return tracks, q.CurrentIndex
 }
 

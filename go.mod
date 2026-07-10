@@ -1,6 +1,6 @@
 module github.com/GrainedLotus515/gobard
 
-go 1.25.2
+go 1.25.12
 
 require (
 	github.com/bwmarrin/discordgo v0.29.0
@@ -10,9 +10,6 @@ require (
 	github.com/disgoorg/snowflake/v2 v2.0.3
 	github.com/hraban/opus v0.0.0-20230925203106-0188a62cb302
 	github.com/joho/godotenv v1.5.1
-	github.com/jonas747/dca v0.0.0-20210930103944-155f5e5f0cc7
-	github.com/zmb3/spotify/v2 v2.4.3
-	golang.org/x/oauth2 v0.0.0-20210810183815-faf39c7919d5
 	golang.org/x/time v0.14.0
 )
 
@@ -28,9 +25,7 @@ require (
 	github.com/disgoorg/json/v2 v2.0.0 // indirect
 	github.com/disgoorg/omit v1.0.0 // indirect
 	github.com/go-logfmt/logfmt v0.6.0 // indirect
-	github.com/golang/protobuf v1.5.2 // indirect
 	github.com/gorilla/websocket v1.5.3 // indirect
-	github.com/jonas747/ogg v0.0.0-20161220051205-b4f6f4cf3757 // indirect
 	github.com/klauspost/compress v1.18.4 // indirect
 	github.com/lucasb-eyer/go-colorful v1.2.0 // indirect
 	github.com/mattn/go-isatty v0.0.20 // indirect
@@ -41,10 +36,7 @@ require (
 	github.com/xo/terminfo v0.0.0-20220910002029-abceb7e1c41e // indirect
 	golang.org/x/crypto v0.48.0 // indirect
 	golang.org/x/exp v0.0.0-20231006140011-7918f672742d // indirect
-	golang.org/x/net v0.49.0 // indirect
 	golang.org/x/sys v0.41.0 // indirect
-	google.golang.org/appengine v1.6.7 // indirect
-	google.golang.org/protobuf v1.33.0 // indirect
 )
 
 // Use ozraru's fork for gateway/session compatibility fixes.

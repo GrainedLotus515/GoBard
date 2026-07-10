@@ -3,6 +3,7 @@ package cache
 import (
 	"errors"
 	"os"
+	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -21,7 +22,7 @@ func TestGetOrCreateSingleFlight(t *testing.T) {
 	create := func(path string) error {
 		atomic.AddInt32(&createCalls, 1)
 		time.Sleep(25 * time.Millisecond)
-		return os.WriteFile(path, []byte("audio-bytes"), 0o644)
+		return os.WriteFile(path, []byte("audio-bytes"), 0o600)
 	}
 
 	const workers = 24
@@ -76,6 +77,120 @@ func TestGetOrCreateSingleFlight(t *testing.T) {
 	}
 }
 
+func TestGetOrCreateRejectsOversizeWithoutEvictingExistingEntry(t *testing.T) {
+	c, err := NewCache(t.TempDir(), 4)
+	if err != nil {
+		t.Fatalf("NewCache() error = %v", err)
+	}
+
+	firstKey := GenerateKey("https://example.com/first")
+	firstPath, err := c.GetOrCreate(firstKey, func(path string) error {
+		return os.WriteFile(path, []byte("abc"), 0o600)
+	})
+	if err != nil {
+		t.Fatalf("create first entry: %v", err)
+	}
+
+	_, err = c.GetOrCreate(GenerateKey("https://example.com/oversize"), func(path string) error {
+		return os.WriteFile(path, []byte("12345"), 0o600)
+	})
+	if !errors.Is(err, ErrEntryTooLarge) {
+		t.Fatalf("oversize create error = %v, want ErrEntryTooLarge", err)
+	}
+	if path, ok := c.Get(firstKey); !ok || path != firstPath {
+		t.Fatalf("existing entry after oversize create = (%q, %v), want (%q, true)", path, ok, firstPath)
+	}
+	if count, size, _ := c.GetStats(); count != 1 || size != 3 {
+		t.Fatalf("GetStats() = (%d, %d), want (1, 3)", count, size)
+	}
+}
+
+func TestNewCacheRemovesStalePartialFiles(t *testing.T) {
+	dir := t.TempDir()
+	partial := filepath.Join(dir, "track.webm.tmp-123")
+	part := filepath.Join(dir, "other.webm.part")
+	completed := filepath.Join(dir, "completed.webm")
+	for path, data := range map[string]string{
+		partial:   "partial",
+		part:      "partial",
+		completed: "complete",
+	} {
+		if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
+			t.Fatalf("seed %q: %v", path, err)
+		}
+	}
+
+	c, err := NewCache(dir, 1024)
+	if err != nil {
+		t.Fatalf("NewCache() error = %v", err)
+	}
+	for _, path := range []string{partial, part} {
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Fatalf("stale partial %q still exists, stat error = %v", path, err)
+		}
+	}
+	if count, size, _ := c.GetStats(); count != 1 || size != int64(len("complete")) {
+		t.Fatalf("GetStats() = (%d, %d), want (1, %d)", count, size, len("complete"))
+	}
+}
+
+func TestLeasePreventsEvictionUntilReleased(t *testing.T) {
+	c, err := NewCache(t.TempDir(), 6)
+	if err != nil {
+		t.Fatalf("NewCache() error = %v", err)
+	}
+
+	firstKey := GenerateKey("https://example.com/leased")
+	if _, err := c.GetOrCreate(firstKey, func(path string) error {
+		return os.WriteFile(path, []byte("1234"), 0o600)
+	}); err != nil {
+		t.Fatalf("create first entry: %v", err)
+	}
+	lease, ok := c.Acquire(firstKey)
+	if !ok {
+		t.Fatal("Acquire() = false, want true")
+	}
+
+	secondKey := GenerateKey("https://example.com/second")
+	_, err = c.GetOrCreate(secondKey, func(path string) error {
+		return os.WriteFile(path, []byte("5678"), 0o600)
+	})
+	if err == nil {
+		t.Fatal("GetOrCreate() with only a leased eviction candidate succeeded, want error")
+	}
+	if _, ok := c.Get(firstKey); !ok {
+		t.Fatal("leased entry was evicted")
+	}
+
+	lease.Release()
+	if _, err := c.GetOrCreate(secondKey, func(path string) error {
+		return os.WriteFile(path, []byte("5678"), 0o600)
+	}); err != nil {
+		t.Fatalf("GetOrCreate() after Release() error = %v", err)
+	}
+	if _, ok := c.Get(firstKey); ok {
+		t.Fatal("released least-recently-used entry still present after capacity eviction")
+	}
+	if _, ok := c.Get(secondKey); !ok {
+		t.Fatal("second entry missing after successful create")
+	}
+}
+
+func TestCacheRejectsUnsafeKeys(t *testing.T) {
+	c, err := NewCache(t.TempDir(), 1024)
+	if err != nil {
+		t.Fatalf("NewCache() error = %v", err)
+	}
+
+	for _, key := range []string{"", "../outside.webm", "/tmp/outside.webm", "a/b.webm"} {
+		if _, err := c.GetOrCreate(key, func(path string) error {
+			return os.WriteFile(path, []byte("audio"), 0o600)
+		}); !errors.Is(err, ErrInvalidKey) {
+			t.Fatalf("GetOrCreate(%q) error = %v, want ErrInvalidKey", key, err)
+		}
+	}
+}
+
 func TestGetOrCreateFailureReleasesInFlight(t *testing.T) {
 	c, err := NewCache(t.TempDir(), 16*1024*1024)
 	if err != nil {
@@ -120,7 +235,7 @@ func TestGetOrCreateFailureReleasesInFlight(t *testing.T) {
 	var successCalls int32
 	successCreate := func(path string) error {
 		atomic.AddInt32(&successCalls, 1)
-		return os.WriteFile(path, []byte("ok"), 0o644)
+		return os.WriteFile(path, []byte("ok"), 0o600)
 	}
 
 	path, err := c.GetOrCreate(key, successCreate)

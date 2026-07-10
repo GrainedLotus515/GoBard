@@ -1,35 +1,49 @@
 package player
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"io"
 	"math"
+	"os"
 	"os/exec"
 	"sync"
 	"sync/atomic"
 	"time"
 
-	"github.com/GrainedLotus515/gobard/internal/logger"
 	"github.com/hraban/opus"
+
+	"github.com/GrainedLotus515/gobard/internal/logger"
+	"github.com/GrainedLotus515/gobard/internal/processlimit"
+	"github.com/GrainedLotus515/gobard/internal/sourceurl"
 )
+
+const ytdlpProcessAcquireTimeout = 30 * time.Second
 
 // StreamingEncoder handles streaming audio encoding using either a direct media URL
 // or a yt-dlp -> FFmpeg pipeline before libopus encoding.
 type StreamingEncoder struct {
-	ytdlpCmd    *exec.Cmd
-	ffmpegCmd   *exec.Cmd
-	opusEncoder *opus.Encoder
-	frameSize   int
-	channels    int
-	sampleRate  int
-	mu          sync.Mutex
-	done        bool
-	frameChan   chan []byte
-	stopChan    chan bool
-	volume      *atomic.Int32
+	ytdlpCmd            *exec.Cmd
+	ffmpegCmd           *exec.Cmd
+	opusEncoder         *opus.Encoder
+	frameSize           int
+	channels            int
+	sampleRate          int
+	mu                  sync.Mutex
+	done                bool
+	frameChan           chan []byte
+	stopChan            chan struct{}
+	stopOnce            sync.Once
+	waitOnce            sync.Once
+	terminalErr         error
+	volume              *atomic.Int32
+	releaseYTDLPProcess func()
 }
 
-// NewStreamingEncoder creates a new streaming audio encoder
+// NewStreamingEncoder creates a new streaming audio encoder.
+//
+//nolint:gosec,nestif // Inputs are validated by the source-resolution boundary; commands use argument arrays, never a shell.
 func NewStreamingEncoder(url, streamURL string, streamHeaders map[string]string, sampleRate, channels int, startOffset time.Duration, vol *atomic.Int32) (*StreamingEncoder, error) {
 	start := time.Now()
 
@@ -39,16 +53,26 @@ func NewStreamingEncoder(url, streamURL string, streamHeaders map[string]string,
 	}
 
 	var (
-		ytdlpCmd     *exec.Cmd
-		ffmpegCmd    *exec.Cmd
-		ffmpegStdout io.ReadCloser
-		ffmpegStderr io.ReadCloser
-		ytdlpStderr  io.ReadCloser
-		err          error
+		ytdlpCmd            *exec.Cmd
+		ffmpegCmd           *exec.Cmd
+		ffmpegStdout        io.ReadCloser
+		ffmpegStderr        io.ReadCloser
+		ytdlpStderr         io.ReadCloser
+		releaseYTDLPProcess func()
+		err                 error
 	)
+	created := false
+	defer func() {
+		if !created && releaseYTDLPProcess != nil {
+			releaseYTDLPProcess()
+		}
+	}()
 
 	if streamURL != "" {
-		logger.Info("Starting direct FFmpeg stream", "url", streamURL)
+		if !sourceurl.IsPublicHTTPURL(streamURL) {
+			return nil, fmt.Errorf("direct media stream URL is not permitted")
+		}
+		logger.Info("Starting direct FFmpeg stream")
 		ffmpegCmd = exec.Command("ffmpeg", buildDirectStreamingFFmpegArgs(streamURL, streamHeaders, sampleRate, channels, startOffset)...)
 		ffmpegStdout, err = ffmpegCmd.StdoutPipe()
 		if err != nil {
@@ -64,6 +88,19 @@ func NewStreamingEncoder(url, streamURL string, streamHeaders map[string]string,
 			return nil, fmt.Errorf("failed to start direct ffmpeg stream: %w", err)
 		}
 	} else {
+		canonicalURL, validationErr := sourceurl.ValidateCanonicalYouTubeVideoURL(url)
+		if validationErr != nil {
+			return nil, fmt.Errorf("YouTube stream URL is not permitted: %w", validationErr)
+		}
+		url = canonicalURL
+
+		acquireCtx, cancel := context.WithTimeout(context.Background(), ytdlpProcessAcquireTimeout)
+		defer cancel()
+		releaseYTDLPProcess, err = processlimit.AcquireGlobal(acquireCtx)
+		if err != nil {
+			return nil, fmt.Errorf("wait for yt-dlp capacity: %w", err)
+		}
+
 		logger.Info("Starting yt-dlp -> FFmpeg pipeline")
 
 		// Use yt-dlp to stream audio directly to FFmpeg.
@@ -99,6 +136,7 @@ func NewStreamingEncoder(url, streamURL string, streamHeaders map[string]string,
 
 		if err := ffmpegCmd.Start(); err != nil {
 			stopProcess(ytdlpCmd)
+			waitProcess(ytdlpCmd)
 			return nil, fmt.Errorf("failed to start ffmpeg: %w", err)
 		}
 	}
@@ -108,24 +146,34 @@ func NewStreamingEncoder(url, streamURL string, streamHeaders map[string]string,
 	if err != nil {
 		stopProcess(ffmpegCmd)
 		stopProcess(ytdlpCmd)
+		waitProcess(ffmpegCmd)
+		waitProcess(ytdlpCmd)
 		return nil, fmt.Errorf("failed to create opus encoder: %w", err)
 	}
 
 	// Set bitrate to 128kbps
-	opusEnc.SetBitrate(128000)
+	if err := opusEnc.SetBitrate(128000); err != nil {
+		stopProcess(ffmpegCmd)
+		stopProcess(ytdlpCmd)
+		waitProcess(ffmpegCmd)
+		waitProcess(ytdlpCmd)
+		return nil, fmt.Errorf("set opus bitrate: %w", err)
+	}
 
 	encoder := &StreamingEncoder{
-		ytdlpCmd:    ytdlpCmd,
-		ffmpegCmd:   ffmpegCmd,
-		opusEncoder: opusEnc,
-		frameSize:   frameSize,
-		channels:    channels,
-		sampleRate:  sampleRate,
-		done:        false,
-		frameChan:   make(chan []byte, 1000), // Increased from 100 to 1000 (~20 seconds buffer)
-		stopChan:    make(chan bool, 1),
-		volume:      vol,
+		ytdlpCmd:            ytdlpCmd,
+		ffmpegCmd:           ffmpegCmd,
+		opusEncoder:         opusEnc,
+		frameSize:           frameSize,
+		channels:            channels,
+		sampleRate:          sampleRate,
+		done:                false,
+		frameChan:           make(chan []byte, encodedFrameBufferCapacity),
+		stopChan:            make(chan struct{}),
+		volume:              vol,
+		releaseYTDLPProcess: releaseYTDLPProcess,
 	}
+	created = true
 
 	// Start stderr monitoring goroutine
 	go encoder.monitorFFmpegErrors(ffmpegStderr)
@@ -146,7 +194,9 @@ func (e *StreamingEncoder) monitorFFmpegErrors(stderr io.Reader) {
 	for {
 		n, err := stderr.Read(buf)
 		if n > 0 {
-			logger.Error("FFmpeg error", "output", string(buf[:n]))
+			// FFmpeg echoes direct signed input URLs in many failures. Do not log
+			// raw stderr because those URLs carry bearer-like query credentials.
+			logger.Error("FFmpeg reported an error", "bytes", n)
 		}
 		if err != nil {
 			return
@@ -160,7 +210,8 @@ func (e *StreamingEncoder) monitorYTDLPErrors(stderr io.Reader) {
 	for {
 		n, err := stderr.Read(buf)
 		if n > 0 {
-			logger.Error("yt-dlp error", "output", string(buf[:n]))
+			// yt-dlp can include signed media URLs in diagnostics as well.
+			logger.Error("yt-dlp reported an error", "bytes", n)
 		}
 		if err != nil {
 			return
@@ -168,9 +219,15 @@ func (e *StreamingEncoder) monitorYTDLPErrors(stderr io.Reader) {
 	}
 }
 
-// encodeLoop reads PCM data from FFmpeg and encodes to Opus frames
+// encodeLoop reads PCM data from FFmpeg and encodes to Opus frames.
+//
+//nolint:gocyclo // Streaming has explicit handling for stoppage, partial PCM, and paced output.
 func (e *StreamingEncoder) encodeLoop(reader io.Reader) {
-	defer close(e.frameChan)
+	defer func() {
+		close(e.frameChan)
+		e.stopProcesses()
+		e.waitProcesses()
+	}()
 	debugPlayback := isDebugPlaybackEnabled()
 
 	logger.Info("Starting encode loop")
@@ -179,6 +236,8 @@ func (e *StreamingEncoder) encodeLoop(reader io.Reader) {
 	pcmBufferSize := e.frameSize * e.channels * 2
 	pcmBuffer := make([]byte, pcmBufferSize)
 	pcmSamples := make([]int16, e.frameSize*e.channels)
+	opusFrameBuffer := make([]byte, 4000) // Reusable Opus encode buffer (libopus recommended max)
+	samplesPerFrame := e.frameSize * e.channels
 
 	frameCount := 0
 	var firstFrameTime time.Time
@@ -187,8 +246,6 @@ func (e *StreamingEncoder) encodeLoop(reader io.Reader) {
 		select {
 		case <-e.stopChan:
 			logger.Info("Encode loop stopped by signal", "frames_encoded", frameCount)
-			stopProcess(e.ffmpegCmd)
-			stopProcess(e.ytdlpCmd)
 			return
 		default:
 		}
@@ -196,6 +253,7 @@ func (e *StreamingEncoder) encodeLoop(reader io.Reader) {
 		// Read PCM data from FFmpeg
 		n, readErr := io.ReadFull(reader, pcmBuffer)
 		if readErr != nil && readErr != io.EOF && readErr != io.ErrUnexpectedEOF {
+			e.setTerminalError(fmt.Errorf("read ffmpeg PCM: %w", readErr))
 			logger.Error("FFmpeg read error", "err", readErr, "frames_encoded", frameCount)
 			return
 		}
@@ -218,18 +276,17 @@ func (e *StreamingEncoder) encodeLoop(reader io.Reader) {
 		e.applyVolume(pcmSamples[:n/2])
 
 		// Encode full frames
-		samplesPerFrame := e.frameSize * e.channels
 		for i := 0; i+samplesPerFrame <= n/2; i += samplesPerFrame {
 			frameData := pcmSamples[i : i+samplesPerFrame]
-			opusFrameBuffer := make([]byte, 4000)
-			opusBytes, err := e.opusEncoder.Encode(frameData, opusFrameBuffer)
+			encoded, err := e.opusEncoder.Encode(frameData, opusFrameBuffer)
 			if err != nil {
+				e.setTerminalError(fmt.Errorf("encode opus frame: %w", err))
 				logger.Error("Opus encoding error", "err", err, "frames_encoded", frameCount)
 				return
 			}
 
-			// Send only the encoded bytes
-			opusFrame := opusFrameBuffer[:opusBytes]
+			opusFrame := make([]byte, encoded)
+			copy(opusFrame, opusFrameBuffer[:encoded])
 			select {
 			case e.frameChan <- opusFrame:
 				frameCount++
@@ -247,18 +304,36 @@ func (e *StreamingEncoder) encodeLoop(reader io.Reader) {
 						)
 					}
 				}
-				if frameCount%500 == 0 {
-					logger.Info("Streaming progress", "frames_encoded", frameCount)
+				if debugPlayback && frameCount%500 == 0 {
+					logger.Debug("Streaming progress", "frames_encoded", frameCount)
 				}
 			case <-e.stopChan:
 				logger.Info("Encode loop stopped while sending frame", "frames_encoded", frameCount)
-				stopProcess(e.ffmpegCmd)
-				stopProcess(e.ytdlpCmd)
 				return
 			}
 		}
 
 		if readErr == io.EOF || readErr == io.ErrUnexpectedEOF {
+			// Zero-pad and encode any remaining partial frame
+			if remaining := (n / 2) % samplesPerFrame; remaining > 0 {
+				for i := n / 2; i < samplesPerFrame; i++ {
+					pcmSamples[i] = 0
+				}
+				encoded, err := e.opusEncoder.Encode(pcmSamples[:samplesPerFrame], opusFrameBuffer)
+				if err != nil {
+					e.setTerminalError(fmt.Errorf("encode final opus frame: %w", err))
+					logger.Error("Opus encoding error on final partial frame", "err", err, "frames_encoded", frameCount)
+					return
+				}
+				opusFrame := make([]byte, encoded)
+				copy(opusFrame, opusFrameBuffer[:encoded])
+				select {
+				case e.frameChan <- opusFrame:
+				case <-e.stopChan:
+					logger.Info("Encode loop stopped while sending final frame", "frames_encoded", frameCount)
+					return
+				}
+			}
 			logger.Info("Stream ended normally", "frames_encoded", frameCount)
 			return
 		}
@@ -269,9 +344,29 @@ func (e *StreamingEncoder) encodeLoop(reader io.Reader) {
 func (e *StreamingEncoder) OpusFrame() ([]byte, error) {
 	frame, ok := <-e.frameChan
 	if !ok {
+		if err := e.getTerminalError(); err != nil {
+			return nil, err
+		}
 		return nil, io.EOF
 	}
 	return frame, nil
+}
+
+func (e *StreamingEncoder) setTerminalError(err error) {
+	if err == nil {
+		return
+	}
+	e.mu.Lock()
+	if e.terminalErr == nil {
+		e.terminalErr = err
+	}
+	e.mu.Unlock()
+}
+
+func (e *StreamingEncoder) getTerminalError() error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.terminalErr
 }
 
 // BufferLevel reports the number of buffered frames and channel capacity.
@@ -297,33 +392,33 @@ func (e *StreamingEncoder) applyVolume(samples []int16) {
 // Cleanup stops the encoder and releases resources
 func (e *StreamingEncoder) Cleanup() error {
 	e.mu.Lock()
-	defer e.mu.Unlock()
-
-	if e.done {
+	if !e.done {
+		e.done = true
+		e.mu.Unlock()
+		e.stopOnce.Do(func() { close(e.stopChan) })
+		e.stopProcesses()
+		e.waitProcesses()
 		return nil
 	}
+	e.mu.Unlock()
+	e.waitProcesses()
+	return nil
+}
 
-	e.done = true
-
-	// Signal the encoding loop to stop
-	select {
-	case e.stopChan <- true:
-	default:
-	}
-
-	// Kill both processes
+func (e *StreamingEncoder) stopProcesses() {
 	stopProcess(e.ffmpegCmd)
 	stopProcess(e.ytdlpCmd)
+}
 
-	// Wait for processes to exit (ignore errors)
-	if e.ffmpegCmd != nil {
+func (e *StreamingEncoder) waitProcesses() {
+	e.waitOnce.Do(func() {
 		waitProcess(e.ffmpegCmd)
-	}
-	if e.ytdlpCmd != nil {
 		waitProcess(e.ytdlpCmd)
-	}
-
-	return nil
+		if e.releaseYTDLPProcess != nil {
+			e.releaseYTDLPProcess()
+			e.releaseYTDLPProcess = nil
+		}
+	})
 }
 
 func stopProcess(cmd *exec.Cmd) {
@@ -331,7 +426,9 @@ func stopProcess(cmd *exec.Cmd) {
 		return
 	}
 
-	_ = cmd.Process.Kill()
+	if err := cmd.Process.Kill(); err != nil && !errors.Is(err, os.ErrProcessDone) {
+		logger.Debug("Unable to stop encoder process", "err", err)
+	}
 }
 
 func waitProcess(cmd *exec.Cmd) {
@@ -339,7 +436,12 @@ func waitProcess(cmd *exec.Cmd) {
 		return
 	}
 
-	_ = cmd.Wait()
+	if err := cmd.Wait(); err != nil {
+		var exitErr *exec.ExitError
+		if !errors.As(err, &exitErr) {
+			logger.Debug("Unable to wait for encoder process", "err", err)
+		}
+	}
 }
 
 func buildStreamingYTDLPArgs(url string) []string {

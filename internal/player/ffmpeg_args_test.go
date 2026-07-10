@@ -46,6 +46,9 @@ func TestBuildDirectStreamingFFmpegArgsIncludesHeadersAndReconnect(t *testing.T)
 	if !containsSubsequence(args, []string{"-reconnect", "1", "-reconnect_streamed", "1", "-reconnect_delay_max", "5"}) {
 		t.Fatalf("buildDirectStreamingFFmpegArgs() args = %v, expected reconnect options", args)
 	}
+	if !containsSubsequence(args, []string{"-max_redirects", "0"}) {
+		t.Fatalf("buildDirectStreamingFFmpegArgs() args = %v, expected redirect blocking", args)
+	}
 
 	if !containsSubsequence(args, []string{"-i", "https://media.example/audio.webm"}) {
 		t.Fatalf("buildDirectStreamingFFmpegArgs() args = %v, expected direct input URL", args)

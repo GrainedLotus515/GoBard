@@ -7,6 +7,7 @@ import (
 	"github.com/bwmarrin/discordgo"
 )
 
+//nolint:gocyclo // Each assertion documents a distinct field preserved by the adapter.
 func TestToVoiceStateUpdate(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Second)
 

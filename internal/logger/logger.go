@@ -2,14 +2,17 @@ package logger
 
 import (
 	"os"
+	"sync/atomic"
 
 	"github.com/charmbracelet/log"
 )
 
 var Logger *log.Logger
 
-// debugMode controls whether timing/debug logs are shown
-var debugMode bool
+// debugMode controls whether timing/debug logs are shown. It is read from
+// playback and command goroutines, so keep it race-safe even though normal
+// operation only configures it at startup.
+var debugMode atomic.Bool
 
 func init() {
 	Logger = log.New(os.Stderr)
@@ -23,7 +26,7 @@ func init() {
 
 // SetDebugMode enables or disables debug logging
 func SetDebugMode(enabled bool) {
-	debugMode = enabled
+	debugMode.Store(enabled)
 	if enabled {
 		Logger.SetTimeFormat("2006/01/02 15:04:05.000")
 		Logger.SetLevel(log.DebugLevel)
@@ -36,12 +39,12 @@ func SetDebugMode(enabled bool) {
 
 // IsDebugMode returns whether debug mode is enabled
 func IsDebugMode() bool {
-	return debugMode
+	return debugMode.Load()
 }
 
 // Timing logs timing information (only shown when DEBUG=true)
 func Timing(msg string, keyvals ...any) {
-	if debugMode {
+	if debugMode.Load() {
 		Logger.Debug("⏱️ "+msg, keyvals...)
 	}
 }
@@ -92,7 +95,7 @@ func PlaybackFrameError(err error) {
 }
 
 func PlaybackFramesMilestone(count int) {
-	Logger.Info("📊 Frames sent", "count", count)
+	Logger.Debug("📊 Frames sent", "count", count)
 }
 
 func PlaybackFramesComplete(count int) {
@@ -160,19 +163,6 @@ func DownloadComplete(path string) {
 
 func DownloadError(url string, err error) {
 	Logger.Error("❌ Download failed", "url", url, "err", err)
-}
-
-// Spotify logging
-func SpotifySearching(query string) {
-	Logger.Info("🔍 Searching Spotify", "query", query)
-}
-
-func SpotifyFound(title string, artists string) {
-	Logger.Info("✅ Found on Spotify", "title", title, "artists", artists)
-}
-
-func SpotifyError(err error) {
-	Logger.Error("❌ Spotify error", "err", err)
 }
 
 // YouTube logging

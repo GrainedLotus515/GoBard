@@ -1,75 +1,79 @@
 package bot
 
 import (
+	"context"
 	"fmt"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/bwmarrin/discordgo"
+
 	"github.com/GrainedLotus515/gobard/internal/botui"
 	"github.com/GrainedLotus515/gobard/internal/cache"
 	"github.com/GrainedLotus515/gobard/internal/logger"
 	"github.com/GrainedLotus515/gobard/internal/player"
-	"github.com/GrainedLotus515/gobard/internal/spotify"
+	"github.com/GrainedLotus515/gobard/internal/voiceconn"
 	"github.com/GrainedLotus515/gobard/internal/youtube"
-	"github.com/bwmarrin/discordgo"
 )
 
 const backgroundCacheDownloadConcurrency = 1
 
-var backgroundCacheDownloadSlots = make(chan struct{}, backgroundCacheDownloadConcurrency)
+var (
+	backgroundCacheDownloadSlots   = make(chan struct{}, backgroundCacheDownloadConcurrency)
+	backgroundCacheDownloadSlotsMu sync.RWMutex
+)
 
-// handlePlay handles the play command
+// handlePlay handles the play command.
+//
+//nolint:gocyclo // Deferred Discord acknowledgement and join rollback must stay adjacent to queue admission.
 func (b *Bot) handlePlay(s *discordgo.Session, i *discordgo.InteractionCreate) error {
-	query := i.ApplicationCommandData().Options[0].StringValue()
+	userID, err := interactionUserID(i)
+	if err != nil {
+		return err
+	}
+	options := i.ApplicationCommandData().Options
+	if len(options) != 1 || strings.TrimSpace(options[0].StringValue()) == "" {
+		return fmt.Errorf("a song, YouTube URL, or search query is required")
+	}
+	query := strings.TrimSpace(options[0].StringValue())
 	trace := logger.NewTrace(
 		"play_command",
 		"guild", i.GuildID,
-		"user", i.Member.User.ID,
-		"query", query,
+		"user", userID,
+		"query_kind", playQueryKind(query),
 	)
 
 	// Get user's voice channel
 	trace.Step("Looking up caller voice channel")
-	channelID, err := b.GetVoiceChannel(i.GuildID, i.Member.User.ID)
+	channelID, err := b.GetVoiceChannel(i.GuildID, userID)
 	if err != nil {
 		trace.Finish("Caller voice channel lookup failed", "err", err)
 		return fmt.Errorf("you must be in a voice channel to play music")
 	}
 	trace.Step("Caller voice channel resolved", "channel_id", channelID)
+	if b.PlayerManager == nil {
+		return fmt.Errorf("playback is unavailable")
+	}
+	if existingPlayer := b.PlayerManager.GetPlayer(i.GuildID); existingPlayer.IsVoiceConnected() {
+		if err := b.requirePlaybackControlAccess(i.GuildID, userID); err != nil {
+			return err
+		}
+	}
 
 	// Defer before voice join or metadata work. Voice joins can exceed
 	// Discord's initial interaction deadline when another guild is busy.
-	s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
-		Type: discordgo.InteractionResponseDeferredChannelMessageWithSource,
-	})
+	if err := b.deferInteractionResponse(s, i); err != nil {
+		trace.Finish("Deferred interaction response failed", "err", err)
+		return fmt.Errorf("could not acknowledge the command: %w", err)
+	}
 	trace.Step("Deferred interaction response sent")
 
-	// Get or create player
-	p := b.PlayerManager.GetPlayer(i.GuildID)
-	wasIdle := p.Queue.Current() == nil && p.Queue.IsEmpty()
-
-	// Join voice channel if not already connected
-	if !p.IsVoiceConnected() {
-		trace.Step("Joining voice channel", "channel_id", channelID)
-		vc, err := b.JoinVoiceChannel(i.GuildID, channelID)
-		if err != nil {
-			trace.Finish("Voice channel join failed", "channel_id", channelID, "err", err)
-			b.editDeferredEmbedComponents(s, i, botui.BuildStatusCard(botui.StatusCardSpec{
-				Title:       "Command Failed",
-				Description: err.Error(),
-				Color:       botui.ColorError,
-			}), nil)
-			return nil
-		}
-		p.SetVoiceConnection(vc)
-		trace.Step("Voice channel joined", "channel_id", channelID)
-	}
-
-	// Parse the query and get tracks
+	// Resolve before joining. yt-dlp can take several seconds and no failed
+	// search should leave the bot connected to a channel.
 	trace.Step("Resolving play query")
-	tracks, err := b.resolveQuery(query, i.Member.User.ID)
+	tracks, err := b.resolveQuery(query, userID)
 	if err != nil {
 		trace.Finish("Play query resolution failed", "err", err)
 		b.editDeferredEmbedComponents(s, i, botui.BuildStatusCard(botui.StatusCardSpec{
@@ -91,13 +95,64 @@ func (b *Bot) handlePlay(s *discordgo.Session, i *discordgo.InteractionCreate) e
 	}
 	trace.Step("Play query resolved", "track_count", len(tracks))
 
+	// The caller may have moved while metadata was resolving. Use their current
+	// channel, not the stale channel from the start of the interaction.
+	channelID, err = b.GetVoiceChannel(i.GuildID, userID)
+	if err != nil {
+		trace.Finish("Caller left voice while resolving", "err", err)
+		b.editDeferredEmbedComponents(s, i, botui.BuildStatusCard(botui.StatusCardSpec{
+			Title:       "Command Failed",
+			Description: "You must remain in a voice channel to start playback.",
+			Color:       botui.ColorError,
+		}), nil)
+		return nil
+	}
+
+	p := b.PlayerManager.GetPlayer(i.GuildID)
+	joinLock := b.guildJoinLock(i.GuildID)
+	joinLock.Lock()
+	wasIdle := p.Queue.Current() == nil && p.Queue.IsEmpty()
+	joinedHere := false
+	var joinErr error
+	if p.IsVoiceConnected() {
+		joinErr = b.requirePlaybackControlAccess(i.GuildID, userID)
+	} else {
+		trace.Step("Joining voice channel", "channel_id", channelID)
+		var vc voiceconn.Connection
+		vc, joinErr = b.JoinVoiceChannel(i.GuildID, channelID)
+		if joinErr == nil {
+			p.SetVoiceConnection(vc)
+			joinedHere = true
+			trace.Step("Voice channel joined", "channel_id", channelID)
+		}
+	}
+	joinLock.Unlock()
+	if joinErr != nil {
+		trace.Finish("Voice channel access or join failed", "channel_id", channelID, "err", joinErr)
+		b.editDeferredEmbedComponents(s, i, botui.BuildStatusCard(botui.StatusCardSpec{
+			Title:       "Command Failed",
+			Description: joinErr.Error(),
+			Color:       botui.ColorError,
+		}), nil)
+		return nil
+	}
+
+	// If a newly-created connection cannot be committed to a queue, do not
+	// strand it in the user's channel. The only operations below are currently
+	// in-memory, but keeping this rollback makes future validation safe too.
+	playCommitted := false
+	defer func() {
+		if joinedHere && !playCommitted {
+			disconnectPlayer(p, i.GuildID, "play command rollback")
+		}
+	}()
+
 	fastPathTrack := len(tracks) == 1 && tracks[0].MetadataPending
 	pendingMode := ""
 	if fastPathTrack {
 		logger.Info(
 			"Fast URL path selected",
 			"trace_id", trace.ID(),
-			"raw_url", query,
 			"canonical_url", tracks[0].URL,
 			"video_id", tracks[0].ID,
 		)
@@ -118,6 +173,7 @@ func (b *Bot) handlePlay(s *discordgo.Session, i *discordgo.InteractionCreate) e
 		}
 		p.Queue.Add(track)
 	}
+	playCommitted = true
 
 	if fastPathTrack {
 		b.registerPendingInteractionResponse(
@@ -135,7 +191,7 @@ func (b *Bot) handlePlay(s *discordgo.Session, i *discordgo.InteractionCreate) e
 	delayLoopStartForFastPath := fastPathTrack && wasIdle && shouldStartPlayback
 	if shouldStartPlayback && !delayLoopStartForFastPath {
 		trace.Step("Starting playback loop")
-		go b.playLoop(i.GuildID, i.ChannelID)
+		b.startPlaybackLoop(i.GuildID, i.ChannelID)
 	}
 
 	queueLength := p.Queue.Length()
@@ -160,7 +216,7 @@ func (b *Bot) handlePlay(s *discordgo.Session, i *discordgo.InteractionCreate) e
 		b.editDeferredEmbedComponents(s, i, embed, components)
 		if delayLoopStartForFastPath {
 			trace.Step("Starting playback loop")
-			go b.playLoop(i.GuildID, i.ChannelID)
+			b.startPlaybackLoop(i.GuildID, i.ChannelID)
 		}
 		if fastPathTrack {
 			b.hydrateFastURLTrackAsync(trace.ID(), tracks[0])
@@ -198,16 +254,28 @@ func (b *Bot) handlePlay(s *discordgo.Session, i *discordgo.InteractionCreate) e
 	return nil
 }
 
+func playQueryKind(query string) string {
+	if youtube.IsURLLike(query) {
+		return "url"
+	}
+	return "search"
+}
+
 // resolveQuery resolves a query to tracks
 func (b *Bot) resolveQuery(query, userID string) ([]*player.Track, error) {
-	// Check if it's a Spotify URL
-	if spotify.IsSpotifyURL(query) {
-		return nil, fmt.Errorf("Spotify playback is no longer supported due to API changes. Please use YouTube links or search queries instead.")
-	}
+	query = strings.TrimSpace(query)
+	if youtube.IsURLLike(query) {
+		canonicalURL, kind, err := youtube.ClassifyYouTubeURL(query)
+		if err != nil {
+			return nil, fmt.Errorf("only HTTPS YouTube video and playlist URLs are supported")
+		}
 
-	// Check if it's a YouTube URL
-	if youtube.IsYouTubeURL(query) {
-		if canonicalURL, videoID, ok := youtube.NormalizeSingleVideoURL(query); ok {
+		switch kind {
+		case youtube.URLKindVideo:
+			_, videoID, ok := youtube.NormalizeSingleVideoURL(canonicalURL)
+			if !ok {
+				return nil, fmt.Errorf("invalid YouTube video URL")
+			}
 			return []*player.Track{
 				{
 					ID:              videoID,
@@ -222,10 +290,11 @@ func (b *Bot) resolveQuery(query, userID string) ([]*player.Track, error) {
 					MetadataPending: true,
 				},
 			}, nil
-		}
-
-		if youtube.IsPlaylist(query) {
-			tracks, err := b.YouTube.GetPlaylistInfo(query)
+		case youtube.URLKindPlaylist:
+			if b == nil || b.YouTube == nil {
+				return nil, fmt.Errorf("YouTube is not initialized")
+			}
+			tracks, err := b.YouTube.GetPlaylistInfo(canonicalURL)
 			if err != nil {
 				return nil, err
 			}
@@ -233,17 +302,15 @@ func (b *Bot) resolveQuery(query, userID string) ([]*player.Track, error) {
 				track.RequestedBy = userID
 			}
 			return tracks, nil
-		} else {
-			track, err := b.getVideoInfo(query)
-			if err != nil {
-				return nil, err
-			}
-			track.RequestedBy = userID
-			return []*player.Track{track}, nil
+		default:
+			return nil, fmt.Errorf("unsupported YouTube URL")
 		}
 	}
 
 	// Otherwise, search YouTube
+	if b == nil || b.YouTube == nil {
+		return nil, fmt.Errorf("YouTube is not initialized")
+	}
 	tracks, err := b.YouTube.Search(query)
 	if err != nil {
 		return nil, err
@@ -254,7 +321,9 @@ func (b *Bot) resolveQuery(query, userID string) ([]*player.Track, error) {
 	return tracks, nil
 }
 
-// playLoop handles the playback loop for a guild
+// playLoop handles the playback loop for a guild.
+//
+//nolint:gocyclo,nestif // This is the explicit playback state machine; splitting cases would obscure transitions.
 func (b *Bot) playLoop(guildID string, channelID string) {
 	logger.Debug("Starting playback loop", "guild", guildID)
 	p := b.PlayerManager.GetPlayer(guildID)
@@ -263,13 +332,13 @@ func (b *Bot) playLoop(guildID string, channelID string) {
 	defer func() {
 		logger.Debug("Playback loop ended", "guild", guildID)
 	}()
+	sourceRetries := make(map[*player.Track]int)
 
 	for {
 		// Check if voice connection is still valid before processing next track
 		if !p.IsVoiceConnected() {
 			logger.Info("Voice connection lost, stopping playback loop", "guild", guildID)
 			b.cleanupGuildPendingResponses(guildID)
-			p.Queue.ClearAll()
 			p.SetLoopRunning(false)
 			return
 		}
@@ -284,9 +353,8 @@ func (b *Bot) playLoop(guildID string, channelID string) {
 				// so a fresh connection can be created when new songs are added
 				logger.PlaybackQueueEmpty()
 				b.cleanupGuildPendingResponses(guildID)
-				p.Queue.ClearAll() // Clear all tracks when queue is empty
 				p.SetLoopRunning(false)
-				p.Disconnect()
+				disconnectPlayer(p, guildID, "queue empty before playback")
 				return
 			}
 		}
@@ -306,7 +374,16 @@ func (b *Bot) playLoop(guildID string, channelID string) {
 		// Check if track is already cached
 		cacheKey := cache.GenerateKey(track.URL)
 		cacheMiss := false
-		if cachedPath, exists := b.Cache.Get(cacheKey); exists {
+		var cacheLease *cache.Lease
+		releaseCacheLease := func() {
+			if cacheLease != nil {
+				cacheLease.Release()
+				cacheLease = nil
+			}
+		}
+		if lease, exists := b.Cache.Acquire(cacheKey); exists {
+			cacheLease = lease
+			cachedPath := lease.Path
 			// Use cached file
 			logger.Timing("Cache hit before playback", "title", track.Title, "key", cacheKey)
 			logger.PlaybackCached(cachedPath)
@@ -405,9 +482,8 @@ func (b *Bot) playLoop(guildID string, channelID string) {
 				if startupTrace != nil {
 					startupTrace.Finish("Playback aborted because voice connection was lost", "err", err)
 				}
-				p.Queue.ClearAll()
+				releaseCacheLease()
 				p.SetLoopRunning(false)
-				p.Disconnect()
 				return
 			}
 
@@ -422,17 +498,20 @@ func (b *Bot) playLoop(guildID string, channelID string) {
 			// Retry once
 			err = b.playTrackForGuild(p)
 			if err != nil {
+				releaseCacheLease()
 				b.failPendingInteractionResponse(track.RequestTraceID, track.Title, err)
 
-				// Send failure notification to Discord
-				errMsg := fmt.Sprintf("❌ **Track Failed:** %s\n**Reason:** %v", track.Title, err)
-				_ = b.sendChannelMessage(channelID, errMsg)
+				// Send failure notification to Discord. sendChannelMessage disables
+				// mentions for untrusted track titles and extractor errors.
+				if notifyErr := b.sendChannelMessage(channelID, trackFailureMessage(track, err)); notifyErr != nil {
+					logger.Error("Failed to notify channel about startup failure", "err", notifyErr)
+				}
 
 				logger.Error("Track failed after retry", "title", track.Title, "err", err)
 				if startupTrace != nil {
 					startupTrace.Finish("Track startup failed after retry", "err", err)
 				}
-				if p.Queue.TryAdvance() == nil {
+				if p.Queue.TryAdvanceBypassingLoop() == nil {
 					b.cleanupGuildPendingResponses(guildID)
 					p.SetLoopRunning(false)
 					return
@@ -449,39 +528,153 @@ func (b *Bot) playLoop(guildID string, channelID string) {
 			b.deferBackgroundCacheUntilPlaybackStarts(p, track, cacheKey, trackSelectedAt, started, done)
 		}
 
-		// Wait for track to finish
+		// Wait for the session's typed terminal result. Queue transitions are
+		// deliberately owned here rather than inferred from a closed channel.
 		logger.Debug("Waiting for track to complete")
-		b.waitForTrackCompletion(p)
-		logger.Info("Track completed", "title", track.Title)
-
-		// A seek request stops playback and replays the current track.
-		if p.ConsumeSeekRequest() {
+		result := b.waitForTrackResult(p)
+		releaseCacheLease()
+		logger.Info("Track completed", "title", track.Title, "reason", result.Reason, "err", result.Err)
+		// Compatibility for the lightweight playback test hook, which does not
+		// create a real session and therefore cannot return PlaybackEndSeeked.
+		if result.Reason == player.PlaybackEndCompleted && p.ConsumeSeekRequest() {
 			continue
 		}
 
-		// Check if we should loop the current track
-		if p.Queue.IsLoopEnabled() {
-			// Verify voice connection is still valid before replaying
-			if !p.IsVoiceConnected() {
-				logger.Info("Voice connection lost during loop, stopping playback", "guild", guildID)
+		switch result.Reason {
+		case player.PlaybackEndSeeked:
+			p.ConsumeSeekRequest()
+			continue
+
+		case player.PlaybackEndSkipped:
+			p.ConsumeSkipRequest()
+			if p.Queue.TryAdvanceBypassingLoop() == nil {
 				b.cleanupGuildPendingResponses(guildID)
-				p.Queue.ClearAll()
+				p.SetLoopRunning(false)
+				disconnectPlayer(p, guildID, "skip reached end of queue")
+				return
+			}
+			continue
+
+		case player.PlaybackEndSourceFailure:
+			if sourceRetries[track] < 1 {
+				sourceRetries[track]++
+				track.ClearPrefetchedStream()
+				if err := b.hydrateTrackStreamInfo(track); err != nil {
+					logger.Warn("Fresh stream metadata resolution failed before source retry", "title", track.Title, "err", err)
+				}
+				logger.Warn("Retrying source failure", "title", track.Title, "err", result.Err)
+				continue
+			}
+			b.failPendingInteractionResponse(track.RequestTraceID, track.Title, result.Err)
+			if err := b.sendChannelMessage(channelID, trackFailureMessage(track, result.Err)); err != nil {
+				logger.Error("Failed to notify channel about source failure", "err", err)
+			}
+			if p.Queue.TryAdvanceBypassingLoop() == nil {
+				b.cleanupGuildPendingResponses(guildID)
+				p.SetLoopRunning(false)
+				disconnectPlayer(p, guildID, "source failure reached end of queue")
+				return
+			}
+			continue
+
+		case player.PlaybackEndTransportFailure:
+			if b.reconnectForPlayback(guildID, p, track) {
+				continue
+			}
+			b.cleanupGuildPendingResponses(guildID)
+			p.SetLoopRunning(false)
+			return
+
+		case player.PlaybackEndStopped:
+			// Current-track removal stops the session, but the queue has a
+			// pending successor. /stop clears/disconnects and therefore exits.
+			if !p.IsVoiceConnected() || (p.Queue.Current() == nil && p.Queue.IsEmpty()) {
 				p.SetLoopRunning(false)
 				return
 			}
-			// Don't advance queue, just continue to replay
+			if p.Queue.TryAdvanceBypassingLoop() == nil {
+				b.cleanupGuildPendingResponses(guildID)
+				p.SetLoopRunning(false)
+				disconnectPlayer(p, guildID, "removed current track reached end of queue")
+				return
+			}
 			continue
-		}
 
-		// Check if there are more tracks and advance atomically
-		if next := p.Queue.TryAdvance(); next == nil {
-			logger.Info("Queue finished, ending playback loop")
-			b.cleanupGuildPendingResponses(guildID)
-			p.Queue.ClearAll() // Clear all tracks when queue finishes
+		case player.PlaybackEndDisconnected:
+			// Intentional disconnects preserve the queue for the next /play.
 			p.SetLoopRunning(false)
-			p.Disconnect()
+			return
+
+		case player.PlaybackEndCompleted, player.PlaybackEndNone:
+			if p.Queue.IsLoopEnabled() {
+				continue
+			}
+			if p.Queue.TryAdvance() == nil {
+				logger.Info("Queue finished, ending playback loop")
+				b.cleanupGuildPendingResponses(guildID)
+				p.SetLoopRunning(false)
+				disconnectPlayer(p, guildID, "queue completed")
+				return
+			}
+			continue
+
+		default:
+			logger.Warn("Unknown playback end reason", "reason", result.Reason, "title", track.Title)
+			p.SetLoopRunning(false)
 			return
 		}
+	}
+}
+
+func (b *Bot) reconnectForPlayback(guildID string, p *player.GuildPlayer, track *player.Track) bool {
+	for attempt := 0; attempt < 3; attempt++ {
+		if p == nil || p.Queue.Current() != track || !p.IsLoopRunning() {
+			return false
+		}
+		if attempt > 0 {
+			time.Sleep(time.Second << (attempt - 1))
+		}
+		if p.Queue.Current() != track || !p.IsLoopRunning() {
+			return false
+		}
+		logger.Info("Attempting voice transport recovery", "guild", guildID, "attempt", attempt+1, "title", track.Title)
+		vc, err := b.rejoinVoiceChannel(guildID)
+		if err != nil {
+			logger.Warn("Voice transport recovery attempt failed", "guild", guildID, "attempt", attempt+1, "err", err)
+			continue
+		}
+		if p.Queue.Current() != track || !p.IsLoopRunning() {
+			if disconnectErr := vc.Disconnect(context.Background()); disconnectErr != nil {
+				logger.Warn("Failed to close superseded voice connection", "guild", guildID, "err", disconnectErr)
+			}
+			return false
+		}
+		p.SetVoiceConnection(vc)
+		logger.Info("Voice transport recovered; replaying current track", "guild", guildID, "title", track.Title)
+		return true
+	}
+	return false
+}
+
+func trackFailureMessage(track *player.Track, err error) string {
+	title := "Unknown track"
+	if track != nil && track.Title != "" {
+		title = track.Title
+	}
+	if err == nil {
+		return fmt.Sprintf("Track failed and was skipped: %s", title)
+	}
+	return fmt.Sprintf("Track failed and was skipped: %s (reason: %v)", title, err)
+}
+
+// disconnectPlayer records a failed best-effort disconnect without allowing a
+// stale voice connection to survive a terminal queue transition.
+func disconnectPlayer(p *player.GuildPlayer, guildID, reason string) {
+	if p == nil {
+		return
+	}
+	if err := p.Disconnect(); err != nil {
+		logger.Error("Failed to disconnect voice player", "guild", guildID, "reason", reason, "err", err)
 	}
 }
 
@@ -493,10 +686,14 @@ func (b *Bot) deferBackgroundCacheUntilPlaybackStarts(
 	started <-chan struct{},
 	done <-chan struct{},
 ) {
+	if b == nil || track == nil || !b.beginBackgroundCacheTask() {
+		return
+	}
 	url := track.URL
 	title := track.Title
 
 	go func() {
+		defer b.backgroundCacheWG.Done()
 		if !b.waitForPlaybackStart(p, started, done) {
 			logger.Timing(
 				"Background cache skipped because playback ended before start",
@@ -507,7 +704,30 @@ func (b *Bot) deferBackgroundCacheUntilPlaybackStarts(
 			return
 		}
 
-		releaseCacheSlot := acquireBackgroundCacheDownloadSlot()
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		if b.waitForCompletionFn == nil {
+			stopWatch := make(chan struct{})
+			go func() {
+				select {
+				case <-done:
+					cancel()
+				case <-stopWatch:
+				}
+			}()
+			defer close(stopWatch)
+		}
+
+		releaseCacheSlot, acquired := acquireBackgroundCacheDownloadSlotContext(ctx)
+		if !acquired {
+			logger.Timing(
+				"Background cache skipped after playback ended",
+				"title", title,
+				"key", cacheKey,
+				"elapsed_ms", time.Since(trackSelectedAt).Milliseconds(),
+			)
+			return
+		}
 		defer releaseCacheSlot()
 
 		logger.Timing(
@@ -519,7 +739,7 @@ func (b *Bot) deferBackgroundCacheUntilPlaybackStarts(
 		logger.PlaybackDownloading(title)
 
 		_, err := b.Cache.GetOrCreate(cacheKey, func(path string) error {
-			return b.cacheTrack(url, path)
+			return b.cacheTrackContext(ctx, url, path)
 		})
 		if err != nil {
 			logger.Error("Background download failed", "title", title, "err", err)
@@ -530,47 +750,56 @@ func (b *Bot) deferBackgroundCacheUntilPlaybackStarts(
 	}()
 }
 
-func acquireBackgroundCacheDownloadSlot() func() {
-	backgroundCacheDownloadSlots <- struct{}{}
+func acquireBackgroundCacheDownloadSlotContext(ctx context.Context) (func(), bool) {
+	slots := currentBackgroundCacheDownloadSlots()
+	select {
+	case slots <- struct{}{}:
+	case <-ctx.Done():
+		return nil, false
+	}
 
 	var once sync.Once
 	return func() {
 		once.Do(func() {
-			<-backgroundCacheDownloadSlots
+			<-slots
 		})
-	}
+	}, true
+}
+
+func currentBackgroundCacheDownloadSlots() chan struct{} {
+	backgroundCacheDownloadSlotsMu.RLock()
+	defer backgroundCacheDownloadSlotsMu.RUnlock()
+	return backgroundCacheDownloadSlots
 }
 
 // handlePause handles the pause command
-func (b *Bot) handlePause(s *discordgo.Session, i *discordgo.InteractionCreate) error {
+func (b *Bot) handlePause(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	state := b.getPlaybackState(i.GuildID)
 	if state.Track == nil {
-		b.respondEmbed(s, i, idleStatusCard("Playback Is Idle", "Nothing is currently playing."))
-		return nil
+		b.respondEmbed(s, i, idleStatusCard("Nothing is currently playing."))
+		return
 	}
 
 	p := b.PlayerManager.GetPlayer(i.GuildID)
 	p.Pause()
 	b.respondStatus(s, i, "Playback Paused", fmt.Sprintf("Paused %s.", state.Track.Title), botui.ColorInfo)
-	return nil
 }
 
 // handleResume handles the resume command
-func (b *Bot) handleResume(s *discordgo.Session, i *discordgo.InteractionCreate) error {
+func (b *Bot) handleResume(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	state := b.getPlaybackState(i.GuildID)
 	if state.Track == nil {
-		b.respondEmbed(s, i, idleStatusCard("Playback Is Idle", "Nothing is currently playing."))
-		return nil
+		b.respondEmbed(s, i, idleStatusCard("Nothing is currently playing."))
+		return
 	}
 
 	p := b.PlayerManager.GetPlayer(i.GuildID)
 	p.Resume()
 	b.respondStatus(s, i, "Playback Resumed", fmt.Sprintf("Resumed %s.", state.Track.Title), botui.ColorSuccess)
-	return nil
 }
 
 // handleSkip handles the skip command
-func (b *Bot) handleSkip(s *discordgo.Session, i *discordgo.InteractionCreate) error {
+func (b *Bot) handleSkip(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	p := b.PlayerManager.GetPlayer(i.GuildID)
 	next := p.Skip()
 
@@ -579,33 +808,30 @@ func (b *Bot) handleSkip(s *discordgo.Session, i *discordgo.InteractionCreate) e
 	} else {
 		b.respondStatus(s, i, "Track Skipped", fmt.Sprintf("Skipped to %s.", next.Title), botui.ColorSuccess)
 	}
-	return nil
 }
 
 // handleStop handles the stop command
-func (b *Bot) handleStop(s *discordgo.Session, i *discordgo.InteractionCreate) error {
+func (b *Bot) handleStop(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	p := b.PlayerManager.GetPlayer(i.GuildID)
 	p.Stop()
 	p.Queue.ClearAll()
-	p.Disconnect()
+	disconnectPlayer(p, i.GuildID, "stop command")
 	b.respondStatus(s, i, "Playback Stopped", "Disconnected and cleared the queue.", botui.ColorWarning)
-	return nil
 }
 
 // handleQueue handles the queue command
-func (b *Bot) handleQueue(s *discordgo.Session, i *discordgo.InteractionCreate) error {
+func (b *Bot) handleQueue(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	state := b.getPlaybackState(i.GuildID)
 	embed, components := b.buildQueueCard(state, 1)
 	b.respondEmbedComponents(s, i, embed, components)
-	return nil
 }
 
 // handleNowPlaying handles the now-playing command
-func (b *Bot) handleNowPlaying(s *discordgo.Session, i *discordgo.InteractionCreate) error {
+func (b *Bot) handleNowPlaying(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	state := b.getPlaybackState(i.GuildID)
 	if state.Track == nil {
-		b.respondEmbed(s, i, idleStatusCard("Playback Is Idle", "Nothing is currently playing."))
-		return nil
+		b.respondEmbed(s, i, idleStatusCard("Nothing is currently playing."))
+		return
 	}
 
 	label, value := playbackProgressContext(state.Track, state.Position, state.Paused)
@@ -619,23 +845,23 @@ func (b *Bot) handleNowPlaying(s *discordgo.Session, i *discordgo.InteractionCre
 		true,
 	)
 	b.respondEmbedComponents(s, i, embed, components)
-	return nil
 }
 
 // handleClear handles the clear command
-func (b *Bot) handleClear(s *discordgo.Session, i *discordgo.InteractionCreate) error {
+func (b *Bot) handleClear(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	p := b.PlayerManager.GetPlayer(i.GuildID)
 	p.Queue.Clear()
 	b.respondStatus(s, i, "Queue Cleared", "Removed queued tracks and kept the current song.", botui.ColorInfo)
-	return nil
 }
 
 // handleDisconnect handles the disconnect command
-func (b *Bot) handleDisconnect(s *discordgo.Session, i *discordgo.InteractionCreate) error {
+func (b *Bot) handleDisconnect(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	p := b.PlayerManager.GetPlayer(i.GuildID)
-	p.Disconnect()
-	b.respondStatus(s, i, "Disconnected", "Left the voice channel.", botui.ColorWarning)
-	return nil
+	if p.IsVoiceConnected() {
+		b.markIntentionalDisconnect(i.GuildID)
+	}
+	disconnectPlayer(p, i.GuildID, "disconnect command")
+	b.respondStatus(s, i, "Disconnected", "Left the voice channel. Your queue will resume from the current track next time you play.", botui.ColorWarning)
 }
 
 // handleShuffle handles the shuffle command
@@ -655,7 +881,7 @@ func (b *Bot) handleShuffle(s *discordgo.Session, i *discordgo.InteractionCreate
 }
 
 // handleLoop handles the loop command
-func (b *Bot) handleLoop(s *discordgo.Session, i *discordgo.InteractionCreate) error {
+func (b *Bot) handleLoop(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	p := b.PlayerManager.GetPlayer(i.GuildID)
 	enabled := p.Queue.ToggleLoop()
 
@@ -664,7 +890,6 @@ func (b *Bot) handleLoop(s *discordgo.Session, i *discordgo.InteractionCreate) e
 	} else {
 		b.respondStatus(s, i, "Loop Disabled", "The current track will no longer repeat.", botui.ColorInfo)
 	}
-	return nil
 }
 
 // handleVolume handles the volume command
@@ -741,6 +966,9 @@ func (b *Bot) handleRemove(s *discordgo.Session, i *discordgo.InteractionCreate)
 	// playLoop advances to the next track immediately.
 	if wasCurrent {
 		p.Stop()
+		if p.Queue.IsEmpty() {
+			disconnectPlayer(p, i.GuildID, "removed final current track")
+		}
 	}
 
 	b.respondStatus(s, i, "Track Removed", fmt.Sprintf("Removed track #%d from the queue.", position+1), botui.ColorWarning)

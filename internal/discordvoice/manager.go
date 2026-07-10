@@ -4,15 +4,17 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"sync"
 
-	"github.com/GrainedLotus515/gobard/internal/logger"
-	"github.com/GrainedLotus515/gobard/internal/voiceconn"
 	"github.com/bwmarrin/discordgo"
 	disgodiscord "github.com/disgoorg/disgo/discord"
 	disgogateway "github.com/disgoorg/disgo/gateway"
 	disgovoice "github.com/disgoorg/disgo/voice"
 	"github.com/disgoorg/godave/golibdave"
 	"github.com/disgoorg/snowflake/v2"
+
+	"github.com/GrainedLotus515/gobard/internal/logger"
+	"github.com/GrainedLotus515/gobard/internal/voiceconn"
 )
 
 var _ voiceconn.Connection = (*Connection)(nil)
@@ -20,6 +22,9 @@ var _ voiceconn.Connection = (*Connection)(nil)
 // Manager bridges discordgo gateway events into disgo's DAVE-capable voice stack.
 type Manager struct {
 	manager disgovoice.Manager
+
+	speakingMu      sync.RWMutex
+	speakingHandler func(guildID, userID string, speaking bool)
 }
 
 // Connection adapts a disgo voice connection to the player-facing voice interface.
@@ -38,6 +43,7 @@ func NewManager(session *discordgo.Session) (*Manager, error) {
 		return nil, fmt.Errorf("parse bot user id: %w", err)
 	}
 
+	voiceManager := &Manager{}
 	manager := disgovoice.NewManager(
 		func(ctx context.Context, guildID snowflake.ID, channelID *snowflake.ID, selfMute, selfDeaf bool) error {
 			channel := ""
@@ -52,7 +58,8 @@ func NewManager(session *discordgo.Session) (*Manager, error) {
 		disgovoice.WithDaveSessionCreateFunc(golibdave.NewSession),
 	)
 
-	return &Manager{manager: manager}, nil
+	voiceManager.manager = manager
+	return voiceManager, nil
 }
 
 // Join connects to a Discord voice channel using the DAVE-capable voice stack.
@@ -71,11 +78,38 @@ func (m *Manager) Join(ctx context.Context, guildID, channelID string, selfMute,
 	}
 
 	conn := m.manager.CreateConn(guildSnowflake)
+	conn.SetEventHandlerFunc(func(_ disgovoice.Gateway, opcode disgovoice.Opcode, _ int, data disgovoice.GatewayMessageData) {
+		if opcode != disgovoice.OpcodeSpeaking {
+			return
+		}
+		speaking, ok := data.(disgovoice.GatewayMessageDataSpeaking)
+		if !ok || speaking.UserID == 0 {
+			return
+		}
+		m.speakingMu.RLock()
+		handler := m.speakingHandler
+		m.speakingMu.RUnlock()
+		if handler != nil {
+			handler(guildID, speaking.UserID.String(), speaking.Speaking != disgovoice.SpeakingFlagNone)
+		}
+	})
 	if err := conn.Open(ctx, channelSnowflake, selfMute, selfDeaf); err != nil {
 		return nil, err
 	}
 
 	return &Connection{conn: conn}, nil
+}
+
+// SetSpeakingHandler registers the consumer for Discord Voice Gateway opcode
+// 5 events. Unlike guild VoiceStateUpdate, these events describe actual audio
+// activity and are therefore safe to use for volume ducking.
+func (m *Manager) SetSpeakingHandler(handler func(guildID, userID string, speaking bool)) {
+	if m == nil {
+		return
+	}
+	m.speakingMu.Lock()
+	m.speakingHandler = handler
+	m.speakingMu.Unlock()
 }
 
 // HandleVoiceStateUpdate forwards a discordgo voice state event to the disgo voice manager.

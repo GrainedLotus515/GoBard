@@ -3,22 +3,28 @@ package bot
 import (
 	"fmt"
 
+	"github.com/bwmarrin/discordgo"
+
 	"github.com/GrainedLotus515/gobard/internal/botui"
 	"github.com/GrainedLotus515/gobard/internal/logger"
-	"github.com/bwmarrin/discordgo"
 )
 
 func (b *Bot) handleMessageComponent(s *discordgo.Session, i *discordgo.InteractionCreate) {
+	userID, interactionErr := interactionUserID(i)
+	if interactionErr != nil {
+		b.respondComponentError(s, i, "Controls Unavailable", "These controls can only be used in a server.")
+		return
+	}
 	data := i.MessageComponentData()
 	action, metadata, err := botui.ParseCustomID(data.CustomID)
 	if err != nil {
-		logger.Warn("Rejected unknown component action", "custom_id", data.CustomID, "guild", i.GuildID, "user", i.Member.User.ID)
+		logger.Warn("Rejected unknown component action", "custom_id", data.CustomID, "guild", i.GuildID, "user", userID)
 		b.respondComponentError(s, i, "Controls Unavailable", "That control is no longer recognized.")
 		return
 	}
 
 	if action == botui.ActionQueuePage {
-		logger.Debug("Queue page requested", "guild", i.GuildID, "user", i.Member.User.ID, "action", action, "page", metadata.Page)
+		logger.Debug("Queue page requested", "guild", i.GuildID, "user", userID, "action", action, "page", metadata.Page)
 		state := b.getPlaybackState(i.GuildID)
 		embed, components := b.buildQueueCard(state, metadata.Page)
 		b.updateComponentMessage(s, i, embed, components)
@@ -27,18 +33,18 @@ func (b *Bot) handleMessageComponent(s *discordgo.Session, i *discordgo.Interact
 
 	state := b.getPlaybackState(i.GuildID)
 	if state.Track == nil {
-		logger.Info("Component action updated stale playback card", "guild", i.GuildID, "user", i.Member.User.ID, "action", action, "allowed", true)
-		b.updateComponentMessage(s, i, idleStatusCard("Playback Is Idle", "Nothing is currently playing."), nil)
+		logger.Info("Component action updated stale playback card", "guild", i.GuildID, "user", userID, "action", action, "allowed", true)
+		b.updateComponentMessage(s, i, idleStatusCard("Nothing is currently playing."), nil)
 		return
 	}
 
-	if err := b.requirePlaybackControlAccess(i.GuildID, i.Member.User.ID); err != nil {
-		logger.Info("Rejected component action", "guild", i.GuildID, "user", i.Member.User.ID, "action", action, "allowed", false)
+	if err := b.requirePlaybackControlAccess(i.GuildID, userID); err != nil {
+		logger.Info("Rejected component action", "guild", i.GuildID, "user", userID, "action", action, "allowed", false)
 		b.respondComponentError(s, i, "Join Voice First", err.Error())
 		return
 	}
 
-	logger.Info("Accepted component action", "guild", i.GuildID, "user", i.Member.User.ID, "action", action, "allowed", true)
+	logger.Info("Accepted component action", "guild", i.GuildID, "user", userID, "action", action, "allowed", true)
 
 	p := b.PlayerManager.GetPlayer(i.GuildID)
 	switch action {
@@ -51,7 +57,7 @@ func (b *Bot) handleMessageComponent(s *discordgo.Session, i *discordgo.Interact
 
 		updated := b.getPlaybackState(i.GuildID)
 		if updated.Track == nil {
-			b.updateComponentMessage(s, i, idleStatusCard("Playback Is Idle", "Nothing is currently playing."), nil)
+			b.updateComponentMessage(s, i, idleStatusCard("Nothing is currently playing."), nil)
 			return
 		}
 
@@ -70,7 +76,7 @@ func (b *Bot) handleMessageComponent(s *discordgo.Session, i *discordgo.Interact
 	case botui.ActionPlaybackSkip:
 		next := p.Skip()
 		if next == nil {
-			b.updateComponentMessage(s, i, idleStatusCard("Playback Is Idle", "Queue is now empty."), nil)
+			b.updateComponentMessage(s, i, idleStatusCard("Queue is now empty."), nil)
 			return
 		}
 
@@ -90,7 +96,7 @@ func (b *Bot) handleMessageComponent(s *discordgo.Session, i *discordgo.Interact
 		p.Queue.ToggleLoop()
 		updated := b.getPlaybackState(i.GuildID)
 		if updated.Track == nil {
-			b.updateComponentMessage(s, i, idleStatusCard("Playback Is Idle", "Nothing is currently playing."), nil)
+			b.updateComponentMessage(s, i, idleStatusCard("Nothing is currently playing."), nil)
 			return
 		}
 
@@ -109,7 +115,7 @@ func (b *Bot) handleMessageComponent(s *discordgo.Session, i *discordgo.Interact
 	case botui.ActionPlaybackStop:
 		p.Stop()
 		p.Queue.ClearAll()
-		p.Disconnect()
+		disconnectPlayer(p, i.GuildID, "component stop")
 		b.updateComponentMessage(s, i, botui.BuildStatusCard(botui.StatusCardSpec{
 			Title:       "Playback Stopped",
 			Description: "Disconnected and cleared the queue.",
@@ -122,6 +128,12 @@ func (b *Bot) handleMessageComponent(s *discordgo.Session, i *discordgo.Interact
 }
 
 func (b *Bot) requirePlaybackControlAccess(guildID, userID string) error {
+	if b == nil || b.Session == nil || b.Session.State == nil || b.Session.State.User == nil || b.Session.State.User.ID == "" {
+		return fmt.Errorf("playback is unavailable")
+	}
+	if guildID == "" || userID == "" {
+		return fmt.Errorf("join the bot's voice channel to use playback controls")
+	}
 	userChannelID, err := b.GetVoiceChannel(guildID, userID)
 	if err != nil {
 		return fmt.Errorf("join the bot's voice channel to use playback controls")

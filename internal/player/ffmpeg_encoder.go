@@ -12,8 +12,9 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/GrainedLotus515/gobard/internal/logger"
 	"github.com/hraban/opus"
+
+	"github.com/GrainedLotus515/gobard/internal/logger"
 )
 
 // CustomEncoder handles audio encoding using FFmpeg + libopus
@@ -27,11 +28,17 @@ type CustomEncoder struct {
 	mu          sync.Mutex
 	done        bool
 	frameChan   chan []byte
-	stopChan    chan bool
+	stopChan    chan struct{}
+	stopOnce    sync.Once
+	waitOnce    sync.Once
+	waitErr     error
+	terminalErr error
 	volume      *atomic.Int32
 }
 
-// NewCustomEncoder creates a new audio encoder using FFmpeg + libopus
+// NewCustomEncoder creates a new audio encoder using FFmpeg + libopus.
+//
+//nolint:gosec // source is a cache path controlled by the cache subsystem; no shell is involved.
 func NewCustomEncoder(source string, sampleRate, channels int, startOffset time.Duration, vol *atomic.Int32) (*CustomEncoder, error) {
 	frameSize := 960 // 20ms at 48kHz
 	if sampleRate != 48000 {
@@ -58,12 +65,17 @@ func NewCustomEncoder(source string, sampleRate, channels int, startOffset time.
 	// Create Opus encoder
 	opusEnc, err := opus.NewEncoder(sampleRate, channels, opus.AppAudio)
 	if err != nil {
-		cmd.Process.Kill()
+		stopProcess(cmd)
+		waitProcess(cmd)
 		return nil, fmt.Errorf("failed to create opus encoder: %w", err)
 	}
 
 	// Set bitrate to 128kbps
-	opusEnc.SetBitrate(128000)
+	if err := opusEnc.SetBitrate(128000); err != nil {
+		stopProcess(cmd)
+		waitProcess(cmd)
+		return nil, fmt.Errorf("set opus bitrate: %w", err)
+	}
 
 	encoder := &CustomEncoder{
 		cmd:         cmd,
@@ -73,8 +85,8 @@ func NewCustomEncoder(source string, sampleRate, channels int, startOffset time.
 		channels:    channels,
 		sampleRate:  sampleRate,
 		done:        false,
-		frameChan:   make(chan []byte, 1000), // Increased from 100 to 1000 (~20 seconds buffer)
-		stopChan:    make(chan bool, 1),
+		frameChan:   make(chan []byte, encodedFrameBufferCapacity),
+		stopChan:    make(chan struct{}),
 		volume:      vol,
 	}
 
@@ -84,21 +96,30 @@ func NewCustomEncoder(source string, sampleRate, channels int, startOffset time.
 	return encoder, nil
 }
 
-// encodeLoop reads PCM data and encodes to Opus frames
+// encodeLoop reads PCM data and encodes to Opus frames.
+//
+//nolint:gocyclo // The loop intentionally keeps read, conversion, and final-frame cleanup together.
 func (e *CustomEncoder) encodeLoop() {
-	defer close(e.frameChan)
+	defer func() {
+		close(e.frameChan)
+		e.stopProcess()
+		if err := e.waitProcess(); err != nil {
+			logger.Debug("FFmpeg process exited during encoder cleanup", "err", err)
+		}
+	}()
 	debugPlayback := isDebugPlaybackEnabled()
 
 	// PCM buffer: frameSize samples * channels * 2 bytes per sample
 	pcmBufferSize := e.frameSize * e.channels * 2
 	pcmBuffer := make([]byte, pcmBufferSize)
 	pcmSamples := make([]int16, e.frameSize*e.channels)
+	opusFrameBuffer := make([]byte, 4000) // Reusable Opus encode buffer (libopus recommended max)
+	samplesPerFrame := e.frameSize * e.channels
 	frameCount := 0
 
 	for {
 		select {
 		case <-e.stopChan:
-			e.cmd.Process.Kill()
 			return
 		default:
 		}
@@ -106,6 +127,7 @@ func (e *CustomEncoder) encodeLoop() {
 		// Read PCM data from FFmpeg
 		n, readErr := io.ReadFull(e.stdout, pcmBuffer)
 		if readErr != nil && readErr != io.EOF && readErr != io.ErrUnexpectedEOF {
+			e.setTerminalError(fmt.Errorf("read ffmpeg PCM: %w", readErr))
 			logger.Error("FFmpeg read error", "err", readErr)
 			return
 		}
@@ -122,18 +144,17 @@ func (e *CustomEncoder) encodeLoop() {
 		e.applyVolume(pcmSamples[:n/2])
 
 		// Encode full frames
-		samplesPerFrame := e.frameSize * e.channels
 		for i := 0; i+samplesPerFrame <= n/2; i += samplesPerFrame {
 			frameData := pcmSamples[i : i+samplesPerFrame]
-			opusFrameBuffer := make([]byte, 4000)
-			n, err := e.opusEncoder.Encode(frameData, opusFrameBuffer)
+			encoded, err := e.opusEncoder.Encode(frameData, opusFrameBuffer)
 			if err != nil {
+				e.setTerminalError(fmt.Errorf("encode opus frame: %w", err))
 				logger.Error("Opus encoding error", "err", err)
 				return
 			}
 
-			// Send only the encoded bytes
-			opusFrame := opusFrameBuffer[:n]
+			opusFrame := make([]byte, encoded)
+			copy(opusFrame, opusFrameBuffer[:encoded])
 			select {
 			case e.frameChan <- opusFrame:
 				if debugPlayback {
@@ -151,12 +172,30 @@ func (e *CustomEncoder) encodeLoop() {
 					}
 				}
 			case <-e.stopChan:
-				e.cmd.Process.Kill()
 				return
 			}
 		}
 
 		if readErr == io.EOF || readErr == io.ErrUnexpectedEOF {
+			// Zero-pad and encode any remaining partial frame
+			if remaining := (n / 2) % samplesPerFrame; remaining > 0 {
+				for i := n / 2; i < samplesPerFrame; i++ {
+					pcmSamples[i] = 0
+				}
+				encoded, err := e.opusEncoder.Encode(pcmSamples[:samplesPerFrame], opusFrameBuffer)
+				if err != nil {
+					e.setTerminalError(fmt.Errorf("encode final opus frame: %w", err))
+					logger.Error("Opus encoding error on final partial frame", "err", err)
+					return
+				}
+				opusFrame := make([]byte, encoded)
+				copy(opusFrame, opusFrameBuffer[:encoded])
+				select {
+				case e.frameChan <- opusFrame:
+				case <-e.stopChan:
+					return
+				}
+			}
 			return
 		}
 	}
@@ -166,9 +205,29 @@ func (e *CustomEncoder) encodeLoop() {
 func (e *CustomEncoder) OpusFrame() ([]byte, error) {
 	frame, ok := <-e.frameChan
 	if !ok {
+		if err := e.getTerminalError(); err != nil {
+			return nil, err
+		}
 		return nil, io.EOF
 	}
 	return frame, nil
+}
+
+func (e *CustomEncoder) setTerminalError(err error) {
+	if err == nil {
+		return
+	}
+	e.mu.Lock()
+	if e.terminalErr == nil {
+		e.terminalErr = err
+	}
+	e.mu.Unlock()
+}
+
+func (e *CustomEncoder) getTerminalError() error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.terminalErr
 }
 
 // BufferLevel reports the number of buffered frames and channel capacity.
@@ -194,26 +253,28 @@ func (e *CustomEncoder) applyVolume(samples []int16) {
 // Cleanup stops the encoder and releases resources
 func (e *CustomEncoder) Cleanup() error {
 	e.mu.Lock()
-	defer e.mu.Unlock()
-
-	if e.done {
-		return nil
+	if !e.done {
+		e.done = true
+		e.mu.Unlock()
+		e.stopOnce.Do(func() { close(e.stopChan) })
+		e.stopProcess()
+		return e.waitProcess()
 	}
+	e.mu.Unlock()
+	return e.waitProcess()
+}
 
-	e.done = true
+func (e *CustomEncoder) stopProcess() {
+	stopProcess(e.cmd)
+}
 
-	// Signal the encoding loop to stop
-	select {
-	case e.stopChan <- true:
-	default:
-	}
-
-	// Kill the FFmpeg process
-	if e.cmd.Process != nil {
-		e.cmd.Process.Kill()
-	}
-
-	return e.cmd.Wait()
+func (e *CustomEncoder) waitProcess() error {
+	e.waitOnce.Do(func() {
+		if e.cmd != nil {
+			e.waitErr = e.cmd.Wait()
+		}
+	})
+	return e.waitErr
 }
 
 func buildFileFFmpegArgs(source string, sampleRate, channels int, startOffset time.Duration) []string {
@@ -259,6 +320,9 @@ func buildDirectStreamingFFmpegArgs(source string, headers map[string]string, sa
 		"-reconnect", "1",
 		"-reconnect_streamed", "1",
 		"-reconnect_delay_max", "5",
+		// The stream URL was checked before starting FFmpeg. Following an HTTP
+		// redirect would bypass that check and turn the decoder into an SSRF hop.
+		"-max_redirects", "0",
 		"-i", source,
 	)
 	if startOffset > 0 {

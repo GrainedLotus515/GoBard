@@ -15,6 +15,8 @@ import (
 
 	"github.com/GrainedLotus515/gobard/internal/logger"
 	"github.com/GrainedLotus515/gobard/internal/player"
+	"github.com/GrainedLotus515/gobard/internal/processlimit"
+	"github.com/GrainedLotus515/gobard/internal/sourceurl"
 )
 
 const (
@@ -22,21 +24,31 @@ const (
 	negativeSearchCacheTTL      = 5 * time.Minute
 	searchCacheCapacity         = 256
 	negativeSearchCacheCapacity = 128
+	defaultMaxPlaylistTracks    = 500
+	defaultMaxConcurrency       = 4
 )
 
 var execCommandContext = exec.CommandContext
 
 // Client handles YouTube operations
 type Client struct {
-	apiKey string
-
 	now func() time.Time
+
+	maxPlaylistTracks int
+	commandLimiter    *processlimit.Limiter
 
 	mu                         sync.Mutex
 	searchCache                *list.List
 	searchCacheEntries         map[string]*list.Element
 	negativeSearchCache        *list.List
 	negativeSearchCacheEntries map[string]*list.Element
+}
+
+// Options controls bounded external-tool use for a YouTube client.
+type Options struct {
+	MaxPlaylistTracks int
+	MaxConcurrency    int
+	ProcessLimiter    *processlimit.Limiter
 }
 
 type searchCacheEntry struct {
@@ -53,10 +65,32 @@ type negativeSearchCacheEntry struct {
 }
 
 // NewClient creates a new YouTube client
-func NewClient(apiKey string) *Client {
+func NewClient() *Client {
+	return NewClientWithOptions(Options{})
+}
+
+// NewClientWithOptions creates a client with a shared bounded yt-dlp process
+// budget. MaxConcurrency is retained for isolated construction paths: when a
+// caller does not inject a limiter, it configures the process-wide budget so
+// playback fallback uses the same cap rather than a second semaphore.
+func NewClientWithOptions(options Options) *Client {
+	if options.MaxPlaylistTracks < 1 || options.MaxPlaylistTracks > defaultMaxPlaylistTracks {
+		options.MaxPlaylistTracks = defaultMaxPlaylistTracks
+	}
+	if options.ProcessLimiter == nil && options.MaxConcurrency != 0 {
+		if options.MaxConcurrency < 1 || options.MaxConcurrency > 16 {
+			options.MaxConcurrency = defaultMaxConcurrency
+		}
+		processlimit.ConfigureGlobal(options.MaxConcurrency)
+	}
+	limiter := options.ProcessLimiter
+	if limiter == nil {
+		limiter = processlimit.Global()
+	}
 	client := &Client{
-		apiKey: apiKey,
-		now:    time.Now,
+		now:               time.Now,
+		maxPlaylistTracks: options.MaxPlaylistTracks,
+		commandLimiter:    limiter,
 	}
 	client.initSearchCaches()
 	return client
@@ -91,6 +125,21 @@ type audioStream struct {
 	ExpiresAt time.Time
 }
 
+// URLKind identifies the supported YouTube resource represented by a
+// canonical URL. GoBard intentionally accepts only video and playlist URLs;
+// accepting arbitrary extractor URLs turns yt-dlp into an SSRF primitive.
+type URLKind uint8
+
+const (
+	URLKindUnknown URLKind = iota
+	URLKindVideo
+	URLKindPlaylist
+)
+
+var (
+	errUnsupportedYouTubeURL = errors.New("unsupported YouTube URL")
+)
+
 // extractBestAudioStream finds the best audio-only stream metadata from formats.
 func extractBestAudioStream(formats []Format) audioStream {
 	var best Format
@@ -105,7 +154,7 @@ func extractBestAudioStream(formats []Format) audioStream {
 		hasVideo := f.VideoCodec != "none" && f.VideoCodec != ""
 
 		// Select highest bitrate audio-only
-		if !hasVideo && f.URL != "" && (!foundBest || f.ABR > best.ABR) {
+		if !hasVideo && isPublicHTTPURL(f.URL) && (!foundBest || f.ABR > best.ABR) {
 			best = f
 			foundBest = true
 		}
@@ -114,7 +163,7 @@ func extractBestAudioStream(formats []Format) audioStream {
 	// Fallback: if no audio-only found, take any format with audio
 	if !foundBest {
 		for _, f := range formats {
-			if f.AudioCodec != "none" && f.AudioCodec != "" && f.URL != "" {
+			if f.AudioCodec != "none" && f.AudioCodec != "" && isPublicHTTPURL(f.URL) {
 				best = f
 				foundBest = true
 				break
@@ -175,6 +224,26 @@ func (c *Client) currentTime() time.Time {
 	return time.Now()
 }
 
+func (c *Client) acquireCommandSlot(ctx context.Context) (func(), error) {
+	if c == nil {
+		return nil, fmt.Errorf("YouTube client is not initialized")
+	}
+	limiter := c.commandLimiter
+	if limiter == nil {
+		// Preserve safe behavior for manually-constructed clients in tests while
+		// still sharing the production process budget.
+		limiter = processlimit.Global()
+	}
+	return limiter.Acquire(ctx)
+}
+
+func (c *Client) playlistLimit() int {
+	if c == nil || c.maxPlaylistTracks < 1 || c.maxPlaylistTracks > defaultMaxPlaylistTracks {
+		return defaultMaxPlaylistTracks
+	}
+	return c.maxPlaylistTracks
+}
+
 func (c *Client) initSearchCaches() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -197,9 +266,12 @@ func (c *Client) initSearchCachesLocked() {
 }
 
 func buildTrackFromResult(result SearchResult) *player.Track {
-	videoURL := result.URL
-	if videoURL == "" && result.ID != "" {
-		videoURL = fmt.Sprintf("https://www.youtube.com/watch?v=%s", result.ID)
+	videoURL := ""
+	if canonicalURL, kind, err := ClassifyYouTubeURL(result.URL); err == nil && kind == URLKindVideo {
+		videoURL = canonicalURL
+	}
+	if videoURL == "" && isSafeYouTubeIdentifier(result.ID, 32) {
+		videoURL = canonicalVideoURL(result.ID)
 	}
 
 	return &player.Track{
@@ -246,8 +318,8 @@ func (c *Client) removeSearchCacheElement(element *list.Element) {
 		return
 	}
 
-	entry, _ := element.Value.(*searchCacheEntry)
-	if entry != nil {
+	entry, ok := element.Value.(*searchCacheEntry)
+	if ok && entry != nil {
 		delete(c.searchCacheEntries, entry.key)
 	}
 	c.searchCache.Remove(element)
@@ -258,8 +330,8 @@ func (c *Client) removeNegativeSearchCacheElement(element *list.Element) {
 		return
 	}
 
-	entry, _ := element.Value.(*negativeSearchCacheEntry)
-	if entry != nil {
+	entry, ok := element.Value.(*negativeSearchCacheEntry)
+	if ok && entry != nil {
 		delete(c.negativeSearchCacheEntries, entry.key)
 	}
 	c.negativeSearchCache.Remove(element)
@@ -289,16 +361,16 @@ func (c *Client) lookupSearchCache(key string, now time.Time) ([]*player.Track, 
 
 	if age > searchCacheTTL {
 		c.removeSearchCacheElement(element)
-		logger.Timing("Search cache stale", "query_key", key, "age_ms", age.Milliseconds(), "cache_kind", "positive")
+		logger.Timing("Search cache stale", "age_ms", age.Milliseconds(), "cache_kind", "positive")
 		return nil, false
 	}
 
 	c.searchCache.MoveToFront(element)
-	logger.Timing("Search cache hit", "query_key", key, "age_ms", age.Milliseconds())
+	logger.Timing("Search cache hit", "age_ms", age.Milliseconds())
 	return cloneStableTracks(entry.tracks), true
 }
 
-func (c *Client) lookupNegativeSearchCache(key string, now time.Time) ([]*player.Track, error, bool) {
+func (c *Client) lookupNegativeSearchCache(key string, now time.Time) ([]*player.Track, bool, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -306,13 +378,13 @@ func (c *Client) lookupNegativeSearchCache(key string, now time.Time) ([]*player
 
 	element, ok := c.negativeSearchCacheEntries[key]
 	if !ok {
-		return nil, nil, false
+		return nil, false, nil
 	}
 
 	entry, ok := element.Value.(*negativeSearchCacheEntry)
 	if !ok || entry == nil {
 		c.removeNegativeSearchCacheElement(element)
-		return nil, nil, false
+		return nil, false, nil
 	}
 
 	age := now.Sub(entry.storedAt)
@@ -322,19 +394,19 @@ func (c *Client) lookupNegativeSearchCache(key string, now time.Time) ([]*player
 
 	if age > negativeSearchCacheTTL {
 		c.removeNegativeSearchCacheElement(element)
-		logger.Timing("Search cache stale", "query_key", key, "age_ms", age.Milliseconds(), "cache_kind", "negative")
-		return nil, nil, false
+		logger.Timing("Search cache stale", "age_ms", age.Milliseconds(), "cache_kind", "negative")
+		return nil, false, nil
 	}
 
 	c.negativeSearchCache.MoveToFront(element)
-	logger.Timing("Search cache negative hit", "query_key", key, "age_ms", age.Milliseconds(), "outcome", entry.outcome)
+	logger.Timing("Search cache negative hit", "age_ms", age.Milliseconds(), "outcome", entry.outcome)
 	if entry.outcome == "empty_result" {
-		return []*player.Track{}, nil, true
+		return []*player.Track{}, true, nil
 	}
 	if entry.errMessage == "" {
-		return nil, nil, true
+		return nil, true, nil
 	}
-	return nil, errors.New(entry.errMessage), true
+	return nil, true, errors.New(entry.errMessage)
 }
 
 func (c *Client) storeSearchCache(key string, tracks []*player.Track, now time.Time) {
@@ -391,7 +463,7 @@ func (c *Client) storeNegativeSearchCache(key, outcome, errMessage string, now t
 		c.removeNegativeSearchCacheElement(c.negativeSearchCache.Back())
 	}
 
-	logger.Timing("Search cache negative store", "query_key", key, "outcome", outcome, "age_ms", int64(0))
+	logger.Timing("Search cache negative store", "outcome", outcome, "age_ms", int64(0))
 }
 
 func classifyNegativeSearchFailure(err error) (string, string, bool) {
@@ -416,7 +488,9 @@ func classifyNegativeSearchFailure(err error) (string, string, bool) {
 		strings.Contains(stderr, "incomplete youtube id"),
 		strings.Contains(stderr, "invalid url"),
 		strings.Contains(stderr, "not a valid url"):
-		return "query_error", fmt.Sprintf("failed to search YouTube: %s", rawStderr), true
+		// Extractor stderr can reflect the submitted query. Preserve the
+		// classification but never surface potentially sensitive input.
+		return "query_error", "failed to search YouTube", true
 	default:
 		return "", "", false
 	}
@@ -424,6 +498,10 @@ func classifyNegativeSearchFailure(err error) (string, string, bool) {
 
 // Search searches for videos and returns track information
 func (c *Client) Search(query string) ([]*player.Track, error) {
+	if IsURLLike(query) {
+		return nil, fmt.Errorf("%w: use an HTTPS YouTube video or playlist URL", errUnsupportedYouTubeURL)
+	}
+
 	start := time.Now()
 	now := c.currentTime()
 	normalizedKey := normalizeSearchKey(query)
@@ -432,14 +510,22 @@ func (c *Client) Search(query string) ([]*player.Track, error) {
 		if tracks, ok := c.lookupSearchCache(normalizedKey, now); ok {
 			return tracks, nil
 		}
-		if tracks, err, ok := c.lookupNegativeSearchCache(normalizedKey, now); ok {
+		if tracks, ok, err := c.lookupNegativeSearchCache(normalizedKey, now); ok {
 			return tracks, err
 		}
-		logger.Timing("Search cache miss", "query_key", normalizedKey)
+		logger.Timing("Search cache miss")
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
+	releaseCommandSlot, err := c.acquireCommandSlot(ctx)
+	if err != nil {
+		if ctx.Err() == context.DeadlineExceeded {
+			return nil, fmt.Errorf("search timed out after 30 seconds")
+		}
+		return nil, fmt.Errorf("acquire YouTube search slot: %w", err)
+	}
+	defer releaseCommandSlot()
 
 	cmd := execCommandContext(ctx,
 		"yt-dlp",
@@ -470,7 +556,7 @@ func (c *Client) Search(query string) ([]*player.Track, error) {
 
 	trimmedOutput := strings.TrimSpace(string(output))
 	if trimmedOutput == "" {
-		logger.Timing("YouTube search completed", "query", query, "duration_ms", time.Since(start).Milliseconds(), "has_stream_url", false)
+		logger.Timing("YouTube search completed", "query_length", len(query), "duration_ms", time.Since(start).Milliseconds(), "has_stream_url", false)
 		if normalizedKey != "" {
 			c.storeNegativeSearchCache(normalizedKey, "empty_result", "", now)
 		}
@@ -488,7 +574,7 @@ func (c *Client) Search(query string) ([]*player.Track, error) {
 
 	track := buildTrackFromResult(result)
 	if track.ID == "" && track.Title == "" && track.URL == "" {
-		logger.Timing("YouTube search completed", "query", query, "duration_ms", time.Since(start).Milliseconds(), "has_stream_url", false)
+		logger.Timing("YouTube search completed", "query_length", len(query), "duration_ms", time.Since(start).Milliseconds(), "has_stream_url", false)
 		if normalizedKey != "" {
 			c.storeNegativeSearchCache(normalizedKey, "empty_result", "", now)
 		}
@@ -496,7 +582,7 @@ func (c *Client) Search(query string) ([]*player.Track, error) {
 	}
 
 	stream := extractBestAudioStream(result.Formats)
-	logger.Timing("YouTube search completed", "query", query, "duration_ms", time.Since(start).Milliseconds(), "has_stream_url", stream.URL != "")
+	logger.Timing("YouTube search completed", "query_length", len(query), "duration_ms", time.Since(start).Milliseconds(), "has_stream_url", stream.URL != "")
 
 	track.SetPrefetchedStream(stream.URL, stream.Headers, stream.ExpiresAt)
 	if normalizedKey != "" {
@@ -507,11 +593,36 @@ func (c *Client) Search(query string) ([]*player.Track, error) {
 }
 
 // GetVideoInfo gets information about a YouTube video
-func (c *Client) GetVideoInfo(url string) (*player.Track, error) {
+func (c *Client) GetVideoInfo(rawURL string) (*player.Track, error) {
+	return c.GetVideoInfoContext(context.Background(), rawURL)
+}
+
+// GetVideoInfoContext gets video metadata while honoring cancellation from a
+// caller-owned operation such as background fast-path hydration.
+func (c *Client) GetVideoInfoContext(parent context.Context, rawURL string) (*player.Track, error) {
+	url, kind, err := ClassifyYouTubeURL(rawURL)
+	if err != nil {
+		return nil, err
+	}
+	if kind != URLKindVideo {
+		return nil, fmt.Errorf("%w: expected a video URL", errUnsupportedYouTubeURL)
+	}
+
 	start := time.Now()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	if parent == nil {
+		parent = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(parent, 30*time.Second)
 	defer cancel()
+	releaseCommandSlot, err := c.acquireCommandSlot(ctx)
+	if err != nil {
+		if ctx.Err() == context.DeadlineExceeded {
+			return nil, fmt.Errorf("video info fetch timed out after 30 seconds")
+		}
+		return nil, fmt.Errorf("acquire video info slot: %w", err)
+	}
+	defer releaseCommandSlot()
 
 	cmd := execCommandContext(ctx,
 		"yt-dlp",
@@ -526,6 +637,9 @@ func (c *Client) GetVideoInfo(url string) (*player.Track, error) {
 	if err != nil {
 		if ctx.Err() == context.DeadlineExceeded {
 			return nil, fmt.Errorf("video info fetch timed out after 30 seconds")
+		}
+		if ctx.Err() == context.Canceled {
+			return nil, fmt.Errorf("video info fetch canceled")
 		}
 		return nil, fmt.Errorf("failed to get video info: %w", err)
 	}
@@ -545,16 +659,33 @@ func (c *Client) GetVideoInfo(url string) (*player.Track, error) {
 }
 
 // GetPlaylistInfo gets information about a YouTube playlist
-func (c *Client) GetPlaylistInfo(url string) ([]*player.Track, error) {
+func (c *Client) GetPlaylistInfo(rawURL string) ([]*player.Track, error) {
+	url, kind, err := ClassifyYouTubeURL(rawURL)
+	if err != nil {
+		return nil, err
+	}
+	if kind != URLKindPlaylist {
+		return nil, fmt.Errorf("%w: expected a playlist URL", errUnsupportedYouTubeURL)
+	}
+
 	start := time.Now()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
+	releaseCommandSlot, err := c.acquireCommandSlot(ctx)
+	if err != nil {
+		if ctx.Err() == context.DeadlineExceeded {
+			return nil, fmt.Errorf("playlist fetch timed out after 60 seconds")
+		}
+		return nil, fmt.Errorf("acquire playlist fetch slot: %w", err)
+	}
+	defer releaseCommandSlot()
 
 	cmd := execCommandContext(ctx,
 		"yt-dlp",
 		"--dump-json",
 		"--flat-playlist",
+		"--playlist-end", strconv.Itoa(c.playlistLimit()),
 		"--no-warnings",
 		"--",
 		url,
@@ -590,6 +721,9 @@ func (c *Client) GetPlaylistInfo(url string) ([]*player.Track, error) {
 		}
 
 		tracks = append(tracks, track)
+		if len(tracks) >= c.playlistLimit() {
+			break
+		}
 	}
 
 	logger.Timing("Playlist fetch completed", "url", url, "track_count", len(tracks), "duration_ms", time.Since(start).Milliseconds())
@@ -640,6 +774,12 @@ func (c *Client) prefetchStreamURLs(tracks []*player.Track, count int) {
 			// Fetch full video info to get stream URL (10 second timeout)
 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			defer cancel()
+			releaseCommandSlot, err := c.acquireCommandSlot(ctx)
+			if err != nil {
+				logger.Debug("Prefetch slot unavailable", "index", index, "title", track.Title, "err", err)
+				return
+			}
+			defer releaseCommandSlot()
 
 			cmd := execCommandContext(ctx,
 				"yt-dlp",
@@ -701,9 +841,35 @@ func (c *Client) prefetchStreamURLs(tracks []*player.Track, count int) {
 }
 
 // Download downloads a video to the cache directory
-func (c *Client) Download(url, outputPath string) error {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+func (c *Client) Download(rawURL, outputPath string) error {
+	return c.DownloadContext(context.Background(), rawURL, outputPath)
+}
+
+// DownloadContext downloads a video while honoring cancellation from playback
+// lifecycle events. A canceled cache fill is discarded transactionally by the
+// cache's temporary-file creator.
+func (c *Client) DownloadContext(parent context.Context, rawURL, outputPath string) error {
+	url, kind, err := ClassifyYouTubeURL(rawURL)
+	if err != nil {
+		return err
+	}
+	if kind != URLKindVideo {
+		return fmt.Errorf("%w: expected a video URL", errUnsupportedYouTubeURL)
+	}
+
+	if parent == nil {
+		parent = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(parent, 5*time.Minute)
 	defer cancel()
+	releaseCommandSlot, err := c.acquireCommandSlot(ctx)
+	if err != nil {
+		if ctx.Err() == context.DeadlineExceeded {
+			return fmt.Errorf("download timed out after 5 minutes")
+		}
+		return fmt.Errorf("acquire download slot: %w", err)
+	}
+	defer releaseCommandSlot()
 
 	cmd := execCommandContext(ctx,
 		"yt-dlp",
@@ -719,99 +885,175 @@ func (c *Client) Download(url, outputPath string) error {
 		if ctx.Err() == context.DeadlineExceeded {
 			return fmt.Errorf("download timed out after 5 minutes")
 		}
+		if ctx.Err() == context.Canceled {
+			return fmt.Errorf("download canceled")
+		}
 		return fmt.Errorf("failed to download video: %w", err)
 	}
 
 	return nil
 }
 
-// GetStreamURL gets the direct stream URL for a video
-func (c *Client) GetStreamURL(url string) (string, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
+// ClassifyYouTubeURL validates an externally supplied URL and returns a
+// canonical video or playlist URL. It intentionally accepts a small, explicit
+// grammar rather than passing arbitrary URLs through to yt-dlp.
+func ClassifyYouTubeURL(raw string) (canonicalURL string, kind URLKind, err error) {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return "", URLKindUnknown, fmt.Errorf("%w: URL is empty", errUnsupportedYouTubeURL)
+	}
 
-	cmd := execCommandContext(ctx,
-		"yt-dlp",
-		"-f", "bestaudio",
-		"-g", // Get URL
-		"--no-warnings",
-		"--",
-		url,
-	)
+	parsed, parseErr := url.ParseRequestURI(trimmed)
+	if parseErr != nil || parsed == nil {
+		return "", URLKindUnknown, fmt.Errorf("%w: invalid URL", errUnsupportedYouTubeURL)
+	}
+	if !strings.EqualFold(parsed.Scheme, "https") {
+		return "", URLKindUnknown, fmt.Errorf("%w: only HTTPS URLs are accepted", errUnsupportedYouTubeURL)
+	}
+	if parsed.User != nil {
+		return "", URLKindUnknown, fmt.Errorf("%w: userinfo is not allowed", errUnsupportedYouTubeURL)
+	}
+	if parsed.Host == "" || (parsed.Port() != "" && parsed.Port() != "443") {
+		return "", URLKindUnknown, fmt.Errorf("%w: invalid host", errUnsupportedYouTubeURL)
+	}
 
-	output, err := cmd.Output()
-	if err != nil {
-		if ctx.Err() == context.DeadlineExceeded {
-			return "", fmt.Errorf("stream URL fetch timed out after 30 seconds")
+	host := strings.ToLower(parsed.Hostname())
+	if !isYouTubeHost(host) {
+		return "", URLKindUnknown, fmt.Errorf("%w: host is not YouTube", errUnsupportedYouTubeURL)
+	}
+
+	query := parsed.Query()
+	playlistID := strings.TrimSpace(query.Get("list"))
+	if playlistID != "" {
+		if !isSafeYouTubeIdentifier(playlistID, 128) {
+			return "", URLKindUnknown, fmt.Errorf("%w: invalid playlist identifier", errUnsupportedYouTubeURL)
 		}
-		return "", fmt.Errorf("failed to get stream URL: %w", err)
+		if host == "youtu.be" {
+			shortID := strings.Trim(parsed.EscapedPath(), "/")
+			if strings.Contains(shortID, "/") {
+				return "", URLKindUnknown, fmt.Errorf("%w: invalid short playlist path", errUnsupportedYouTubeURL)
+			}
+			unescaped, unescapeErr := url.PathUnescape(shortID)
+			if unescapeErr != nil || !isSafeYouTubeIdentifier(unescaped, 32) {
+				return "", URLKindUnknown, fmt.Errorf("%w: invalid short playlist path", errUnsupportedYouTubeURL)
+			}
+		} else if parsed.Path != "/playlist" && parsed.Path != "/watch" {
+			return "", URLKindUnknown, fmt.Errorf("%w: expected /watch or /playlist", errUnsupportedYouTubeURL)
+		}
+		return canonicalPlaylistURL(playlistID), URLKindPlaylist, nil
 	}
 
-	stream := strings.TrimSpace(string(output))
-	return stream, nil
-}
-
-// IsPlaylist checks if a URL is a YouTube playlist.
-// It parses the URL and requires a known YouTube host plus a valid
-// playlist indicator (either the /playlist path or a non-empty list= query
-// parameter).  This avoids false positives on search results or channel
-// pages that happen to contain the word "playlist".
-func IsPlaylist(raw string) bool {
-	u, err := url.Parse(strings.TrimSpace(raw))
-	if err != nil {
-		return false
-	}
-
-	host := strings.ToLower(u.Hostname())
+	var videoID string
 	switch host {
 	case "youtube.com", "www.youtube.com", "music.youtube.com":
-		if u.Path == "/playlist" {
-			return true
+		if parsed.Path != "/watch" {
+			return "", URLKindUnknown, fmt.Errorf("%w: expected /watch or a playlist", errUnsupportedYouTubeURL)
 		}
+		videoID = strings.TrimSpace(query.Get("v"))
 	case "youtu.be":
-		// Short links never host playlists.
+		videoID = strings.Trim(parsed.EscapedPath(), "/")
+		if strings.Contains(videoID, "/") {
+			return "", URLKindUnknown, fmt.Errorf("%w: invalid short video path", errUnsupportedYouTubeURL)
+		}
+		unescaped, unescapeErr := url.PathUnescape(videoID)
+		if unescapeErr != nil {
+			return "", URLKindUnknown, fmt.Errorf("%w: invalid short video path", errUnsupportedYouTubeURL)
+		}
+		videoID = unescaped
 	}
 
-	return strings.TrimSpace(u.Query().Get("list")) != ""
+	if !isSafeYouTubeIdentifier(videoID, 32) {
+		return "", URLKindUnknown, fmt.Errorf("%w: invalid video identifier", errUnsupportedYouTubeURL)
+	}
+	return canonicalVideoURL(videoID), URLKindVideo, nil
+}
+
+// IsPlaylist reports whether raw is a supported YouTube playlist URL.
+func IsPlaylist(raw string) bool {
+	_, kind, err := ClassifyYouTubeURL(raw)
+	return err == nil && kind == URLKindPlaylist
 }
 
 // NormalizeSingleVideoURL extracts a locally resolvable YouTube video ID and
 // canonicalizes it to the standard watch URL without network access.
 func NormalizeSingleVideoURL(raw string) (canonicalURL string, videoID string, ok bool) {
-	parsed, err := url.Parse(strings.TrimSpace(raw))
+	canonicalURL, kind, err := ClassifyYouTubeURL(raw)
+	if err != nil || kind != URLKindVideo {
+		return "", "", false
+	}
+
+	parsed, err := url.Parse(canonicalURL)
 	if err != nil {
 		return "", "", false
 	}
-
-	// Treat playlist-context URLs as non-fast-path inputs so they continue
-	// through the existing playlist handling flow.
-	if strings.TrimSpace(parsed.Query().Get("list")) != "" {
-		return "", "", false
-	}
-
-	switch strings.ToLower(parsed.Hostname()) {
-	case "youtube.com", "www.youtube.com", "music.youtube.com":
-		if parsed.Path != "/watch" {
-			return "", "", false
-		}
-
-		videoID = strings.TrimSpace(parsed.Query().Get("v"))
-		if videoID == "" {
-			return "", "", false
-		}
-	case "youtu.be":
-		videoID = strings.Trim(parsed.Path, "/")
-		if videoID == "" || strings.Contains(videoID, "/") {
-			return "", "", false
-		}
-	default:
-		return "", "", false
-	}
-
-	return fmt.Sprintf("https://www.youtube.com/watch?v=%s", url.QueryEscape(videoID)), videoID, true
+	return canonicalURL, parsed.Query().Get("v"), true
 }
 
-// IsYouTubeURL checks if a URL is a YouTube URL
-func IsYouTubeURL(url string) bool {
-	return strings.Contains(url, "youtube.com") || strings.Contains(url, "youtu.be")
+// IsYouTubeURL reports whether raw is one of the supported HTTPS YouTube URL
+// forms. It does not use substring matching, which previously allowed hosts
+// such as 127.0.0.1/youtube.com to reach yt-dlp.
+func IsYouTubeURL(raw string) bool {
+	_, _, err := ClassifyYouTubeURL(raw)
+	return err == nil
+}
+
+func isYouTubeHost(host string) bool {
+	switch host {
+	case "youtube.com", "www.youtube.com", "music.youtube.com", "youtu.be":
+		return true
+	default:
+		return false
+	}
+}
+
+func canonicalVideoURL(videoID string) string {
+	return "https://www.youtube.com/watch?v=" + url.QueryEscape(videoID)
+}
+
+func canonicalPlaylistURL(playlistID string) string {
+	return "https://www.youtube.com/playlist?list=" + url.QueryEscape(playlistID)
+}
+
+func isSafeYouTubeIdentifier(value string, maxLength int) bool {
+	if value == "" || len(value) > maxLength {
+		return false
+	}
+	for _, r := range value {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-' || r == '_' {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+// looksLikeURL prevents an unsupported explicit URL from becoming a YouTube
+// search query. Ordinary search phrases with punctuation remain valid.
+// IsURLLike reports whether raw is explicitly URL-shaped. It is used by the
+// command layer to reject unsupported URLs instead of treating them as a
+// YouTube search query.
+func IsURLLike(raw string) bool {
+	value := strings.TrimSpace(strings.ToLower(raw))
+	if value == "" {
+		return false
+	}
+	if strings.HasPrefix(value, "//") || strings.Contains(value, "://") {
+		return true
+	}
+	if strings.HasPrefix(value, "file:") || strings.HasPrefix(value, "spotify:") {
+		return true
+	}
+	for _, host := range []string{"youtube.com/", "www.youtube.com/", "music.youtube.com/", "youtu.be/", "www.spotify.com/", "open.spotify.com/"} {
+		if strings.HasPrefix(value, host) {
+			return true
+		}
+	}
+	return false
+}
+
+// isPublicHTTPURL is a defence-in-depth check for yt-dlp-generated stream
+// URLs. The extractor supplies these URLs, but accepting loopback or private
+// literal addresses would still make the media pipeline an SSRF hop.
+func isPublicHTTPURL(raw string) bool {
+	return sourceurl.IsPublicHTTPURL(raw)
 }

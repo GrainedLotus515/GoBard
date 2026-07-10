@@ -9,9 +9,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/bwmarrin/discordgo"
+
 	"github.com/GrainedLotus515/gobard/internal/cache"
 	"github.com/GrainedLotus515/gobard/internal/player"
-	"github.com/bwmarrin/discordgo"
 )
 
 func TestPlayLoopSeekReplaysCurrentTrackBeforeAdvancing(t *testing.T) {
@@ -116,7 +117,7 @@ func TestPlayLoopDefersCacheUntilPlaybackStarts(t *testing.T) {
 		case cacheCalled <- struct{}{}:
 		default:
 		}
-		return os.WriteFile(path, []byte("cached-audio"), 0o644)
+		return os.WriteFile(path, []byte("cached-audio"), 0o600)
 	}
 	b.waitForCompletionFn = func(gp *player.GuildPlayer) {
 		close(waitEntered)
@@ -153,6 +154,7 @@ func TestPlayLoopDefersCacheUntilPlaybackStarts(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("playLoop did not finish in time")
 	}
+	b.waitForBackgroundCacheTasks()
 }
 
 func TestPlayLoopSkipsDeferredCacheIfPlaybackEndsBeforeStart(t *testing.T) {
@@ -172,7 +174,7 @@ func TestPlayLoopSkipsDeferredCacheIfPlaybackEndsBeforeStart(t *testing.T) {
 	b.waitForPlaybackStartFn = func(*player.GuildPlayer) bool { return false }
 	b.cacheTrackFn = func(_ string, path string) error {
 		atomic.AddInt32(&cacheCalls, 1)
-		return os.WriteFile(path, []byte("cached-audio"), 0o644)
+		return os.WriteFile(path, []byte("cached-audio"), 0o600)
 	}
 	b.waitForCompletionFn = func(gp *player.GuildPlayer) {
 		gp.ClearVoiceConnection()
@@ -209,7 +211,7 @@ func TestPlayLoopCacheHitDoesNotStartBackgroundCache(t *testing.T) {
 	b.playTrackFn = func(*player.GuildPlayer) error { return nil }
 	b.cacheTrackFn = func(_ string, path string) error {
 		atomic.AddInt32(&cacheCalls, 1)
-		return os.WriteFile(path, []byte("cached-audio"), 0o644)
+		return os.WriteFile(path, []byte("cached-audio"), 0o600)
 	}
 	b.waitForCompletionFn = func(gp *player.GuildPlayer) {
 		gp.ClearVoiceConnection()
@@ -257,7 +259,7 @@ func TestPlayLoopRetryStartsDeferredCacheOnceAfterSuccessfulAttempt(t *testing.T
 		case cacheCalled <- struct{}{}:
 		default:
 		}
-		return os.WriteFile(path, []byte("cached-audio"), 0o644)
+		return os.WriteFile(path, []byte("cached-audio"), 0o600)
 	}
 	b.waitForCompletionFn = func(gp *player.GuildPlayer) {
 		gp.ClearVoiceConnection()
@@ -276,6 +278,7 @@ func TestPlayLoopRetryStartsDeferredCacheOnceAfterSuccessfulAttempt(t *testing.T
 	case <-time.After(2 * time.Second):
 		t.Fatal("playLoop did not finish in time")
 	}
+	b.waitForBackgroundCacheTasks()
 
 	if got := atomic.LoadInt32(&playCalls); got != 2 {
 		t.Fatalf("play attempts = %d, want 2", got)
@@ -286,10 +289,14 @@ func TestPlayLoopRetryStartsDeferredCacheOnceAfterSuccessfulAttempt(t *testing.T
 }
 
 func TestBackgroundCacheDownloadsAreGloballyThrottledAcrossGuilds(t *testing.T) {
+	backgroundCacheDownloadSlotsMu.Lock()
 	originalSlots := backgroundCacheDownloadSlots
 	backgroundCacheDownloadSlots = make(chan struct{}, 1)
+	backgroundCacheDownloadSlotsMu.Unlock()
 	t.Cleanup(func() {
+		backgroundCacheDownloadSlotsMu.Lock()
 		backgroundCacheDownloadSlots = originalSlots
+		backgroundCacheDownloadSlotsMu.Unlock()
 	})
 
 	cacheStore, err := cache.NewCache(t.TempDir(), 64*1024*1024)
@@ -328,7 +335,7 @@ func TestBackgroundCacheDownloadsAreGloballyThrottledAcrossGuilds(t *testing.T) 
 		if call == 1 {
 			<-releaseFirstDownload
 		}
-		return os.WriteFile(path, []byte("cached-audio"), 0o644)
+		return os.WriteFile(path, []byte("cached-audio"), 0o600)
 	}
 	b.waitForCompletionFn = func(gp *player.GuildPlayer) {
 		gp.ClearVoiceConnection()
@@ -367,6 +374,7 @@ func TestBackgroundCacheDownloadsAreGloballyThrottledAcrossGuilds(t *testing.T) 
 	case <-time.After(2 * time.Second):
 		t.Fatal("second playLoop did not finish in time")
 	}
+	b.waitForBackgroundCacheTasks()
 
 	if got := atomic.LoadInt32(&cacheCalls); got != 2 {
 		t.Fatalf("cache download calls = %d, want 2", got)
@@ -647,7 +655,7 @@ func seedCacheEntry(t *testing.T, c *cache.Cache, url string) {
 	t.Helper()
 	key := cache.GenerateKey(url)
 	_, err := c.GetOrCreate(key, func(path string) error {
-		return os.WriteFile(path, []byte("cached-audio"), 0o644)
+		return os.WriteFile(path, []byte("cached-audio"), 0o600)
 	})
 	if err != nil {
 		t.Fatalf("failed to seed cache for %q: %v", url, err)

@@ -179,8 +179,11 @@ func TestPlayTrackStopsBeforeSendingBufferedFrame(t *testing.T) {
 
 	p.playTrack(session, track, 0, &p.volumeAtomic)
 
-	if got := len(vc.frames); got != 1 {
-		t.Fatalf("sent frames = %d, want 1", got)
+	if got := len(vc.frames); got != 6 {
+		t.Fatalf("sent frames = %d, want 6 (1 data + 5 trailing silence)", got)
+	}
+	if !isSilenceFrame(vc.frames[5]) {
+		t.Fatalf("frame 5 should be a trailing silence frame, got %v", vc.frames[5])
 	}
 	if !encoder.cleaned {
 		t.Fatal("encoder Cleanup() was not called")
@@ -247,8 +250,11 @@ func TestPlayTrackPacesOpusFrames(t *testing.T) {
 
 	p.playTrack(session, track, 0, &p.volumeAtomic)
 
-	if got := len(vc.frames); got != 3 {
-		t.Fatalf("sent frames = %d, want 3", got)
+	if got := len(vc.frames); got != 8 {
+		t.Fatalf("sent frames = %d, want 8 (3 data + 5 trailing silence)", got)
+	}
+	if !isSilenceFrame(vc.frames[7]) {
+		t.Fatalf("frame 7 should be a trailing silence frame, got %v", vc.frames[7])
 	}
 	if !encoder.cleaned {
 		t.Fatal("encoder Cleanup() was not called")
@@ -259,9 +265,14 @@ func TestPlayTrackPacesOpusFrames(t *testing.T) {
 	sleepMu.Unlock()
 
 	wantSleeps := []time.Duration{
+		opusFrameInterval, // first frame is paced from the actual send boundary
 		opusFrameInterval - encoder.frameDelay,
 		opusFrameInterval - encoder.frameDelay,
-		opusFrameInterval - encoder.frameDelay,
+		opusFrameInterval, // trailing silence frame 1
+		opusFrameInterval, // trailing silence frame 2
+		opusFrameInterval, // trailing silence frame 3
+		opusFrameInterval, // trailing silence frame 4
+		opusFrameInterval, // trailing silence frame 5
 	}
 	if !reflect.DeepEqual(gotSleeps, wantSleeps) {
 		t.Fatalf("sleep durations = %v, want %v", gotSleeps, wantSleeps)
@@ -369,6 +380,175 @@ func TestPlaybackSignalsCloseDoneOnEncoderFailureWithoutStarted(t *testing.T) {
 		t.Fatal("started signal closed even though playback never began")
 	default:
 	}
+
+	result := p.LastPlaybackResult()
+	if result.Reason != PlaybackEndSourceFailure {
+		t.Fatalf("LastPlaybackResult().Reason = %q, want %q", result.Reason, PlaybackEndSourceFailure)
+	}
+	if result.Err == nil {
+		t.Fatalf("LastPlaybackResult().Err = %v, want encoder error", result.Err)
+	}
+	if result.Started {
+		t.Fatal("source failure before the first frame should not report Started")
+	}
+}
+
+func TestSkipReportsTypedResult(t *testing.T) {
+	originalNewCustomEncoder := newCustomEncoder
+	t.Cleanup(func() { newCustomEncoder = originalNewCustomEncoder })
+
+	encoder := newBlockingEncoder()
+	newCustomEncoder = func(string, int, int, time.Duration, *atomic.Int32) (EncoderInterface, error) {
+		return encoder, nil
+	}
+
+	p := NewManager().GetPlayer("guild-skip-result")
+	p.SetVoiceConnection(&stubVoiceConnection{})
+	current := &Track{Title: "current", LocalPath: "/tmp/current.opus"}
+	next := &Track{Title: "next", LocalPath: "/tmp/next.opus"}
+	p.Queue.Add(current)
+	p.Queue.Add(next)
+	if err := p.Play(); err != nil {
+		t.Fatalf("Play() error = %v", err)
+	}
+	select {
+	case <-encoder.ready:
+	case <-time.After(time.Second):
+		t.Fatal("encoder did not start")
+	}
+
+	if got := p.Skip(); got != next {
+		t.Fatalf("Skip() next = %p, want %p", got, next)
+	}
+	if !p.ConsumeSkipRequest() {
+		t.Fatal("ConsumeSkipRequest() = false, want true")
+	}
+	if p.ConsumeSkipRequest() {
+		t.Fatal("ConsumeSkipRequest() did not clear the request")
+	}
+
+	result := p.WaitForCompletionResult()
+	if result.Reason != PlaybackEndSkipped {
+		t.Fatalf("WaitForCompletionResult().Reason = %q, want %q", result.Reason, PlaybackEndSkipped)
+	}
+	if result.Err != nil {
+		t.Fatalf("skip result error = %v, want nil", result.Err)
+	}
+}
+
+func TestTransportSendFailureReportsTypedResult(t *testing.T) {
+	originalNewCustomEncoder := newCustomEncoder
+	originalSleepVoiceReady := sleepVoiceReady
+	t.Cleanup(func() {
+		newCustomEncoder = originalNewCustomEncoder
+		sleepVoiceReady = originalSleepVoiceReady
+	})
+
+	newCustomEncoder = func(string, int, int, time.Duration, *atomic.Int32) (EncoderInterface, error) {
+		return &stubEncoder{frames: [][]byte{[]byte("frame")}}, nil
+	}
+	sleepVoiceReady = func() {}
+
+	p := NewManager().GetPlayer("guild-transport-result")
+	p.SetVoiceConnection(&stubVoiceConnection{sendErr: errors.New("voice send failed")})
+	p.Queue.Add(&Track{Title: "transport", LocalPath: "/tmp/transport.opus"})
+	if err := p.Play(); err != nil {
+		t.Fatalf("Play() error = %v", err)
+	}
+
+	result := p.WaitForCompletionResult()
+	if result.Reason != PlaybackEndTransportFailure {
+		t.Fatalf("WaitForCompletionResult().Reason = %q, want %q", result.Reason, PlaybackEndTransportFailure)
+	}
+	if result.Err == nil || !result.Failed() {
+		t.Fatalf("transport result = %#v, want a failure with error", result)
+	}
+	if p.IsVoiceConnected() {
+		t.Fatal("voice connection remained marked connected after send failure")
+	}
+}
+
+func TestVoiceDuckingRetainsDesiredVolume(t *testing.T) {
+	p := NewManager().GetPlayer("guild-ducking")
+	p.Playing = true
+	p.ReduceOnVoice = true
+	p.ReduceOnVoiceTarget = 35
+	if err := p.SetVolume(80); err != nil {
+		t.Fatalf("SetVolume() error = %v", err)
+	}
+
+	p.SpeakerStarted("speaker")
+	if got := p.volumeAtomic.Load(); got != 35 {
+		t.Fatalf("ducked volume = %d, want 35", got)
+	}
+	if p.Volume != 80 {
+		t.Fatalf("desired volume = %d, want 80", p.Volume)
+	}
+
+	if err := p.SetVolume(60); err != nil {
+		t.Fatalf("SetVolume() while ducked error = %v", err)
+	}
+	if got := p.volumeAtomic.Load(); got != 35 {
+		t.Fatalf("ducked volume after SetVolume = %d, want 35", got)
+	}
+	p.SpeakerStopped("speaker")
+	if got := p.volumeAtomic.Load(); got != 60 {
+		t.Fatalf("restored volume = %d, want 60", got)
+	}
+
+	p.SpeakerStarted("speaker")
+	p.SetVoiceReductionEnabled(false)
+	if got := p.volumeAtomic.Load(); got != 60 {
+		t.Fatalf("volume after disabling ducking = %d, want 60", got)
+	}
+}
+
+func TestManagerPlaybackDefaultsApplyOnlyToNewPlayers(t *testing.T) {
+	manager := NewManagerWithDefaults(PlaybackDefaults{
+		Volume:              42,
+		ReduceOnVoice:       true,
+		ReduceOnVoiceTarget: 17,
+	})
+	first := manager.GetPlayer("first")
+	if first.Volume != 42 || !first.ReduceOnVoice || first.ReduceOnVoiceTarget != 17 {
+		t.Fatalf("first player defaults = (%d, %v, %d), want (42, true, 17)", first.Volume, first.ReduceOnVoice, first.ReduceOnVoiceTarget)
+	}
+
+	manager.SetPlaybackDefaults(PlaybackDefaults{Volume: 55, ReduceOnVoiceTarget: 25})
+	if first.Volume != 42 {
+		t.Fatalf("existing player volume = %d, want 42", first.Volume)
+	}
+	second := manager.GetPlayer("second")
+	if second.Volume != 55 || second.ReduceOnVoice || second.ReduceOnVoiceTarget != 25 {
+		t.Fatalf("second player defaults = (%d, %v, %d), want (55, false, 25)", second.Volume, second.ReduceOnVoice, second.ReduceOnVoiceTarget)
+	}
+}
+
+func TestDisconnectPreservesCurrentQueueEntryAndResetsPosition(t *testing.T) {
+	p := NewManager().GetPlayer("guild-disconnect-preserve")
+	p.SetVoiceConnection(&stubVoiceConnection{})
+	track := &Track{Title: "resume me", URL: "https://www.youtube.com/watch?v=abc123XYZ89"}
+	p.Queue.Add(track)
+	if selected := p.Queue.Next(); selected != track {
+		t.Fatalf("Queue.Next() = %p, want current track %p", selected, track)
+	}
+	p.CurrentPosition = 42 * time.Second
+
+	if err := p.Disconnect(); err != nil {
+		t.Fatalf("Disconnect() error = %v", err)
+	}
+	if p.IsVoiceConnected() {
+		t.Fatal("player remains voice-connected after Disconnect()")
+	}
+	if current := p.Queue.Current(); current != track {
+		t.Fatalf("Queue.Current() = %p, want preserved track %p", current, track)
+	}
+	if got := p.Queue.Length(); got != 1 {
+		t.Fatalf("Queue.Length() = %d, want 1", got)
+	}
+	if got := p.GetCurrentPosition(); got != 0 {
+		t.Fatalf("GetCurrentPosition() = %v, want restart at 0", got)
+	}
 }
 
 func TestPlayTrackFallsBackWhenPrefetchedStreamEndsBeforeFirstFrame(t *testing.T) {
@@ -405,7 +585,7 @@ func TestPlayTrackFallsBackWhenPrefetchedStreamEndsBeforeFirstFrame(t *testing.T
 			return secondEncoder, nil
 		default:
 			t.Fatalf("unexpected streaming encoder call %d", callCount)
-			return nil, nil
+			return nil, errors.New("unexpected streaming encoder call")
 		}
 	}
 	sleepVoiceReady = func() {}
@@ -436,8 +616,11 @@ func TestPlayTrackFallsBackWhenPrefetchedStreamEndsBeforeFirstFrame(t *testing.T
 	if callCount != 2 {
 		t.Fatalf("streaming encoder calls = %d, want 2", callCount)
 	}
-	if got := len(vc.frames); got != 1 {
-		t.Fatalf("sent frames = %d, want 1", got)
+	if got := len(vc.frames); got != 6 {
+		t.Fatalf("sent frames = %d, want 6 (1 data + 5 trailing silence)", got)
+	}
+	if !isSilenceFrame(vc.frames[5]) {
+		t.Fatalf("frame 5 should be a trailing silence frame, got %v", vc.frames[5])
 	}
 	if !firstEncoder.cleaned {
 		t.Fatal("prefetched stream encoder was not cleaned up before fallback")
@@ -561,16 +744,16 @@ func TestPlayTrackWaitsForVoiceReadyAfterEachTrack(t *testing.T) {
 	}
 
 	runPlayback("second")
-	if got := waitCalls.Load(); got != 2 {
-		t.Fatalf("voice ready waits after second playback on same connection = %d, want 2", got)
+	if got := waitCalls.Load(); got != 1 {
+		t.Fatalf("voice ready waits after second playback on same connection = %d, want 1", got)
 	}
 
 	p.ClearVoiceConnection()
 	p.SetVoiceConnection(&stubVoiceConnection{})
 
 	runPlayback("third")
-	if got := waitCalls.Load(); got != 3 {
-		t.Fatalf("voice ready waits after reconnect playback = %d, want 3", got)
+	if got := waitCalls.Load(); got != 2 {
+		t.Fatalf("voice ready waits after reconnect playback = %d, want 2", got)
 	}
 }
 
@@ -718,6 +901,7 @@ type stubVoiceConnection struct {
 	speaking    []bool
 	disconnects int
 	sendHook    func(frame []byte, sendCount int)
+	sendErr     error
 	mu          sync.Mutex
 }
 
@@ -735,7 +919,7 @@ func (c *stubVoiceConnection) SendOpusFrame(frame []byte) error {
 	if c.sendHook != nil {
 		c.sendHook(frame, len(c.frames))
 	}
-	return nil
+	return c.sendErr
 }
 
 func (c *stubVoiceConnection) Disconnect(context.Context) error {
@@ -743,4 +927,8 @@ func (c *stubVoiceConnection) Disconnect(context.Context) error {
 	defer c.mu.Unlock()
 	c.disconnects++
 	return nil
+}
+
+func isSilenceFrame(frame []byte) bool {
+	return len(frame) == len(silenceFrame) && frame[0] == silenceFrame[0] && frame[1] == silenceFrame[1] && frame[2] == silenceFrame[2]
 }

@@ -58,15 +58,16 @@ func (t *Trace) StartedAt() time.Time {
 
 // Step logs a trace step with elapsed time when debug mode is enabled.
 func (t *Trace) Step(msg string, keyvals ...any) {
-	if t == nil || !debugMode {
+	if t == nil || !debugMode.Load() {
 		return
 	}
 
-	attrs := []any{
+	attrs := make([]any, 0, 6+len(keyvals))
+	attrs = append(attrs,
 		"trace_id", t.id,
 		"operation", t.operation,
 		"elapsed_ms", time.Since(t.startedAt).Milliseconds(),
-	}
+	)
 	attrs = append(attrs, keyvals...)
 	Logger.Debug(msg, attrs...)
 }

@@ -90,9 +90,18 @@ func TestBuildQueueCardPaginatesAndDisablesButtons(t *testing.T) {
 	if len(components) != 1 {
 		t.Fatalf("len(components) = %d, want 1", len(components))
 	}
-	row := components[0].(discordgo.ActionsRow)
-	prev := row.Components[0].(discordgo.Button)
-	next := row.Components[1].(discordgo.Button)
+	row, ok := components[0].(discordgo.ActionsRow)
+	if !ok {
+		t.Fatalf("components[0] type = %T, want discordgo.ActionsRow", components[0])
+	}
+	prev, ok := row.Components[0].(discordgo.Button)
+	if !ok {
+		t.Fatalf("row.Components[0] type = %T, want discordgo.Button", row.Components[0])
+	}
+	next, ok := row.Components[1].(discordgo.Button)
+	if !ok {
+		t.Fatalf("row.Components[1] type = %T, want discordgo.Button", row.Components[1])
+	}
 	if !prev.Disabled {
 		t.Fatalf("prev.Disabled = false, want true")
 	}

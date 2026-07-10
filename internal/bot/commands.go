@@ -1,133 +1,22 @@
 package bot
 
 import (
-	"context"
+	"errors"
 	"fmt"
-	"strings"
+	"net"
 	"sync"
+	"time"
+
+	"github.com/bwmarrin/discordgo"
 
 	"github.com/GrainedLotus515/gobard/internal/logger"
-	"github.com/bwmarrin/discordgo"
-	"golang.org/x/time/rate"
 )
 
-// Discord API rate limits:
-// - Global: 50 requests/second
-// - Application Commands: 200 requests/minute
-// We use 10 requests/second to stay well within limits
 const (
-	requestsPerSecond = 10
-	burstSize         = 5
+	commandRegistrationAttempts = 3
+	commandRegistrationBackoff  = time.Second
+	commandRegistrationWorkers  = 4
 )
-
-// CommandRegistrar handles parallel command registration with rate limiting
-type CommandRegistrar struct {
-	bot         *Bot
-	rateLimiter *rate.Limiter
-	errors      []error
-	errorMutex  sync.Mutex
-}
-
-// NewCommandRegistrar creates a new command registrar with rate limiting
-func NewCommandRegistrar(bot *Bot) *CommandRegistrar {
-	return &CommandRegistrar{
-		bot:         bot,
-		rateLimiter: rate.NewLimiter(rate.Limit(requestsPerSecond), burstSize),
-		errors:      make([]error, 0),
-	}
-}
-
-// addError adds an error to the error list in a thread-safe manner
-func (cr *CommandRegistrar) addError(err error) {
-	cr.errorMutex.Lock()
-	defer cr.errorMutex.Unlock()
-	cr.errors = append(cr.errors, err)
-}
-
-// getAggregatedError returns an aggregated error if any errors occurred
-func (cr *CommandRegistrar) getAggregatedError() error {
-	cr.errorMutex.Lock()
-	defer cr.errorMutex.Unlock()
-
-	if len(cr.errors) == 0 {
-		return nil
-	}
-
-	var errMsg strings.Builder
-	errMsg.WriteString(fmt.Sprintf("%d command registration errors:\n", len(cr.errors)))
-	for i, err := range cr.errors {
-		errMsg.WriteString(fmt.Sprintf("  %d. %v\n", i+1, err))
-	}
-
-	return fmt.Errorf("%s", errMsg.String())
-}
-
-// registerGlobally registers commands globally using parallel goroutines
-func (cr *CommandRegistrar) registerGlobally(commands []*discordgo.ApplicationCommand) error {
-	var wg sync.WaitGroup
-
-	for _, cmd := range commands {
-		wg.Add(1)
-		go func(c *discordgo.ApplicationCommand) {
-			defer wg.Done()
-
-			// Wait for rate limiter
-			if err := cr.rateLimiter.Wait(context.Background()); err != nil {
-				cr.addError(fmt.Errorf("rate limiter error for command %s: %w", c.Name, err))
-				return
-			}
-
-			// Register command
-			_, err := cr.bot.Session.ApplicationCommandCreate(
-				cr.bot.Session.State.User.ID, "", c)
-			if err != nil {
-				cr.addError(fmt.Errorf("failed to create command %s: %w", c.Name, err))
-			} else {
-				logger.Debug("Registered command globally", "command", c.Name)
-			}
-		}(cmd)
-	}
-
-	wg.Wait()
-	return cr.getAggregatedError()
-}
-
-// registerPerGuild registers commands for each guild using parallel goroutines
-func (cr *CommandRegistrar) registerPerGuild(commands []*discordgo.ApplicationCommand) error {
-	var wg sync.WaitGroup
-	guilds := cr.bot.Session.State.Guilds
-
-	logger.Info("Found guilds for registration", "count", len(guilds))
-
-	for _, guild := range guilds {
-		for _, cmd := range commands {
-			wg.Add(1)
-			go func(guildID string, guildName string, c *discordgo.ApplicationCommand) {
-				defer wg.Done()
-
-				// Wait for rate limiter
-				if err := cr.rateLimiter.Wait(context.Background()); err != nil {
-					cr.addError(fmt.Errorf("rate limiter error for command %s in guild %s (%s): %w",
-						c.Name, guildName, guildID, err))
-					return
-				}
-
-				// Register command
-				_, err := cr.bot.Session.ApplicationCommandCreate(
-					cr.bot.Session.State.User.ID, guildID, c)
-				if err != nil {
-					cr.addError(fmt.Errorf("failed to create command %s in guild %s (%s): %w",
-						c.Name, guildName, guildID, err))
-				} else {
-					logger.Debug("Registered command for guild", "command", c.Name, "guild", guildName)
-				}
-			}(guild.ID, guild.Name, cmd)
-		}
-	}
-
-	wg.Wait()
-	return cr.getAggregatedError()
-}
 
 // registerCommands registers all slash commands
 func (b *Bot) registerCommands() error {
@@ -294,20 +183,24 @@ func (b *Bot) registerCommands() error {
 	}
 
 	b.Commands = commands
+	contexts := []discordgo.InteractionContextType{discordgo.InteractionContextGuild}
+	for _, command := range commands {
+		command.Contexts = &contexts
+	}
 
-	// Create command registrar with rate limiting
-	registrar := NewCommandRegistrar(b)
+	if b.Session == nil || b.Session.State == nil || b.Session.State.User == nil {
+		return fmt.Errorf("cannot register commands before Discord identifies the bot user")
+	}
+	applicationID := b.Session.State.User.ID
 
 	if b.Config.RegisterGlobally {
-		// Register globally using parallel goroutines
-		logger.Info("📝 Registering commands globally (parallel)...")
-		if err := registrar.registerGlobally(commands); err != nil {
+		logger.Info("📝 Reconciling global commands")
+		if err := b.bulkOverwriteCommands(applicationID, "", commands); err != nil {
 			return err
 		}
 	} else {
-		// Register for each guild using parallel goroutines
-		logger.Info("📝 Registering commands per guild (parallel)...")
-		if err := registrar.registerPerGuild(commands); err != nil {
+		logger.Info("📝 Reconciling commands per guild", "count", len(b.Session.State.Guilds))
+		if err := b.bulkOverwriteGuildCommands(applicationID, commands); err != nil {
 			return err
 		}
 	}
@@ -316,64 +209,140 @@ func (b *Bot) registerCommands() error {
 	return nil
 }
 
+func (b *Bot) bulkOverwriteGuildCommands(applicationID string, commands []*discordgo.ApplicationCommand) error {
+	guilds := append([]*discordgo.Guild(nil), b.Session.State.Guilds...)
+	if len(guilds) == 0 {
+		return nil
+	}
+
+	errCh := make(chan error, len(guilds))
+	workers := make(chan struct{}, commandRegistrationWorkers)
+	var wg sync.WaitGroup
+	for _, guild := range guilds {
+		if guild == nil || guild.ID == "" {
+			continue
+		}
+		wg.Add(1)
+		go func(guildID, guildName string) {
+			defer wg.Done()
+			workers <- struct{}{}
+			defer func() { <-workers }()
+			if err := b.bulkOverwriteCommands(applicationID, guildID, commands); err != nil {
+				errCh <- fmt.Errorf("reconcile commands for guild %s (%s): %w", guildName, guildID, err)
+			}
+		}(guild.ID, guild.Name)
+	}
+	wg.Wait()
+	close(errCh)
+
+	var errs []error
+	for err := range errCh {
+		errs = append(errs, err)
+	}
+	return errors.Join(errs...)
+}
+
+func (b *Bot) bulkOverwriteCommands(applicationID, guildID string, commands []*discordgo.ApplicationCommand) error {
+	var lastErr error
+	for attempt := 0; attempt < commandRegistrationAttempts; attempt++ {
+		if b.commandBulkOverwriteFn != nil {
+			_, lastErr = b.commandBulkOverwriteFn(applicationID, guildID, commands)
+		} else {
+			_, lastErr = b.Session.ApplicationCommandBulkOverwrite(applicationID, guildID, commands)
+		}
+		if lastErr == nil {
+			logger.Debug("Commands reconciled", "guild", guildID, "count", len(commands))
+			return nil
+		}
+		if !isTransientCommandRegistrationError(lastErr) || attempt == commandRegistrationAttempts-1 {
+			break
+		}
+		time.Sleep(commandRegistrationBackoff * time.Duration(1<<attempt))
+	}
+	return lastErr
+}
+
+func isTransientCommandRegistrationError(err error) bool {
+	var restErr *discordgo.RESTError
+	if errors.As(err, &restErr) && restErr.Response != nil {
+		return restErr.Response.StatusCode == 429 || restErr.Response.StatusCode >= 500
+	}
+	var networkErr net.Error
+	return errors.As(err, &networkErr) && networkErr.Timeout()
+}
+
 // interactionCreate handles slash command interactions
 func (b *Bot) interactionCreate(s *discordgo.Session, i *discordgo.InteractionCreate) {
+	if i == nil || i.Interaction == nil {
+		logger.Warn("Ignoring malformed interaction")
+		return
+	}
+	if err := requireGuildMemberInteraction(i); err != nil {
+		b.respondError(s, i, err)
+		return
+	}
+
 	switch i.Type {
 	case discordgo.InteractionApplicationCommand:
-		data := i.ApplicationCommandData()
-
-		var err error
-		switch data.Name {
-		case "play":
-			err = b.handlePlay(s, i)
-		case "pause":
-			err = b.handlePause(s, i)
-		case "resume":
-			err = b.handleResume(s, i)
-		case "skip":
-			err = b.handleSkip(s, i)
-		case "stop":
-			err = b.handleStop(s, i)
-		case "queue":
-			err = b.handleQueue(s, i)
-		case "now-playing":
-			err = b.handleNowPlaying(s, i)
-		case "clear":
-			err = b.handleClear(s, i)
-		case "disconnect":
-			err = b.handleDisconnect(s, i)
-		case "shuffle":
-			err = b.handleShuffle(s, i)
-		case "loop":
-			err = b.handleLoop(s, i)
-		case "volume":
-			err = b.handleVolume(s, i)
-		case "seek":
-			err = b.handleSeek(s, i)
-		case "fseek":
-			err = b.handleFSeek(s, i)
-		case "move":
-			err = b.handleMove(s, i)
-		case "remove":
-			err = b.handleRemove(s, i)
-		case "config":
-			err = b.handleConfig(s, i)
-		default:
-			err = fmt.Errorf("unknown command")
-		}
-
-		if err != nil {
-			b.respondError(s, i, err)
-		}
+		b.handleApplicationCommand(s, i)
 
 	case discordgo.InteractionMessageComponent:
 		b.handleMessageComponent(s, i)
 	}
 }
 
+type applicationCommandHandler func(*discordgo.Session, *discordgo.InteractionCreate) error
+
+func noErrorCommandHandler(handler func(*discordgo.Session, *discordgo.InteractionCreate)) applicationCommandHandler {
+	return func(s *discordgo.Session, i *discordgo.InteractionCreate) error {
+		handler(s, i)
+		return nil
+	}
+}
+
+func (b *Bot) handleApplicationCommand(s *discordgo.Session, i *discordgo.InteractionCreate) {
+	data := i.ApplicationCommandData()
+	if err := b.authorizeApplicationCommand(i, data.Name); err != nil {
+		b.respondError(s, i, err)
+		return
+	}
+
+	handlers := map[string]applicationCommandHandler{
+		"play":        b.handlePlay,
+		"pause":       noErrorCommandHandler(b.handlePause),
+		"resume":      noErrorCommandHandler(b.handleResume),
+		"skip":        noErrorCommandHandler(b.handleSkip),
+		"stop":        noErrorCommandHandler(b.handleStop),
+		"queue":       noErrorCommandHandler(b.handleQueue),
+		"now-playing": noErrorCommandHandler(b.handleNowPlaying),
+		"clear":       noErrorCommandHandler(b.handleClear),
+		"disconnect":  noErrorCommandHandler(b.handleDisconnect),
+		"shuffle":     b.handleShuffle,
+		"loop":        noErrorCommandHandler(b.handleLoop),
+		"volume":      b.handleVolume,
+		"seek":        b.handleSeek,
+		"fseek":       b.handleFSeek,
+		"move":        b.handleMove,
+		"remove":      b.handleRemove,
+		"config":      b.handleConfig,
+	}
+	handler, ok := handlers[data.Name]
+	if !ok {
+		b.respondError(s, i, fmt.Errorf("unknown command"))
+		return
+	}
+	if err := handler(s, i); err != nil {
+		b.respondError(s, i, err)
+	}
+}
+
 // respondError sends an error response
 func (b *Bot) respondError(s *discordgo.Session, i *discordgo.InteractionCreate, err error) {
-	s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+	if s == nil || i == nil || i.Interaction == nil {
+		logger.Error("Unable to respond to interaction error", "err", err)
+		return
+	}
+	responseErr := s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
 		Type: discordgo.InteractionResponseChannelMessageWithSource,
 		Data: &discordgo.InteractionResponseData{
 			Embeds: []*discordgo.MessageEmbed{
@@ -383,7 +352,67 @@ func (b *Bot) respondError(s *discordgo.Session, i *discordgo.InteractionCreate,
 					Color:       0xDC2626,
 				},
 			},
-			Flags: discordgo.MessageFlagsEphemeral,
+			Flags:           discordgo.MessageFlagsEphemeral,
+			AllowedMentions: noAllowedMentions(),
 		},
 	})
+	if responseErr != nil {
+		logger.Error("Failed to respond to interaction error", "err", responseErr, "command_err", err)
+	}
+}
+
+func requireGuildMemberInteraction(i *discordgo.InteractionCreate) error {
+	if i == nil || i.Interaction == nil || i.GuildID == "" || i.Member == nil || i.Member.User == nil || i.Member.User.ID == "" {
+		return fmt.Errorf("this command can only be used in a server")
+	}
+	return nil
+}
+
+func interactionUserID(i *discordgo.InteractionCreate) (string, error) {
+	if err := requireGuildMemberInteraction(i); err != nil {
+		return "", err
+	}
+	return i.Member.User.ID, nil
+}
+
+func (b *Bot) authorizeApplicationCommand(i *discordgo.InteractionCreate, command string) error {
+	userID, err := interactionUserID(i)
+	if err != nil {
+		return err
+	}
+
+	switch command {
+	case "queue", "now-playing":
+		return nil
+	case "play":
+		// handlePlay checks the caller's current voice channel before it does
+		// any expensive work. There may not yet be a bot voice channel here.
+		return nil
+	case "config":
+		options := i.ApplicationCommandData().Options
+		if len(options) > 0 && options[0].Name == "show" {
+			return nil
+		}
+		if !hasManageGuildPermission(i.Member) {
+			return fmt.Errorf("you need Manage Server permission to change bot configuration")
+		}
+		if b.PlayerManager == nil {
+			return fmt.Errorf("playback is unavailable")
+		}
+		if b.PlayerManager.GetPlayer(i.GuildID).IsVoiceConnected() {
+			return b.requirePlaybackControlAccess(i.GuildID, userID)
+		}
+		return nil
+	case "pause", "resume", "skip", "stop", "clear", "disconnect", "shuffle", "loop", "volume", "seek", "fseek", "move", "remove":
+		return b.requirePlaybackControlAccess(i.GuildID, userID)
+	default:
+		return nil
+	}
+}
+
+func hasManageGuildPermission(member *discordgo.Member) bool {
+	if member == nil {
+		return false
+	}
+	return member.Permissions&discordgo.PermissionAdministrator != 0 || member.Permissions&discordgo.PermissionManageGuild != 0
 }
