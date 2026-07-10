@@ -1,20 +1,35 @@
-# Large local/runtime artifacts
+# Secrets, VCS metadata, and local agent/editor state must never enter an
+# image build context. Keep source, tests, scripts, and .golangci.yml so the
+# test and lint stages remain self-contained.
+.env
+.env.*
+!.env.example
+.git/
+.gitea/
+.github/
+.agents/
+.codex/
+.claude/
+.idea/
+.vscode/
+
+# Large local/runtime artifacts.
 cache/
 gobard
 coverage.out
 *.log
+*.tmp
+tmp/
 
-# Secrets and local environment
-.env
-
-# VCS and CI metadata
-.git/
-.gitea/
-.github/
-
-# Local agent metadata
-.claude/
-
-# Non-runtime documentation/planning files
+# Files not needed by any Docker stage.
 docs/
 plans/
+README.md
+DEVELOPMENT.md
+CONTRIBUTING.md
+AGENTS.md
+CLAUDE.md
+LICENSE
+docker-compose*.yml
+Makefile
+.DS_Store

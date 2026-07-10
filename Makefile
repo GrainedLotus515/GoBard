@@ -1,72 +1,46 @@
-.PHONY: build run clean test docker-build docker-run help
+.PHONY: help docker-test docker-lint docker-build docker-run docker-run-secrets docker-prod-run docker-prod-run-secrets docker-stop docker-logs docker-smoke clean
 
-# Binary name
-BINARY_NAME=gobard
-DOCKER_IMAGE=gobard
-
-# Go parameters
-GOCMD=go
-GOBUILD=$(GOCMD) build
-GOCLEAN=$(GOCMD) clean
-GOTEST=$(GOCMD) test
-GOGET=$(GOCMD) get
-GOMOD=$(GOCMD) mod
-
-LOCAL_PKG_CONFIG=$(HOME)/.local/lib/pkgconfig
-LOCAL_LIB_DIR=$(HOME)/.local/lib
-export PKG_CONFIG_PATH=$(LOCAL_PKG_CONFIG):$(PKG_CONFIG_PATH)
-export LD_LIBRARY_PATH=$(LOCAL_LIB_DIR):$(LD_LIBRARY_PATH)
+DOCKER ?= docker
+COMPOSE ?= $(DOCKER) compose
+DOCKER_IMAGE ?= gobard:local
+LOCAL_COMPOSE = -f docker-compose.yml -f docker-compose.local.yml
 
 help: ## Show this help message
 	@echo 'Usage: make [target]'
 	@echo ''
-	@echo 'Available targets:'
-	@awk 'BEGIN {FS = ":.*?## "} /^[a-zA-Z_-]+:.*?## / {printf "  %-15s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
+	@echo 'Docker is the supported build and test environment because it includes libdave.'
+	@echo ''
+	@awk 'BEGIN {FS = ":.*?## "} /^[a-zA-Z_-]+:.*?## / {printf "  %-18s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
 
-build: ## Build the binary
-	$(GOBUILD) -o $(BINARY_NAME) ./cmd/gobard
+docker-test: ## Run the race-enabled Go test stage in Docker
+	$(DOCKER) build --target test --progress=plain .
 
-run: ## Run the application
-	$(GOCMD) run ./cmd/gobard
+docker-lint: ## Run read-only formatting and vet checks in Docker
+	$(DOCKER) build --target lint --progress=plain .
 
-clean: ## Remove binary and cache
-	$(GOCLEAN)
-	rm -f $(BINARY_NAME)
-	rm -rf cache/
+docker-build: ## Build the hardened linux/amd64 runtime image locally
+	$(DOCKER) build --target runtime --platform linux/amd64 -t $(DOCKER_IMAGE) .
 
-test: ## Run tests
-	$(GOTEST) -v ./...
+docker-run: ## Build the checkout and start it with the local Compose override
+	$(COMPOSE) $(LOCAL_COMPOSE) up -d --build
 
-deps: ## Download dependencies
-	$(GOMOD) download
-	$(GOMOD) tidy
+docker-run-secrets: ## Start the checkout using DISCORD_TOKEN_FILE_HOST and a Compose secret
+	$(COMPOSE) $(LOCAL_COMPOSE) -f docker-compose.secrets.yml up -d --build
 
-fmt: ## Format code
-	$(GOCMD) fmt ./...
+docker-prod-run: ## Start the configured GHCR image without building locally
+	$(COMPOSE) up -d
 
-vet: ## Run go vet
-	$(GOCMD) vet ./...
+docker-prod-run-secrets: ## Start the GHCR image using DISCORD_TOKEN_FILE_HOST and a Compose secret
+	$(COMPOSE) -f docker-compose.yml -f docker-compose.secrets.yml up -d
 
-lint: fmt vet ## Run linters
+docker-stop: ## Stop the local Compose stack without deleting the cache
+	$(COMPOSE) $(LOCAL_COMPOSE) down
 
-docker-build: ## Build Docker image
-	docker build -t $(DOCKER_IMAGE) .
+docker-logs: ## Follow local Compose logs
+	$(COMPOSE) $(LOCAL_COMPOSE) logs -f
 
-docker-run: ## Run Docker container
-	docker-compose up -d
+docker-smoke: docker-build ## Verify the final image's runtime tools and permissions
+	$(DOCKER) run --rm --read-only --tmpfs /tmp:rw,noexec,nosuid,size=128m --entrypoint /bin/sh $(DOCKER_IMAGE) -ec 'command -v ffmpeg; command -v yt-dlp; test -x /app/gobard; test ! -w /app/gobard; ! command -v curl; ! command -v pgrep; ldd /app/gobard | grep -q libdave'
 
-docker-stop: ## Stop Docker container
-	docker-compose down
-
-docker-logs: ## Show Docker logs
-	docker-compose logs -f
-
-install-tools: ## Install development tools
-	@echo "Installing yt-dlp..."
-	@command -v yt-dlp >/dev/null 2>&1 || pip3 install yt-dlp
-	@echo "Checking FFmpeg..."
-	@command -v ffmpeg >/dev/null 2>&1 || echo "Please install FFmpeg manually"
-	@echo "Installing libdave..."
-	@sh ./scripts/install-libdave.sh
-
-all: clean deps lint build ## Clean, download deps, lint, and build
+clean: ## Remove Go build cache only; never delete the persisted audio cache
+	@echo 'No project files were removed. Docker build caches are managed by Docker; ./cache is intentionally preserved.'

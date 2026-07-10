@@ -1,0 +1,12 @@
+# Local-development override. Keep docker-compose.yml pointed at the immutable
+# GHCR distribution image; use this file explicitly when building the checkout.
+services:
+  cache-init:
+    image: gobard:local
+    build:
+      context: .
+
+  gobard:
+    image: gobard:local
+    build:
+      context: .

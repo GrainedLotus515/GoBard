@@ -1,26 +1,49 @@
 services:
+  # Docker creates a root-owned bind-mount directory when ./cache does not
+  # exist. This one-shot service fixes only the mount point, never recursively
+  # changes the ownership of an existing cache.
+  cache-init:
+    image: ${GOBARD_IMAGE:-ghcr.io/grainedlotus515/gobard:latest}
+    user: "0:0"
+    read_only: true
+    entrypoint: ["/bin/sh", "-ec"]
+    command: "mkdir -p /app/cache && chown 1000:1000 /app/cache"
+    volumes:
+      - ./cache:/app/cache
+    restart: "no"
+
   gobard:
-    build: .
+    image: ${GOBARD_IMAGE:-ghcr.io/grainedlotus515/gobard:latest}
     container_name: gobard
     init: true
     restart: unless-stopped
+    depends_on:
+      cache-init:
+        condition: service_completed_successfully
     env_file:
       - .env
-    volumes:
-      # Mount cache directory to persist downloaded music
-      - ./cache:/app/cache
-    # No ports needed for Discord bot
     environment:
-      # Override cache directory to use mounted volume
-      - CACHE_DIR=/app/cache
-      # Enable debug logging with ms timestamps and startup tracing
-      - DEBUG=true
+      CACHE_DIR: /app/cache
+      HEALTH_LISTEN_ADDR: ${HEALTH_LISTEN_ADDR:-127.0.0.1:8080}
+    volumes:
+      - ./cache:/app/cache
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=${GOBARD_TMPFS_SIZE:-128m}
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: ${GOBARD_MEMORY_LIMIT:-1g}
+    cpus: ${GOBARD_CPUS:-2.0}
+    pids_limit: ${GOBARD_PIDS_LIMIT:-256}
+    stop_grace_period: 30s
     healthcheck:
-      test: ["CMD", "pgrep", "gobard"]
+      test: ["CMD-SHELL", "exec /app/gobard healthcheck --url \"http://$${HEALTH_LISTEN_ADDR}/ready\""]
       interval: 30s
-      timeout: 10s
+      timeout: 5s
       retries: 3
-      start_period: 10s
+      start_period: 20s
     logging:
       driver: json-file
       options:
