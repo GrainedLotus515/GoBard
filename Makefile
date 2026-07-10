@@ -40,7 +40,7 @@ docker-logs: ## Follow local Compose logs
 	$(COMPOSE) $(LOCAL_COMPOSE) logs -f
 
 docker-smoke: docker-build ## Verify the final image's runtime tools and permissions
-	$(DOCKER) run --rm --read-only --tmpfs /tmp:rw,noexec,nosuid,size=128m --entrypoint /bin/sh $(DOCKER_IMAGE) -ec 'command -v ffmpeg; command -v yt-dlp; test -x /app/gobard; test ! -w /app/gobard; ! command -v curl; ! command -v pgrep; ldd /app/gobard | grep -q libdave'
+	$(DOCKER) run --rm --read-only --tmpfs /tmp:rw,noexec,nosuid,size=128m --entrypoint /bin/sh $(DOCKER_IMAGE) -ec 'command -v ffmpeg; command -v yt-dlp; yt-dlp --version >/dev/null; test -x /app/gobard; test ! -w /app/gobard; ! command -v curl; ! command -v pgrep; ldd /app/gobard | grep -q libdave'
 
 clean: ## Remove Go build cache only; never delete the persisted audio cache
 	@echo 'No project files were removed. Docker build caches are managed by Docker; ./cache is intentionally preserved.'

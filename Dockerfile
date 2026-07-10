@@ -83,17 +83,18 @@ RUN set -eux; \
 	install -m 0555 "/tmp/golangci-lint-${GOLANGCI_LINT_VERSION}-linux-amd64/golangci-lint" /usr/local/bin/golangci-lint; \
 	rm -rf /tmp/golangci-lint.tar.gz "/tmp/golangci-lint-${GOLANGCI_LINT_VERSION}-linux-amd64"
 
-# Fetch the extractor in a curl-equipped build stage. The runtime image stays
-# smaller and does not retain a network transfer client solely for updates.
+# Fetch the portable Python zipapp in a curl-equipped build stage. Do not use
+# the PyInstaller yt-dlp_linux asset: it extracts shared libraries to /tmp and
+# cannot run with the production noexec tmpfs hardening.
 FROM build-base AS ytdlp
 
 ARG YTDLP_VERSION=2026.07.04
-ARG YTDLP_SHA256=6bbb3d314cde4febe36e5fa1d55462e29c974f63444e707871834f6d8cc210ae
+ARG YTDLP_SHA256=495be29ff4d9d4e9be7eabdfef225221e5d5282e77f2f505abc6dca80349f3fd
 
 RUN set -eux; \
 	install -d /out; \
 	curl --fail --location --silent --show-error \
-		"https://github.com/yt-dlp/yt-dlp/releases/download/${YTDLP_VERSION}/yt-dlp_linux" \
+		"https://github.com/yt-dlp/yt-dlp/releases/download/${YTDLP_VERSION}/yt-dlp" \
 		-o /out/yt-dlp; \
 	echo "${YTDLP_SHA256}  /out/yt-dlp" | sha256sum --check --status; \
 	chmod 0555 /out/yt-dlp
@@ -121,7 +122,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 	ffmpeg \
 	libopus0 \
 	libopusfile0 \
-	libsodium23 && \
+	libsodium23 \
+	python3 && \
 	rm -rf /var/lib/apt/lists/*
 
 RUN groupadd --gid 1000 gobard && \

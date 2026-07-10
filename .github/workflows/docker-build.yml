@@ -63,6 +63,15 @@ jobs:
             --label "org.opencontainers.image.revision=$GITHUB_SHA" \
             .
 
+      - name: Verify runtime tools under production filesystem hardening
+        run: |
+          docker run --rm \
+            --read-only \
+            --tmpfs /tmp:rw,noexec,nosuid,size=128m \
+            --entrypoint /bin/sh \
+            "$LOCAL_IMAGE" \
+            -ec 'command -v ffmpeg; command -v yt-dlp; yt-dlp --version >/dev/null; test -x /app/gobard; test ! -w /app/gobard; ! command -v curl; ! command -v pgrep; ldd /app/gobard | grep -q libdave'
+
       - name: Scan the local image for fixed high and critical findings
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
