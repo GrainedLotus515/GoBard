@@ -2,9 +2,11 @@ package player
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
+	"reflect"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -13,6 +15,12 @@ import (
 	"github.com/GrainedLotus515/gobard/internal/logger"
 	"github.com/GrainedLotus515/gobard/internal/voiceconn"
 )
+
+// ErrSelectedTrackChanged means a queue control action replaced the selected
+// entry before a playback session could be committed.
+var ErrSelectedTrackChanged = errors.New("selected track changed before playback start")
+
+var playSelectedBeforeCommit = func() {}
 
 const opusFrameInterval = 20 * time.Millisecond
 
@@ -29,15 +37,17 @@ const encodedFrameBufferCapacity = 5
 var silenceFrame = []byte{0xF8, 0xFF, 0xFE}
 
 var (
-	newCustomEncoder = func(inputPath string, sampleRate, channels int, startOffset time.Duration, vol *atomic.Int32) (EncoderInterface, error) {
+	defaultNewCustomEncoder = func(inputPath string, sampleRate, channels int, startOffset time.Duration, vol *atomic.Int32) (EncoderInterface, error) {
 		return NewCustomEncoder(inputPath, sampleRate, channels, startOffset, vol)
 	}
-	newStreamingEncoder = func(url, streamURL string, streamHeaders map[string]string, sampleRate, channels int, startOffset time.Duration, vol *atomic.Int32) (EncoderInterface, error) {
+	newCustomEncoder           = defaultNewCustomEncoder
+	defaultNewStreamingEncoder = func(url, streamURL string, streamHeaders map[string]string, sampleRate, channels int, startOffset time.Duration, vol *atomic.Int32) (EncoderInterface, error) {
 		return NewStreamingEncoder(url, streamURL, streamHeaders, sampleRate, channels, startOffset, vol)
 	}
-	nowOpusFrame    = time.Now
-	sleepOpusFrame  = time.Sleep
-	sleepVoiceReady = func() {
+	newStreamingEncoder = defaultNewStreamingEncoder
+	nowOpusFrame        = time.Now
+	sleepOpusFrame      = time.Sleep
+	sleepVoiceReady     = func() {
 		time.Sleep(200 * time.Millisecond)
 	}
 	debugPlaybackOnce    sync.Once
@@ -46,7 +56,7 @@ var (
 
 // EncoderInterface defines the interface for audio encoders
 type EncoderInterface interface {
-	OpusFrame() ([]byte, error)
+	OpusFrame() (EncodedFrame, error)
 	Cleanup() error
 }
 
@@ -98,6 +108,8 @@ func isDebugPlaybackEnabled() bool {
 }
 
 type playbackSession struct {
+	ctx     context.Context
+	cancel  context.CancelFunc
 	stop    chan struct{}
 	started chan struct{}
 	done    chan struct{}
@@ -111,10 +123,14 @@ type playbackSession struct {
 	startedPlayback bool
 	result          PlaybackResult
 	resultSet       bool
+	track           *Track
 }
 
 func newPlaybackSession() *playbackSession {
+	ctx, cancel := context.WithCancel(context.Background())
 	return &playbackSession{
+		ctx:     ctx,
+		cancel:  cancel,
 		stop:    make(chan struct{}),
 		started: make(chan struct{}),
 		done:    make(chan struct{}),
@@ -123,9 +139,29 @@ func newPlaybackSession() *playbackSession {
 
 func (s *playbackSession) stopPlayback(reason PlaybackEndReason) {
 	s.setResultIfUnset(PlaybackResult{Reason: reason})
+	s.cancel()
 	s.stopOnce.Do(func() {
 		close(s.stop)
 	})
+}
+
+// newSessionCustomEncoder preserves the existing test seam while production
+// uses the session-owned context all the way to FFmpeg creation.
+func newSessionCustomEncoder(ctx context.Context, inputPath string, sampleRate, channels int, startOffset time.Duration, vol *atomic.Int32) (EncoderInterface, error) {
+	if reflect.ValueOf(newCustomEncoder).Pointer() != reflect.ValueOf(defaultNewCustomEncoder).Pointer() {
+		return newCustomEncoder(inputPath, sampleRate, channels, startOffset, vol)
+	}
+	return NewCustomEncoderContext(ctx, inputPath, sampleRate, channels, startOffset, vol)
+}
+
+// newSessionStreamingEncoder preserves the existing test seam while
+// cancellation is propagated to yt-dlp capacity acquisition and both children
+// in normal operation.
+func newSessionStreamingEncoder(ctx context.Context, url, streamURL string, streamHeaders map[string]string, sampleRate, channels int, startOffset time.Duration, vol *atomic.Int32) (EncoderInterface, error) {
+	if reflect.ValueOf(newStreamingEncoder).Pointer() != reflect.ValueOf(defaultNewStreamingEncoder).Pointer() {
+		return newStreamingEncoder(url, streamURL, streamHeaders, sampleRate, channels, startOffset, vol)
+	}
+	return NewStreamingEncoderContext(ctx, url, streamURL, streamHeaders, sampleRate, channels, startOffset, vol)
 }
 
 func (s *playbackSession) signalStarted() {
@@ -167,6 +203,9 @@ func (s *playbackSession) resultSnapshot() PlaybackResult {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	result := s.result
+	if result.Track == nil {
+		result.Track = s.track
+	}
 	result.Started = result.Started || s.startedPlayback
 	return result
 }
@@ -372,33 +411,63 @@ func (m *Manager) StopAll() {
 
 // Play starts playing the current track
 func (p *GuildPlayer) Play() error {
+	_, err := p.PlaySelected(nil)
+	return err
+}
+
+// PlaySelected atomically commits a session only if expected is still the
+// queue's current entry.  It closes the final check/start race so background
+// cache and prefetch work can be tied to the actual session target.
+func (p *GuildPlayer) PlaySelected(expected *Track) (*Track, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
 	if p.VoiceConnection == nil {
-		return fmt.Errorf("not connected to voice channel")
+		return nil, fmt.Errorf("not connected to voice channel")
 	}
 
-	if p.Paused {
+	if p.Paused && p.activePlayback != nil {
+		if expected != nil && !p.Queue.IsCurrent(expected) {
+			return nil, ErrSelectedTrackChanged
+		}
 		p.Paused = false
 		p.Playing = true
 		p.playbackStartedAt = time.Now()
 		p.volumeAtomic.Store(volumeToInt32(p.effectiveVolumeLocked()))
-		return nil
+		return expected, nil
 	}
 
 	if p.activePlayback != nil {
-		return fmt.Errorf("playback session already active")
+		return nil, fmt.Errorf("playback session already active")
 	}
 
 	track := p.Queue.Current()
 	if track == nil {
 		track = p.Queue.Next()
 		if track == nil {
-			return fmt.Errorf("no tracks in queue")
+			return nil, fmt.Errorf("no tracks in queue")
 		}
 	}
+	if expected != nil {
+		if track != expected {
+			return nil, ErrSelectedTrackChanged
+		}
+		committed := p.Queue.CommitExpectedCurrent(expected, func(current *Track) {
+			playSelectedBeforeCommit()
+			p.commitPlaybackLocked(current)
+		})
+		if !committed {
+			return nil, ErrSelectedTrackChanged
+		}
+		return expected, nil
+	}
+	p.commitPlaybackLocked(track)
+	return track, nil
+}
 
+// commitPlaybackLocked creates a session while p.mu and (for expected starts)
+// Queue's mutex are held. It must not call Queue methods.
+func (p *GuildPlayer) commitPlaybackLocked(track *Track) {
 	p.Playing = true
 	p.Paused = false
 	startOffset := p.requestedStartOffset
@@ -408,13 +477,12 @@ func (p *GuildPlayer) Play() error {
 	p.volumeAtomic.Store(volumeToInt32(p.effectiveVolumeLocked()))
 
 	session := newPlaybackSession()
+	session.track = track
 	p.activePlayback = session
 	p.lastPlayback = session
 
 	vol := &p.volumeAtomic
 	go p.playTrack(session, track, startOffset, vol)
-
-	return nil
 }
 
 // playTrack handles the actual playback of a track.
@@ -435,6 +503,8 @@ func (p *GuildPlayer) playTrack(session *playbackSession, track *Track, startOff
 		frameCount           int
 		playbackPath         string
 		prefetchedStreamUsed bool
+		firstFrame           EncodedFrame
+		firstFrameHeld       bool
 		endReason            = PlaybackEndCompleted
 		endErr               error
 	)
@@ -447,6 +517,9 @@ func (p *GuildPlayer) playTrack(session *playbackSession, track *Track, startOff
 	}
 
 	defer func() {
+		if firstFrameHeld {
+			firstFrame.Release()
+		}
 		// Do not try to write trailing silence after a transport loss. Besides
 		// being pointless, it can delay recovery by another 100ms.
 		result := session.resultSnapshot()
@@ -533,7 +606,7 @@ func (p *GuildPlayer) playTrack(session *playbackSession, track *Track, startOff
 		if startupTrace != nil {
 			startupTrace.Step("Creating file encoder", "source", track.LocalPath)
 		}
-		encoder, err = newCustomEncoder(track.LocalPath, 48000, 2, startOffset, vol)
+		encoder, err = newSessionCustomEncoder(session.ctx, track.LocalPath, 48000, 2, startOffset, vol)
 	} else {
 		playbackPath = "ytdlp_fallback"
 		logger.Info("Streaming from YouTube source", "video_id", track.ID)
@@ -555,7 +628,7 @@ func (p *GuildPlayer) playTrack(session *playbackSession, track *Track, startOff
 		if startupTrace != nil && !prefetchedStreamUsed {
 			startupTrace.Step("Creating yt-dlp fallback stream encoder", "video_id", track.ID)
 		}
-		encoder, err = newStreamingEncoder(track.URL, streamURL, streamHeaders, 48000, 2, startOffset, vol)
+		encoder, err = newSessionStreamingEncoder(session.ctx, track.URL, streamURL, streamHeaders, 48000, 2, startOffset, vol)
 	}
 
 	if err != nil {
@@ -588,7 +661,7 @@ func (p *GuildPlayer) playTrack(session *playbackSession, track *Track, startOff
 		startupTrace.Step("Encoder created", "prefetched_stream_used", prefetchedStreamUsed)
 	}
 
-	firstFrame, err := encoder.OpusFrame()
+	firstFrame, err = encoder.OpusFrame()
 	if err != nil && prefetchedStreamUsed && !session.isStopped() {
 		logger.Warn("Prefetched stream failed before first frame, retrying with yt-dlp", "title", track.Title, "err", err)
 		if startupTrace != nil {
@@ -599,7 +672,7 @@ func (p *GuildPlayer) playTrack(session *playbackSession, track *Track, startOff
 		track.ClearPrefetchedStream()
 		playbackPath = "ytdlp_fallback"
 
-		encoder, err = newStreamingEncoder(track.URL, "", nil, 48000, 2, startOffset, vol)
+		encoder, err = newSessionStreamingEncoder(session.ctx, track.URL, "", nil, 48000, 2, startOffset, vol)
 		if err != nil {
 			endReason = PlaybackEndSourceFailure
 			endErr = err
@@ -652,6 +725,7 @@ func (p *GuildPlayer) playTrack(session *playbackSession, track *Track, startOff
 		}
 		return
 	}
+	firstFrameHeld = true
 	if startupTrace != nil {
 		startupTrace.Step("First opus frame ready")
 	}
@@ -689,6 +763,11 @@ func (p *GuildPlayer) playTrack(session *playbackSession, track *Track, startOff
 	// Start pacing just before the first network send. Encoder startup and the
 	// one-time voice-ready wait must not make the first frame deadline stale.
 	nextFrameDeadline := nowOpusFrame()
+	pauseTimer := time.NewTimer(time.Hour)
+	if !pauseTimer.Stop() {
+		<-pauseTimer.C
+	}
+	defer pauseTimer.Stop()
 
 	for {
 		p.mu.RLock()
@@ -696,11 +775,12 @@ func (p *GuildPlayer) playTrack(session *playbackSession, track *Track, startOff
 		p.mu.RUnlock()
 
 		if paused {
+			pauseTimer.Reset(100 * time.Millisecond)
 			select {
 			case <-session.stop:
 				logger.PlaybackStopped(frameCount)
 				return
-			case <-time.After(100 * time.Millisecond):
+			case <-pauseTimer.C:
 			}
 			continue
 		}
@@ -738,13 +818,21 @@ func (p *GuildPlayer) playTrack(session *playbackSession, track *Track, startOff
 		}
 
 		if session.isStopped() {
+			frame.Release()
+			if frameCount == 0 {
+				firstFrameHeld = false
+			}
 			logger.PlaybackStopped(frameCount)
 			return
 		}
 
 		if debugPlayback {
 			sendStartedAt := time.Now()
-			if err := vc.SendOpusFrame(frame); err != nil {
+			if err := vc.SendOpusFrame(frame.Data); err != nil {
+				frame.Release()
+				if frameCount == 0 {
+					firstFrameHeld = false
+				}
 				logger.Error("Failed sending opus frame", "err", err)
 				endReason = PlaybackEndTransportFailure
 				endErr = fmt.Errorf("failed sending opus frame: %w", err)
@@ -759,7 +847,11 @@ func (p *GuildPlayer) playTrack(session *playbackSession, track *Track, startOff
 				)
 			}
 		} else {
-			if err := vc.SendOpusFrame(frame); err != nil {
+			if err := vc.SendOpusFrame(frame.Data); err != nil {
+				frame.Release()
+				if frameCount == 0 {
+					firstFrameHeld = false
+				}
 				logger.Error("Failed sending opus frame", "err", err)
 				endReason = PlaybackEndTransportFailure
 				endErr = fmt.Errorf("failed sending opus frame: %w", err)
@@ -767,12 +859,18 @@ func (p *GuildPlayer) playTrack(session *playbackSession, track *Track, startOff
 				return
 			}
 		}
+		frame.Release()
+		if frameCount == 0 {
+			firstFrameHeld = false
+		}
 		if startupTrace != nil && !firstFrameSentLogged {
 			startupTrace.Finish("First frame sent")
 			firstFrameSentLogged = true
 		}
 
-		session.signalStarted()
+		if frameCount == 0 {
+			session.signalStarted()
+		}
 		frameCount++
 		if debugPlayback && bufferReporter != nil && frameCount%500 == 0 {
 			buffered, capacity := bufferReporter.BufferLevel()
@@ -873,6 +971,13 @@ func (p *GuildPlayer) PlaybackSignals() (<-chan struct{}, <-chan struct{}) {
 func (p *GuildPlayer) Pause() {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	// A queue entry may be selected while metadata or a cache probe is still
+	// running, but it is not an active playback session yet.  Pausing that
+	// preparation used to make Play take the resume branch and silently strand
+	// the selected track without a session or completion signal.
+	if p.activePlayback == nil {
+		return
+	}
 
 	p.CurrentPosition = p.currentPositionLocked()
 	p.playbackStartedAt = time.Time{}
@@ -916,8 +1021,13 @@ func (p *GuildPlayer) Skip() *Track {
 
 	if session != nil {
 		session.stopAndCleanup(PlaybackEndSkipped)
+		return p.Queue.Peek()
 	}
-	return p.Queue.Peek()
+
+	// If preparation has selected a current entry but no session exists yet,
+	// consume it immediately.  The play loop revalidates identity before it can
+	// start stale preparation work or invoke Play.
+	return p.Queue.TryAdvanceBypassingLoop()
 }
 
 // Seek seeks to a position in the current track
@@ -936,10 +1046,12 @@ func (p *GuildPlayer) Seek(position time.Duration) error {
 	}
 
 	p.CurrentPosition = position
-	p.seekRequested = true
+	session := p.stopPlaybackLocked(false)
+	// A selected but not-yet-active track must retain the requested offset, but
+	// must not emit a seek transition later: there is no session to restart.
+	p.seekRequested = session != nil
 	p.skipRequested = false
 	p.requestedStartOffset = position
-	session := p.stopPlaybackLocked(false)
 	p.CurrentPosition = position
 	p.mu.Unlock()
 

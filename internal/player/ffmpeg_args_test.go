@@ -9,7 +9,7 @@ import (
 func TestBuildFileFFmpegArgsIncludesSeekOffset(t *testing.T) {
 	args := buildFileFFmpegArgs("input.webm", 48000, 2, 90*time.Second+1500*time.Millisecond)
 
-	wantPrefix := []string{"-ss", "00:01:31.500", "-i", "input.webm"}
+	wantPrefix := []string{"-ss", "00:01:31.500", "-threads", "1", "-filter_threads", "1", "-i", "input.webm"}
 	if len(args) < len(wantPrefix) || !slices.Equal(args[:len(wantPrefix)], wantPrefix) {
 		t.Fatalf("buildFileFFmpegArgs() prefix = %v, want prefix %v", args, wantPrefix)
 	}
@@ -17,8 +17,23 @@ func TestBuildFileFFmpegArgsIncludesSeekOffset(t *testing.T) {
 
 func TestBuildFileFFmpegArgsWithoutSeekOffset(t *testing.T) {
 	args := buildFileFFmpegArgs("input.webm", 48000, 2, 0)
-	if len(args) == 0 || args[0] != "-i" {
-		t.Fatalf("buildFileFFmpegArgs() first arg = %q, want -i", firstArg(args))
+	if !containsSubsequence(args, []string{"-threads", "1", "-filter_threads", "1", "-i", "input.webm"}) {
+		t.Fatalf("buildFileFFmpegArgs() args = %v, want bounded threads before input", args)
+	}
+}
+
+func TestEveryFFmpegPipelineBoundsDecoderAndFilterThreads(t *testing.T) {
+	threadBounds := []string{"-threads", "1", "-filter_threads", "1"}
+	for name, args := range map[string][]string{
+		"file":      buildFileFFmpegArgs("input.webm", 48000, 2, 0),
+		"streaming": buildStreamingFFmpegArgs(48000, 2, 0),
+		"direct":    buildDirectStreamingFFmpegArgs("https://media.example/audio.webm", nil, 48000, 2, 0),
+	} {
+		t.Run(name, func(t *testing.T) {
+			if !containsSubsequence(args, threadBounds) {
+				t.Fatalf("FFmpeg args = %v, want thread bounds %v", args, threadBounds)
+			}
+		})
 	}
 }
 
@@ -96,11 +111,4 @@ func containsSubsequence(haystack, needle []string) bool {
 		}
 	}
 	return false
-}
-
-func firstArg(args []string) string {
-	if len(args) == 0 {
-		return ""
-	}
-	return args[0]
 }

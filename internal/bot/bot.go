@@ -58,9 +58,13 @@ type Bot struct {
 	hydrateStreamInfoFn       func(*player.Track) error
 	waitForPlaybackStartFn    func(*player.GuildPlayer) bool
 	getVideoInfoFn            func(string) (*player.Track, error)
+	prefetchVideoInfoFn       func(context.Context, string) (*player.Track, error)
 	interactionResponseEditFn func(*discordgo.Interaction, *discordgo.WebhookEdit) (*discordgo.Message, error)
 	channelMessageSendFn      func(string, string) (*discordgo.Message, error)
 	commandBulkOverwriteFn    func(string, string, []*discordgo.ApplicationCommand) ([]*discordgo.ApplicationCommand, error)
+	joinVoiceChannelContextFn func(context.Context, string, string) (voiceconn.Connection, error)
+	getVoiceChannelFn         func(string, string) (string, error)
+	deferInteractionFn        func(*discordgo.Session, *discordgo.InteractionCreate) error
 	nowFn                     func() time.Time
 }
 
@@ -481,6 +485,9 @@ func (b *Bot) voiceSpeakingUpdate(guildID, userID string, speaking bool) {
 
 // GetVoiceChannel gets the voice channel a user is in
 func (b *Bot) GetVoiceChannel(guildID, userID string) (string, error) {
+	if b != nil && b.getVoiceChannelFn != nil {
+		return b.getVoiceChannelFn(guildID, userID)
+	}
 	if b == nil || b.Session == nil || b.Session.State == nil {
 		return "", fmt.Errorf("discord session state is not available")
 	}
@@ -517,6 +524,15 @@ func (b *Bot) guildJoinLock(guildID string) *sync.Mutex {
 
 // JoinVoiceChannel joins a voice channel
 func (b *Bot) JoinVoiceChannel(guildID, channelID string) (voiceconn.Connection, error) {
+	return b.JoinVoiceChannelContext(context.Background(), guildID, channelID)
+}
+
+// JoinVoiceChannelContext bounds a voice join by both the Discord timeout and
+// the playback/bot lifecycle that requested it.
+func (b *Bot) JoinVoiceChannelContext(parent context.Context, guildID, channelID string) (voiceconn.Connection, error) {
+	if b.joinVoiceChannelContextFn != nil {
+		return b.joinVoiceChannelContextFn(parent, guildID, channelID)
+	}
 	// Join voice channel: mute=false, deaf=true
 	// Voice ducking uses Voice Gateway opcode-5 speaking events, not guild
 	// mute/deaf state changes. Deafening avoids receiving unprocessed audio
@@ -525,7 +541,10 @@ func (b *Bot) JoinVoiceChannel(guildID, channelID string) (voiceconn.Connection,
 		return nil, fmt.Errorf("voice manager is not initialized")
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	if parent == nil {
+		parent = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(parent, 10*time.Second)
 	defer cancel()
 
 	b.expectBotVoiceSession(guildID, channelID)
@@ -542,7 +561,13 @@ func (b *Bot) JoinVoiceChannel(guildID, channelID string) (voiceconn.Connection,
 
 // rejoinVoiceChannel finds the bot's current voice channel from Discord state
 // and rejoins it.  Used to recover from voice gateway disconnects (e.g. 4006).
+//
+//nolint:unused // Retained as the context-free compatibility entry point.
 func (b *Bot) rejoinVoiceChannel(guildID string) (voiceconn.Connection, error) {
+	return b.rejoinVoiceChannelContext(context.Background(), guildID)
+}
+
+func (b *Bot) rejoinVoiceChannelContext(ctx context.Context, guildID string) (voiceconn.Connection, error) {
 	if b.Session == nil || b.Session.State == nil || b.Session.State.User == nil {
 		return nil, fmt.Errorf("discord session is not available")
 	}
@@ -550,14 +575,28 @@ func (b *Bot) rejoinVoiceChannel(guildID string) (voiceconn.Connection, error) {
 	if err != nil {
 		return nil, fmt.Errorf("could not determine voice channel to rejoin: %w", err)
 	}
-	return b.JoinVoiceChannel(guildID, channelID)
+	return b.JoinVoiceChannelContext(ctx, guildID, channelID)
 }
 
+//nolint:unused // Retained as the context-free compatibility entry point.
 func (b *Bot) playTrackForGuild(p *player.GuildPlayer) error {
 	if b.playTrackFn != nil {
 		return b.playTrackFn(p)
 	}
 	return p.Play()
+}
+
+func (b *Bot) playSelectedTrackForGuild(p *player.GuildPlayer, expected *player.Track) (*player.Track, error) {
+	if b.playTrackFn != nil {
+		if err := b.playTrackFn(p); err != nil {
+			return nil, err
+		}
+		if !p.Queue.IsCurrent(expected) {
+			return nil, player.ErrSelectedTrackChanged
+		}
+		return expected, nil
+	}
+	return p.PlaySelected(expected)
 }
 
 func (b *Bot) waitForTrackResult(p *player.GuildPlayer) player.PlaybackResult {
@@ -697,6 +736,7 @@ func webhookEditForEmbedComponents(embed *discordgo.MessageEmbed, components []d
 	}
 }
 
+//nolint:unused // Retained as the context-free compatibility entry point.
 func (b *Bot) getVideoInfo(url string) (*player.Track, error) {
 	return b.getVideoInfoContext(context.Background(), url)
 }
@@ -711,6 +751,16 @@ func (b *Bot) getVideoInfoContext(ctx context.Context, url string) (*player.Trac
 	return b.YouTube.GetVideoInfoContext(ctx, url)
 }
 
+func (b *Bot) prefetchVideoInfoContext(ctx context.Context, url string) (*player.Track, error) {
+	if b.prefetchVideoInfoFn != nil {
+		return b.prefetchVideoInfoFn(ctx, url)
+	}
+	if b.YouTube == nil {
+		return nil, fmt.Errorf("youtube client is not initialized")
+	}
+	return b.YouTube.PrefetchVideoInfoContext(ctx, url)
+}
+
 // startPlaybackLoop enrolls each guild loop in Bot.Stop's shutdown barrier.
 // A loop may only be started while the bot is accepting asynchronous work.
 func (b *Bot) startPlaybackLoop(guildID, channelID string) {
@@ -722,7 +772,7 @@ func (b *Bot) startPlaybackLoop(guildID, channelID string) {
 	}
 	go func() {
 		defer b.asyncWorkWG.Done()
-		b.playLoop(guildID, channelID)
+		b.playLoopContext(b.asyncContext(), guildID, channelID)
 	}()
 }
 
@@ -881,6 +931,7 @@ func buildHydratedFastURLTrack(placeholder *player.Track, refreshed *player.Trac
 
 	replacement := *placeholder
 	replacement.MetadataPending = false
+	replacement.Resolution = nil
 
 	if refreshed == nil {
 		return &replacement
@@ -917,6 +968,9 @@ func (b *Bot) hydrateFastURLTrackAsync(traceID string, placeholder *player.Track
 		return
 	}
 	if !b.beginAsyncWork() {
+		if placeholder.Resolution != nil {
+			placeholder.Resolution.Complete(nil, context.Canceled)
+		}
 		return
 	}
 	ctx := b.asyncContext()
@@ -927,7 +981,29 @@ func (b *Bot) hydrateFastURLTrackAsync(traceID string, placeholder *player.Track
 
 		refreshed, err := b.getVideoInfoContext(ctx, placeholder.URL)
 		if err != nil {
+			if placeholder.Resolution != nil {
+				placeholder.Resolution.Complete(nil, err)
+			}
 			logger.Warn("Background URL metadata hydration failed", "trace_id", traceID, "url", placeholder.URL, "err", err)
+			// The initial deferred response says that playback is starting. Keep
+			// the pending response for a later terminal failure, but immediately
+			// make the intermediate state truthful: the queue is now using the
+			// validated yt-dlp fallback rather than hydrated direct metadata.
+			if pending, ok := b.getPendingInteractionResponse(traceID); ok && ctx.Err() == nil {
+				guildPlayer := b.PlayerManager.GetPlayer(pending.GuildID)
+				embed, components := b.buildPlaybackCard(
+					placeholder,
+					guildPlayer.Queue.Length(),
+					false,
+					guildPlayer.Queue.IsLoopEnabled(),
+					"Status",
+					"Starting with stream fallback",
+					pending.Mode == pendingInteractionModeStartingPlayback,
+				)
+				if editErr := b.editInteractionResponse(pending.Interaction, webhookEditForEmbedComponents(embed, components)); editErr != nil {
+					logger.Warn("Failed to update interaction response after metadata fallback", "trace_id", traceID, "err", editErr)
+				}
+			}
 			return
 		}
 
@@ -941,14 +1017,18 @@ func (b *Bot) hydrateFastURLTrackAsync(traceID string, placeholder *player.Track
 		)
 
 		pending, ok := b.getPendingInteractionResponse(traceID)
-		if !ok {
-			return
+		if ok {
+			guildPlayer := b.PlayerManager.GetPlayer(pending.GuildID)
+			if !guildPlayer.Queue.ReplaceTrack(placeholder, replacement) {
+				logger.Info("Skipping response update because track is no longer queued", "trace_id", traceID, "mode", pending.Mode)
+				b.removePendingInteractionResponse(traceID)
+				ok = false
+			}
 		}
-
-		guildPlayer := b.PlayerManager.GetPlayer(pending.GuildID)
-		if !guildPlayer.Queue.ReplaceTrack(placeholder, replacement) {
-			logger.Info("Skipping response update because track is no longer queued", "trace_id", traceID, "mode", pending.Mode)
-			b.removePendingInteractionResponse(traceID)
+		if placeholder.Resolution != nil {
+			placeholder.Resolution.Complete(replacement, nil)
+		}
+		if !ok {
 			return
 		}
 
@@ -1064,12 +1144,20 @@ func (b *Bot) shouldSkipStreamMetadataRefresh(track *player.Track, now time.Time
 	return age <= recentStreamMetadataSkipWindow, age
 }
 
+//nolint:unused // Retained as the context-free compatibility entry point.
 func (b *Bot) hydrateTrackStreamInfo(track *player.Track) error {
+	return b.hydrateTrackStreamInfoContext(context.Background(), track)
+}
+
+func (b *Bot) hydrateTrackStreamInfoContext(ctx context.Context, track *player.Track) error {
+	if track == nil {
+		return fmt.Errorf("track is required")
+	}
 	if b.hydrateStreamInfoFn != nil {
 		return b.hydrateStreamInfoFn(track)
 	}
 
-	refreshed, err := b.getVideoInfo(track.URL)
+	refreshed, err := b.getVideoInfoContext(ctx, track.URL)
 	if err != nil {
 		return err
 	}
@@ -1096,7 +1184,12 @@ func (b *Bot) hydrateTrackStreamInfo(track *player.Track) error {
 	return nil
 }
 
+//nolint:unused // Retained as the context-free compatibility entry point.
 func (b *Bot) waitForPlaybackStart(p *player.GuildPlayer, started <-chan struct{}, done <-chan struct{}) bool {
+	return b.waitForPlaybackStartContext(context.Background(), p, started, done)
+}
+
+func (b *Bot) waitForPlaybackStartContext(ctx context.Context, p *player.GuildPlayer, started <-chan struct{}, done <-chan struct{}) bool {
 	if b.waitForPlaybackStartFn != nil {
 		return b.waitForPlaybackStartFn(p)
 	}
@@ -1105,6 +1198,8 @@ func (b *Bot) waitForPlaybackStart(p *player.GuildPlayer, started <-chan struct{
 	case <-started:
 		return true
 	case <-done:
+		return false
+	case <-ctx.Done():
 		return false
 	}
 }

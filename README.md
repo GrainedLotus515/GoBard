@@ -15,6 +15,7 @@ cp .env.example .env
 chmod 600 .env
 # Set DISCORD_TOKEN in .env.
 # This pulls the image, initializes ./cache, and then starts GoBard.
+export GOBARD_IMAGE=ghcr.io/grainedlotus515/gobard@sha256:<published-digest>
 docker compose up -d
 ```
 
@@ -96,6 +97,27 @@ Compose hardening defaults can be changed without editing the file:
 
 The bot container has a read-only root filesystem, no Linux capabilities, `no-new-privileges`, and a bounded `noexec,nosuid` `/tmp`. It writes persistent audio only to the cache mount.
 
+### Capacity profiles
+
+The base Compose file is the conservative small profile, not a hard playback limit. Capacity is measured in simultaneous guild playback sessions; adding listeners to one voice channel does not create another FFmpeg or Opus pipeline.
+
+| Profile | CPU | Memory | yt-dlp | Cache | Minimum validation target |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Small | 2 vCPU | 1 GiB | 4 | 2 GiB | 4 simultaneous guilds |
+| Medium | 4 vCPU | 2 GiB | 8 | 10 GiB | 12 simultaneous guilds |
+| Large | 8 vCPU | 4 GiB | 12 | 25 GiB | 24 simultaneous guilds |
+
+Use the same published image with a sizing override:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.medium.yml up -d
+docker compose -f docker-compose.yml -f docker-compose.large.yml up -d
+```
+
+For a local checkout, use `make docker-run-medium` or `make docker-run-large`. The existing `GOBARD_CPUS`, `GOBARD_MEMORY_LIMIT`, and `GOBARD_PIDS_LIMIT` variables still override a profile. `GOBARD_PROFILE_YTDLP_MAX_CONCURRENCY` and `GOBARD_PROFILE_CACHE_LIMIT` override its media-process and cache defaults.
+
+The target is a minimum tested capacity, not a coded ceiling: additional guilds are admitted while resources remain healthy. Optimization is preferred over increasing these profile resources; a missed target is reported rather than silently raising its CPU or memory allocation.
+
 ## Commands and access
 
 Commands are guild-only. `/play` accepts a search query or an exact HTTPS YouTube URL (`youtube.com`, `www.youtube.com`, `music.youtube.com`, or `youtu.be`); other URLs are rejected.
@@ -113,7 +135,18 @@ make docker-test    # Go tests with -race
 make docker-lint    # gofmt check, vet, golangci-lint
 make docker-build   # hardened runtime image
 make docker-smoke   # final-image tools and permission checks
+make docker-bench   # microbenchmarks + three 15-minute capacity profiles
+make docker-profile-check # rendered capacity-profile validation
 make docker-run     # checkout + docker-compose.local.yml
 ```
+
+The capacity run uses real Opus encoding, deterministic media, a fake voice
+sink, stubbed classified yt-dlp pressure, and concurrent queue/cache activity.
+It runs small, medium, and large containers with their actual CPU, memory, and
+PID limits and prints one JSON metrics report per profile. For a quick harness
+check, use `GOBARD_BENCH_DURATION=10s make docker-bench`. Optional
+`GOBARD_BENCH_BASELINE_SMALL_MS`, `GOBARD_BENCH_BASELINE_MEDIUM_MS`, and
+`GOBARD_BENCH_BASELINE_LARGE_MS` values enforce the 10% first-frame regression
+budget against a captured pre-change baseline.
 
 `docker-compose.yml` is the production-image definition. `docker-compose.local.yml` is an explicit override for building this checkout. See [DEVELOPMENT.md](DEVELOPMENT.md) and [CONTRIBUTING.md](CONTRIBUTING.md) for contributor workflow and CI details.

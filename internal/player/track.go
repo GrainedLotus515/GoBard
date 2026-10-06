@@ -1,10 +1,15 @@
 package player
 
 import (
+	"context"
+	"errors"
 	"math/rand"
 	"sync"
 	"time"
 )
+
+// ErrTrackResolutionUnavailable means no resolution future was attached.
+var ErrTrackResolutionUnavailable = errors.New("track resolution is unavailable")
 
 // TrackSource represents where the track came from
 type TrackSource string
@@ -36,6 +41,56 @@ type Track struct {
 	MetadataFetchedAt       time.Time // When stream metadata was last resolved
 	DirectStreamUnavailable bool      // Whether the last stream metadata resolution found no direct stream URL
 	MetadataPending         bool      // Whether title/artist/duration/thumbnail are placeholder values awaiting hydration
+	Resolution              *TrackResolution
+}
+
+// TrackResolution is a single-assignment future shared by queue hydration and
+// playback startup. Attaching it before queue admission lets both consumers
+// wait for one yt-dlp metadata process without racing over Track fields.
+type TrackResolution struct {
+	done chan struct{}
+	once sync.Once
+
+	mu    sync.RWMutex
+	track *Track
+	err   error
+}
+
+// NewTrackResolution creates an unresolved track future.
+func NewTrackResolution() *TrackResolution {
+	return &TrackResolution{done: make(chan struct{})}
+}
+
+// Complete publishes the immutable result exactly once.
+func (r *TrackResolution) Complete(track *Track, err error) {
+	if r == nil {
+		return
+	}
+	r.once.Do(func() {
+		r.mu.Lock()
+		r.track = track
+		r.err = err
+		r.mu.Unlock()
+		close(r.done)
+	})
+}
+
+// Wait returns the completed result or the caller's cancellation error.
+func (r *TrackResolution) Wait(ctx context.Context) (*Track, error) {
+	if r == nil {
+		return nil, ErrTrackResolutionUnavailable
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	select {
+	case <-r.done:
+		r.mu.RLock()
+		defer r.mu.RUnlock()
+		return r.track, r.err
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
 }
 
 const prefetchedStreamSafetyMargin = 2 * time.Minute
@@ -246,6 +301,33 @@ func (q *Queue) Current() *Track {
 	return q.Tracks[q.CurrentIndex]
 }
 
+// IsCurrent reports whether target is still the selected entry.  Playback
+// preparation calls this after every blocking operation so removal/skip cannot
+// let a stale local pointer start, cache, or prefetch on behalf of a newer
+// queue selection.
+func (q *Queue) IsCurrent(target *Track) bool {
+	q.mu.RLock()
+	defer q.mu.RUnlock()
+	return target != nil && !q.currentRemoved && q.CurrentIndex >= 0 && q.CurrentIndex < len(q.Tracks) && q.Tracks[q.CurrentIndex] == target
+}
+
+// CommitExpectedCurrent retains the queue lock while validating expected and
+// committing associated player state. The callback must not call Queue methods.
+// GuildPlayer holds its mutex before calling this method, establishing the
+// single p.mu -> q.mu order used for session creation.
+func (q *Queue) CommitExpectedCurrent(expected *Track, commit func(*Track)) bool {
+	if expected == nil || commit == nil {
+		return false
+	}
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if q.currentRemoved || q.CurrentIndex < 0 || q.CurrentIndex >= len(q.Tracks) || q.Tracks[q.CurrentIndex] != expected {
+		return false
+	}
+	commit(expected)
+	return true
+}
+
 // HasPendingCurrentRemoval reports whether the active track was removed and
 // the next transition must select its immediate successor. It is primarily
 // useful to playback controllers deciding how to handle a stopped session.
@@ -321,6 +403,31 @@ func (q *Queue) ReplaceTrack(target *Track, replacement *Track) bool {
 			q.Tracks[idx] = replacement
 			return true
 		}
+	}
+
+	return false
+}
+
+// ReplaceUpcomingTrack swaps a track only while it remains after the current
+// playback cursor. Speculative metadata work uses this to avoid taking
+// ownership after playback has already selected the track.
+func (q *Queue) ReplaceUpcomingTrack(target *Track, replacement *Track) bool {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+
+	if target == nil || replacement == nil {
+		return false
+	}
+
+	for idx, track := range q.Tracks {
+		if track != target {
+			continue
+		}
+		if q.currentRemoved || idx <= q.CurrentIndex {
+			return false
+		}
+		q.Tracks[idx] = replacement
+		return true
 	}
 
 	return false
@@ -432,12 +539,14 @@ func (q *Queue) ShuffleUpcoming() bool {
 		}
 
 		start := q.CurrentIndex + 1
+		//nolint:gosec // Playback ordering does not require cryptographic randomness.
 		rand.Shuffle(len(q.Tracks[start:]), func(i, j int) {
 			q.Tracks[start+i], q.Tracks[start+j] = q.Tracks[start+j], q.Tracks[start+i]
 		})
 		return true
 	}
 
+	//nolint:gosec // Playback ordering does not require cryptographic randomness.
 	rand.Shuffle(len(q.Tracks), func(i, j int) {
 		q.Tracks[i], q.Tracks[j] = q.Tracks[j], q.Tracks[i]
 	})

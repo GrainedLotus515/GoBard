@@ -1,0 +1,10 @@
+# Medium vertical-scaling profile: targets at least 12 simultaneous
+# guild playback sessions without changing the application image.
+services:
+  gobard:
+    environment:
+      CACHE_LIMIT: ${GOBARD_PROFILE_CACHE_LIMIT:-10GB}
+      YTDLP_MAX_CONCURRENCY: ${GOBARD_PROFILE_YTDLP_MAX_CONCURRENCY:-8}
+    mem_limit: ${GOBARD_MEMORY_LIMIT:-2g}
+    cpus: ${GOBARD_CPUS:-4.0}
+    pids_limit: ${GOBARD_PIDS_LIMIT:-256}

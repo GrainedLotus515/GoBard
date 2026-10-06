@@ -9,9 +9,13 @@ make docker-test
 make docker-lint
 make docker-build
 make docker-smoke
+make docker-profile-check
+make docker-bench
 ```
 
 `docker-test` runs `go test -race ./...`. `docker-lint` verifies formatting without rewriting files, then runs `go vet` and the pinned golangci-lint v2 release. Both targets use Docker stages so a workstation does not need a native libdave installation.
+
+`docker-profile-check` renders all resource overrides and verifies their CPU, memory, cache, and yt-dlp settings. `docker-bench` runs allocation microbenchmarks, then starts deterministic small, medium, and large capacity containers for 15 minutes under their actual cgroup limits. Set `GOBARD_BENCH_DURATION=10s` only for a quick harness check. Timing results are diagnostic rather than absolute CI gates, but concurrency, cleanup, process-budget, cache-download, and allocation invariants remain enforced.
 
 For an interactive local container, create `.env`, secure it, and use the local override:
 
@@ -19,6 +23,9 @@ For an interactive local container, create `.env`, secure it, and use the local 
 cp .env.example .env
 chmod 600 .env
 make docker-run
+# Or retain the same image with a larger vertical capacity profile:
+make docker-run-medium
+make docker-run-large
 make docker-logs
 make docker-stop
 ```
@@ -32,11 +39,12 @@ For a file-backed Discord token, comment `DISCORD_TOKEN` in `.env`, set `DISCORD
 The Dockerfile has independent stages:
 
 - `test`: race-enabled Go test suite with libdave.
+- `bench`: deterministic player, cache, limiter, command, and YouTube benchmarks.
 - `lint`: read-only `gofmt`, vet, and golangci-lint checks.
 - `vulncheck`: reachable vulnerability analysis with govulncheck.
 - `runtime`: minimal non-root production image.
 
-The builder and runtime base manifests, libdave archive, yt-dlp binary, and golangci-lint binary are versioned and checksum-verified. Runtime keeps `/app/gobard` root-owned and read-only, leaves `/app/cache` writable to UID/GID 1000, and assumes a read-only root filesystem with `/tmp` supplied as a bounded tmpfs.
+The builder and runtime base manifests, libdave archive, yt-dlp binary, Deno runtime, and golangci-lint binary are versioned and checksum-verified. yt-dlp uses Deno for YouTube JavaScript challenges, with solver scripts bundled in the pinned yt-dlp zipapp. The smoke check verifies that Deno can execute JavaScript and the bundled solver package is available under production filesystem restrictions. Runtime keeps `/app/gobard` root-owned and read-only, leaves `/app/cache` writable to UID/GID 1000, and assumes a read-only root filesystem with `/tmp` supplied as a bounded tmpfs.
 
 The application must provide these stable operations for Docker and Compose:
 
@@ -55,6 +63,8 @@ GoBard is a Discord music bot with one guild-scoped playback controller per serv
 Media input is untrusted. Accept plain search text or exact allowlisted HTTPS YouTube video/playlist URLs only, then canonicalize them before playback; never pass arbitrary URLs, local paths, or private-network addresses to yt-dlp. Preserve URL validation when adding any new source behavior.
 
 The cache is transactional and bounded. Active readers hold leases so eviction cannot remove a file that FFmpeg is opening. Do not reintroduce background downloads that survive a skip, disconnect, or application shutdown.
+
+The supported vertical capacity profiles target at least 4, 12, and 24 simultaneous guild playback sessions on fixed 2/1 GiB, 4/2 GiB, and 8/4 GiB CPU/memory allocations respectively. Optimize within those allocations before proposing larger resource defaults. Horizontal gateway sharding and multi-process playback ownership are separate architecture work.
 
 ## CI and release flow
 

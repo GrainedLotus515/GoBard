@@ -4,11 +4,15 @@ import (
 	"context"
 	"errors"
 	"io"
+	"os"
+	"os/exec"
 	"reflect"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/GrainedLotus515/gobard/internal/processlimit"
 )
 
 func TestSeekSignalsPlaybackRestart(t *testing.T) {
@@ -59,6 +63,179 @@ func TestSeekSignalsPlaybackRestart(t *testing.T) {
 	default:
 		t.Fatal("seek should stop the active playback session")
 	}
+}
+
+func TestPreparingControlsDoNotStartOrSkipStaleTrack(t *testing.T) {
+	p := NewManager().GetPlayer("guild-preparing-controls")
+	first := &Track{Title: "first", Duration: time.Minute}
+	second := &Track{Title: "second", Duration: time.Minute}
+	p.Queue.Add(first)
+	p.Queue.Add(second)
+	if got := p.Queue.Next(); got != first {
+		t.Fatalf("Queue.Next() = %p, want first %p", got, first)
+	}
+
+	// Preparation has selected first but has not bound a session. Pause must be
+	// a no-op rather than making Play take a phantom resume branch.
+	p.Pause()
+	if p.Paused || p.Playing {
+		t.Fatalf("pre-start Pause() state = paused:%v playing:%v, want both false", p.Paused, p.Playing)
+	}
+
+	if err := p.Seek(15 * time.Second); err != nil {
+		t.Fatalf("pre-start Seek() error = %v", err)
+	}
+	if p.requestedStartOffset != 15*time.Second {
+		t.Fatalf("pre-start seek offset = %v, want 15s", p.requestedStartOffset)
+	}
+	if p.ConsumeSeekRequest() {
+		t.Fatal("pre-start seek must not create an active-session restart transition")
+	}
+	p.Queue.ToggleLoop()
+
+	if got := p.Skip(); got != second {
+		t.Fatalf("pre-start Skip() = %p, want successor %p", got, second)
+	}
+	if got := p.Queue.Current(); got != second {
+		t.Fatalf("Queue.Current() = %p, want successor %p", got, second)
+	}
+	if p.activePlayback != nil {
+		t.Fatal("pre-start controls created a playback session")
+	}
+}
+
+func TestStreamingEncoderCancellationWinsWhileCapacityIsSaturated(t *testing.T) {
+	previousCapacity := processlimit.Global().Capacity()
+	processlimit.ConfigureGlobal(1)
+	t.Cleanup(func() { processlimit.ConfigureGlobal(previousCapacity) })
+
+	release, err := processlimit.AcquireGlobalClass(context.Background(), processlimit.Bulk)
+	if err != nil {
+		t.Fatalf("AcquireGlobalClass() error = %v", err)
+	}
+	defer release()
+
+	originalHook := streamingBeforeYTDLPAcquire
+	entered := make(chan struct{})
+	streamingBeforeYTDLPAcquire = func() { close(entered) }
+	t.Cleanup(func() { streamingBeforeYTDLPAcquire = originalHook })
+
+	ctx, cancel := context.WithCancel(context.Background())
+	result := make(chan error, 1)
+	go func() {
+		_, err := NewStreamingEncoderContext(ctx, "https://www.youtube.com/watch?v=abc123XYZ89", "", nil, 48000, 2, 0, &atomic.Int32{})
+		result <- err
+	}()
+	select {
+	case <-entered:
+	case <-time.After(time.Second):
+		t.Fatal("encoder did not begin capacity acquisition")
+	}
+	cancel()
+	select {
+	case err := <-result:
+		if err == nil {
+			t.Fatal("canceled saturated encoder creation returned nil error")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("canceled saturated encoder creation did not return promptly")
+	}
+}
+
+func TestCustomEncoderReportsPostFrameNonzeroChildExit(t *testing.T) {
+	original := ffmpegCommandContext
+	//nolint:gosec // fixed test-binary invocation, not user-controlled command execution.
+	ffmpegCommandContext = func(ctx context.Context, _ string, _ ...string) *exec.Cmd {
+		// #nosec G204 -- invokes the current test binary with fixed arguments.
+		cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=TestPlayerHelperProcess", "--")
+		cmd.Env = append(os.Environ(), "GO_WANT_PLAYER_HELPER_PROCESS=1")
+		return cmd
+	}
+	t.Cleanup(func() { ffmpegCommandContext = original })
+
+	encoder, err := NewCustomEncoder("/cache/test.webm", 48000, 2, 0, &atomic.Int32{})
+	if err != nil {
+		t.Fatalf("NewCustomEncoder() error = %v", err)
+	}
+	frame, err := encoder.OpusFrame()
+	if err != nil {
+		t.Fatalf("first OpusFrame() error = %v", err)
+	}
+	frame.Release()
+	if _, err := encoder.OpusFrame(); err == nil || errors.Is(err, io.EOF) {
+		t.Fatalf("terminal OpusFrame() error = %v, want nonzero child failure", err)
+	}
+}
+
+func TestPlaySelectedDoesNotCommitStaleTrackAfterFinalCheck(t *testing.T) {
+	p := NewManager().GetPlayer("guild-selected-race")
+	p.SetVoiceConnection(&stubVoiceConnection{})
+	first := &Track{Title: "first", LocalPath: "/cache/first.webm"}
+	second := &Track{Title: "second", LocalPath: "/cache/second.webm"}
+	p.Queue.Add(first)
+	p.Queue.Add(second)
+	if got := p.Queue.Next(); got != first {
+		t.Fatal("failed to select first track")
+	}
+
+	originalHook := playSelectedBeforeCommit
+	entered := make(chan struct{})
+	releaseCommit := make(chan struct{})
+	playSelectedBeforeCommit = func() {
+		close(entered)
+		<-releaseCommit
+	}
+	t.Cleanup(func() { playSelectedBeforeCommit = originalHook })
+
+	startResult := make(chan error, 1)
+	go func() {
+		_, err := p.PlaySelected(first)
+		startResult <- err
+	}()
+	select {
+	case <-entered:
+	case <-time.After(time.Second):
+		t.Fatal("start did not reach commit barrier")
+	}
+
+	removed := make(chan struct{})
+	go func() {
+		p.Queue.Remove(0)
+		p.Stop()
+		close(removed)
+	}()
+	select {
+	case <-removed:
+		t.Fatal("Remove mutated the queue during the retained-lock commit")
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(releaseCommit)
+	if err := <-startResult; err != nil {
+		t.Fatalf("PlaySelected() error = %v", err)
+	}
+	select {
+	case <-removed:
+	case <-time.After(time.Second):
+		t.Fatal("Remove did not complete after session commitment")
+	}
+	if !p.Queue.HasPendingCurrentRemoval() {
+		t.Fatal("Remove did not leave the successor transition pending")
+	}
+	if got := p.Queue.TryAdvanceBypassingLoop(); got != second {
+		t.Fatalf("successor transition = %p, want %p", got, second)
+	}
+	p.WaitForCompletion()
+	if p.activePlayback != nil {
+		t.Fatal("Remove left a stale active session after the committed track was removed")
+	}
+}
+
+func TestPlayerHelperProcess(t *testing.T) {
+	if os.Getenv("GO_WANT_PLAYER_HELPER_PROCESS") != "1" {
+		return
+	}
+	_, _ = os.Stdout.Write(make([]byte, 960*2*2))
+	os.Exit(7)
 }
 
 func TestStopClearsSeekStateAndPosition(t *testing.T) {
@@ -343,6 +520,21 @@ func TestPlaybackSignalsCloseStartedBeforeDone(t *testing.T) {
 	case <-done:
 	case <-time.After(200 * time.Millisecond):
 		t.Fatal("done signal did not close after playback completed")
+	}
+}
+
+func TestPlaybackStartedSignalClosesExactlyOnce(t *testing.T) {
+	session := newPlaybackSession()
+	session.signalStarted()
+	session.signalStarted()
+
+	select {
+	case <-session.started:
+	default:
+		t.Fatal("started signal remained open")
+	}
+	if !session.resultSnapshot().Started {
+		t.Fatal("session did not retain started state")
 	}
 }
 
@@ -836,9 +1028,9 @@ type stubEncoder struct {
 	cleanupMu  sync.Mutex
 }
 
-func (e *stubEncoder) OpusFrame() ([]byte, error) {
+func (e *stubEncoder) OpusFrame() (EncodedFrame, error) {
 	if e.index >= len(e.frames) {
-		return nil, io.EOF
+		return EncodedFrame{}, io.EOF
 	}
 	if e.onFrame != nil {
 		e.onFrame(e.index + 1)
@@ -848,7 +1040,7 @@ func (e *stubEncoder) OpusFrame() ([]byte, error) {
 	}
 	frame := e.frames[e.index]
 	e.index++
-	return frame, nil
+	return EncodedFrame{Data: frame}, nil
 }
 
 func (e *stubEncoder) Cleanup() error {
@@ -874,12 +1066,12 @@ func newBlockingEncoder() *blockingEncoder {
 	}
 }
 
-func (e *blockingEncoder) OpusFrame() ([]byte, error) {
+func (e *blockingEncoder) OpusFrame() (EncodedFrame, error) {
 	e.readyOnce.Do(func() {
 		close(e.ready)
 	})
 	<-e.releaseCh
-	return nil, io.EOF
+	return EncodedFrame{}, io.EOF
 }
 
 func (e *blockingEncoder) Cleanup() error {

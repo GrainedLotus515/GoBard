@@ -2,6 +2,7 @@ package bot
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -72,8 +73,13 @@ func (b *Bot) handlePlay(s *discordgo.Session, i *discordgo.InteractionCreate) e
 
 	// Resolve before joining. yt-dlp can take several seconds and no failed
 	// search should leave the bot connected to a channel.
+	if !b.beginAsyncWork() {
+		return fmt.Errorf("bot is shutting down")
+	}
+	resolveCtx := b.asyncContext()
+	defer b.asyncWorkWG.Done()
 	trace.Step("Resolving play query")
-	tracks, err := b.resolveQuery(query, userID)
+	tracks, err := b.resolveQueryContext(resolveCtx, query, userID)
 	if err != nil {
 		trace.Finish("Play query resolution failed", "err", err)
 		b.editDeferredEmbedComponents(s, i, botui.BuildStatusCard(botui.StatusCardSpec{
@@ -94,9 +100,15 @@ func (b *Bot) handlePlay(s *discordgo.Session, i *discordgo.InteractionCreate) e
 		return nil
 	}
 	trace.Step("Play query resolved", "track_count", len(tracks))
+	if err := resolveCtx.Err(); err != nil {
+		return fmt.Errorf("play command canceled: %w", err)
+	}
 
 	// The caller may have moved while metadata was resolving. Use their current
 	// channel, not the stale channel from the start of the interaction.
+	if err := resolveCtx.Err(); err != nil {
+		return fmt.Errorf("play command canceled: %w", err)
+	}
 	channelID, err = b.GetVoiceChannel(i.GuildID, userID)
 	if err != nil {
 		trace.Finish("Caller left voice while resolving", "err", err)
@@ -111,19 +123,37 @@ func (b *Bot) handlePlay(s *discordgo.Session, i *discordgo.InteractionCreate) e
 	p := b.PlayerManager.GetPlayer(i.GuildID)
 	joinLock := b.guildJoinLock(i.GuildID)
 	joinLock.Lock()
+	if err := resolveCtx.Err(); err != nil {
+		joinLock.Unlock()
+		return fmt.Errorf("play command canceled: %w", err)
+	}
 	wasIdle := p.Queue.Current() == nil && p.Queue.IsEmpty()
 	joinedHere := false
 	var joinErr error
+	//nolint:nestif // Join/cancellation rollback must remain adjacent to queue admission.
 	if p.IsVoiceConnected() {
 		joinErr = b.requirePlaybackControlAccess(i.GuildID, userID)
 	} else {
 		trace.Step("Joining voice channel", "channel_id", channelID)
 		var vc voiceconn.Connection
-		vc, joinErr = b.JoinVoiceChannel(i.GuildID, channelID)
+		vc, joinErr = b.JoinVoiceChannelContext(resolveCtx, i.GuildID, channelID)
 		if joinErr == nil {
-			p.SetVoiceConnection(vc)
-			joinedHere = true
-			trace.Step("Voice channel joined", "channel_id", channelID)
+			if err := resolveCtx.Err(); err != nil {
+				// A join can complete concurrently with lifecycle cancellation.
+				// Do not publish that late connection to the player; best-effort
+				// cleanup uses an independent bounded context because the caller
+				// context has already been canceled.
+				cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 5*time.Second)
+				if disconnectErr := vc.Disconnect(cleanupCtx); disconnectErr != nil {
+					logger.Warn("Failed to close canceled voice join", "guild", i.GuildID, "err", disconnectErr)
+				}
+				cleanupCancel()
+				joinErr = fmt.Errorf("play command canceled: %w", err)
+			} else {
+				p.SetVoiceConnection(vc)
+				joinedHere = true
+				trace.Step("Voice channel joined", "channel_id", channelID)
+			}
 		}
 	}
 	joinLock.Unlock()
@@ -150,6 +180,7 @@ func (b *Bot) handlePlay(s *discordgo.Session, i *discordgo.InteractionCreate) e
 	fastPathTrack := len(tracks) == 1 && tracks[0].MetadataPending
 	pendingMode := ""
 	if fastPathTrack {
+		tracks[0].Resolution = player.NewTrackResolution()
 		logger.Info(
 			"Fast URL path selected",
 			"trace_id", trace.ID(),
@@ -164,6 +195,9 @@ func (b *Bot) handlePlay(s *discordgo.Session, i *discordgo.InteractionCreate) e
 	}
 
 	// Add tracks to queue
+	if err := resolveCtx.Err(); err != nil {
+		return fmt.Errorf("play command canceled: %w", err)
+	}
 	for _, track := range tracks {
 		if track.RequestTraceID == "" {
 			track.RequestTraceID = trace.ID()
@@ -184,9 +218,16 @@ func (b *Bot) handlePlay(s *discordgo.Session, i *discordgo.InteractionCreate) e
 			tracks[0],
 			pendingMode,
 		)
+		// Register the shared resolution before the playback loop can observe
+		// the placeholder. Playback and the interaction update then wait for one
+		// metadata process rather than launching competing yt-dlp commands.
+		b.hydrateFastURLTrackAsync(trace.ID(), tracks[0])
 	}
 
 	// Start playing if playback loop is not already running.
+	if err := resolveCtx.Err(); err != nil {
+		return fmt.Errorf("play command canceled: %w", err)
+	}
 	shouldStartPlayback := p.StartLoopIfIdle()
 	delayLoopStartForFastPath := fastPathTrack && wasIdle && shouldStartPlayback
 	if shouldStartPlayback && !delayLoopStartForFastPath {
@@ -218,9 +259,6 @@ func (b *Bot) handlePlay(s *discordgo.Session, i *discordgo.InteractionCreate) e
 			trace.Step("Starting playback loop")
 			b.startPlaybackLoop(i.GuildID, i.ChannelID)
 		}
-		if fastPathTrack {
-			b.hydrateFastURLTrackAsync(trace.ID(), tracks[0])
-		}
 		trace.Finish("Play command completed", "status", "starting_playback", "first_track", tracks[0].Title)
 		return nil
 	}
@@ -236,9 +274,6 @@ func (b *Bot) handlePlay(s *discordgo.Session, i *discordgo.InteractionCreate) e
 			false,
 		)
 		b.editDeferredEmbedComponents(s, i, embed, components)
-		if fastPathTrack {
-			b.hydrateFastURLTrackAsync(trace.ID(), tracks[0])
-		}
 		trace.Finish("Play command completed", "status", "queued", "first_track", tracks[0].Title, "queue_position", queueLength)
 		return nil
 	}
@@ -263,6 +298,16 @@ func playQueryKind(query string) string {
 
 // resolveQuery resolves a query to tracks
 func (b *Bot) resolveQuery(query, userID string) ([]*player.Track, error) {
+	return b.resolveQueryContext(context.Background(), query, userID)
+}
+
+// resolveQueryContext keeps command resolution rooted in the lifecycle of the
+// deferred interaction.  It must be checked again by the caller before queue
+// mutation because a successful subprocess may race shutdown.
+func (b *Bot) resolveQueryContext(ctx context.Context, query, userID string) ([]*player.Track, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	query = strings.TrimSpace(query)
 	if youtube.IsURLLike(query) {
 		canonicalURL, kind, err := youtube.ClassifyYouTubeURL(query)
@@ -294,7 +339,7 @@ func (b *Bot) resolveQuery(query, userID string) ([]*player.Track, error) {
 			if b == nil || b.YouTube == nil {
 				return nil, fmt.Errorf("YouTube is not initialized")
 			}
-			tracks, err := b.YouTube.GetPlaylistInfo(canonicalURL)
+			tracks, err := b.YouTube.GetPlaylistInfoContext(ctx, canonicalURL)
 			if err != nil {
 				return nil, err
 			}
@@ -311,7 +356,7 @@ func (b *Bot) resolveQuery(query, userID string) ([]*player.Track, error) {
 	if b == nil || b.YouTube == nil {
 		return nil, fmt.Errorf("YouTube is not initialized")
 	}
-	tracks, err := b.YouTube.Search(query)
+	tracks, err := b.YouTube.SearchContext(ctx, query)
 	if err != nil {
 		return nil, err
 	}
@@ -323,8 +368,13 @@ func (b *Bot) resolveQuery(query, userID string) ([]*player.Track, error) {
 
 // playLoop handles the playback loop for a guild.
 //
-//nolint:gocyclo,nestif // This is the explicit playback state machine; splitting cases would obscure transitions.
+//nolint:unused // Compatibility entry point for focused playback-loop tests.
 func (b *Bot) playLoop(guildID string, channelID string) {
+	b.playLoopContext(context.Background(), guildID, channelID)
+}
+
+//nolint:gocyclo,nestif // This is the explicit playback state machine; splitting cases would obscure transitions.
+func (b *Bot) playLoopContext(ctx context.Context, guildID string, channelID string) {
 	logger.Debug("Starting playback loop", "guild", guildID)
 	p := b.PlayerManager.GetPlayer(guildID)
 
@@ -335,6 +385,10 @@ func (b *Bot) playLoop(guildID string, channelID string) {
 	sourceRetries := make(map[*player.Track]int)
 
 	for {
+		if ctx.Err() != nil {
+			p.SetLoopRunning(false)
+			return
+		}
 		// Check if voice connection is still valid before processing next track
 		if !p.IsVoiceConnected() {
 			logger.Info("Voice connection lost, stopping playback loop", "guild", guildID)
@@ -369,6 +423,33 @@ func (b *Bot) playLoop(guildID string, channelID string) {
 				"url", track.URL,
 				"queue_wait_ms", time.Since(track.RequestedAt).Milliseconds(),
 			)
+		}
+		if track.Resolution != nil {
+			if resolved, err := track.Resolution.Wait(ctx); err != nil {
+				logger.Warn("Fast URL metadata resolution unavailable; using playback fallback", "title", track.Title, "err", err)
+				if startupTrace != nil {
+					startupTrace.Step("Fast URL metadata resolution unavailable", "err", err)
+				}
+			} else if resolved != nil {
+				// The hydration worker normally replaces the queue entry before
+				// completing the future. Repeat defensively for tests and callers
+				// without a pending interaction response.
+				p.Queue.ReplaceTrack(track, resolved)
+				track = resolved
+				if startupTrace != nil {
+					startupTrace.Step("Fast URL metadata resolution shared with playback", "title", track.Title)
+				}
+			}
+		}
+		if ctx.Err() != nil {
+			p.SetLoopRunning(false)
+			return
+		}
+		if !p.Queue.IsCurrent(track) {
+			// A control action or removal won while a selected track was being
+			// prepared. Never let the stale pointer create cache/metadata side
+			// effects or start a session ahead of the legitimate successor.
+			continue
 		}
 
 		// Check if track is already cached
@@ -444,7 +525,7 @@ func (b *Bot) playLoop(guildID string, channelID string) {
 					if startupTrace != nil {
 						startupTrace.Step("Refreshing stream metadata before playback", "url", track.URL)
 					}
-					if err := b.hydrateTrackStreamInfo(track); err != nil {
+					if err := b.hydrateTrackStreamInfoContext(ctx, track); err != nil {
 						logger.Warn("Stream metadata refresh failed before playback", "title", track.Title, "err", err)
 						if startupTrace != nil {
 							startupTrace.Step("Stream metadata refresh failed before playback", "err", err)
@@ -467,15 +548,28 @@ func (b *Bot) playLoop(guildID string, channelID string) {
 				}
 			}
 		}
+		if !p.Queue.IsCurrent(track) {
+			releaseCacheLease()
+			continue
+		}
+		if ctx.Err() != nil {
+			releaseCacheLease()
+			p.SetLoopRunning(false)
+			return
+		}
 
 		// Play the track with retry logic
 		logger.Info("Starting playback")
 		if startupTrace != nil {
 			startupTrace.Step("Invoking player playback", "cache_miss", cacheMiss)
 		}
-		err := b.playTrackForGuild(p)
+		startedTrack, err := b.playSelectedTrackForGuild(p, track)
 
 		if err != nil {
+			if errors.Is(err, player.ErrSelectedTrackChanged) {
+				releaseCacheLease()
+				continue
+			}
 			// Check if error is due to voice connection being lost
 			if err.Error() == "not connected to voice channel" {
 				logger.Error("Voice connection lost, cannot play track", "title", track.Title)
@@ -496,8 +590,12 @@ func (b *Bot) playLoop(guildID string, channelID string) {
 			track.ClearPrefetchedStream()
 
 			// Retry once
-			err = b.playTrackForGuild(p)
+			startedTrack, err = b.playSelectedTrackForGuild(p, track)
 			if err != nil {
+				if errors.Is(err, player.ErrSelectedTrackChanged) {
+					releaseCacheLease()
+					continue
+				}
 				releaseCacheLease()
 				b.failPendingInteractionResponse(track.RequestTraceID, track.Title, err)
 
@@ -523,8 +621,13 @@ func (b *Bot) playLoop(guildID string, channelID string) {
 			}
 		}
 
+		// Only schedule deferred work for the identity atomically committed by
+		// PlaySelected. A remove/skip that wins before commitment returns the
+		// selected-track sentinel above instead of letting stale A own B's work.
+		track = startedTrack
+		started, done := p.PlaybackSignals()
+		b.deferNextTrackPrefetchUntilPlaybackStarts(p, started, done)
 		if cacheMiss {
-			started, done := p.PlaybackSignals()
 			b.deferBackgroundCacheUntilPlaybackStarts(p, track, cacheKey, trackSelectedAt, started, done)
 		}
 
@@ -559,7 +662,7 @@ func (b *Bot) playLoop(guildID string, channelID string) {
 			if sourceRetries[track] < 1 {
 				sourceRetries[track]++
 				track.ClearPrefetchedStream()
-				if err := b.hydrateTrackStreamInfo(track); err != nil {
+				if err := b.hydrateTrackStreamInfoContext(ctx, track); err != nil {
 					logger.Warn("Fresh stream metadata resolution failed before source retry", "title", track.Title, "err", err)
 				}
 				logger.Warn("Retrying source failure", "title", track.Title, "err", result.Err)
@@ -578,7 +681,7 @@ func (b *Bot) playLoop(guildID string, channelID string) {
 			continue
 
 		case player.PlaybackEndTransportFailure:
-			if b.reconnectForPlayback(guildID, p, track) {
+			if b.reconnectForPlaybackContext(ctx, guildID, p, track) {
 				continue
 			}
 			b.cleanupGuildPendingResponses(guildID)
@@ -626,25 +729,81 @@ func (b *Bot) playLoop(guildID string, channelID string) {
 	}
 }
 
+func (b *Bot) deferNextTrackPrefetchUntilPlaybackStarts(
+	p *player.GuildPlayer,
+	started <-chan struct{},
+	done <-chan struct{},
+) {
+	if b == nil || (b.YouTube == nil && b.prefetchVideoInfoFn == nil) || p == nil || !b.beginAsyncWork() {
+		return
+	}
+	ctx := b.asyncContext()
+	go func() {
+		defer b.asyncWorkWG.Done()
+		select {
+		case <-started:
+		case <-done:
+			return
+		case <-ctx.Done():
+			return
+		}
+
+		target := p.Queue.Peek()
+		if target == nil || target.URL == "" || target.IsLive || target.Resolution != nil || target.CanUsePrefetchedStream(time.Now(), 0) {
+			return
+		}
+		pending := *target
+		pending.StreamHeaders = cloneStringMap(target.StreamHeaders)
+		pending.Resolution = player.NewTrackResolution()
+		if !p.Queue.ReplaceUpcomingTrack(target, &pending) {
+			return
+		}
+
+		refreshed, err := b.prefetchVideoInfoContext(ctx, pending.URL)
+		if err != nil {
+			pending.Resolution.Complete(nil, err)
+			logger.Debug("Next-track metadata prefetch failed", "title", pending.Title, "err", err)
+			return
+		}
+		replacement := buildHydratedFastURLTrack(&pending, refreshed)
+		p.Queue.ReplaceTrack(&pending, replacement)
+		pending.Resolution.Complete(replacement, nil)
+		logger.Timing("Next-track metadata prefetched", "title", replacement.Title)
+	}()
+}
+
+//nolint:unused // Retained as the context-free compatibility entry point.
 func (b *Bot) reconnectForPlayback(guildID string, p *player.GuildPlayer, track *player.Track) bool {
+	return b.reconnectForPlaybackContext(context.Background(), guildID, p, track)
+}
+
+func (b *Bot) reconnectForPlaybackContext(ctx context.Context, guildID string, p *player.GuildPlayer, track *player.Track) bool {
 	for attempt := 0; attempt < 3; attempt++ {
+		if ctx.Err() != nil {
+			return false
+		}
 		if p == nil || p.Queue.Current() != track || !p.IsLoopRunning() {
 			return false
 		}
 		if attempt > 0 {
-			time.Sleep(time.Second << (attempt - 1))
+			delay := time.Second << (attempt - 1)
+			select {
+			case <-time.After(delay):
+			case <-ctx.Done():
+				return false
+			}
 		}
 		if p.Queue.Current() != track || !p.IsLoopRunning() {
 			return false
 		}
 		logger.Info("Attempting voice transport recovery", "guild", guildID, "attempt", attempt+1, "title", track.Title)
-		vc, err := b.rejoinVoiceChannel(guildID)
+		vc, err := b.rejoinVoiceChannelContext(ctx, guildID)
 		if err != nil {
 			logger.Warn("Voice transport recovery attempt failed", "guild", guildID, "attempt", attempt+1, "err", err)
 			continue
 		}
 		if p.Queue.Current() != track || !p.IsLoopRunning() {
-			if disconnectErr := vc.Disconnect(context.Background()); disconnectErr != nil {
+			if disconnectErr := vc.Disconnect(ctx); disconnectErr != nil {
 				logger.Warn("Failed to close superseded voice connection", "guild", guildID, "err", disconnectErr)
 			}
 			return false
@@ -694,7 +853,9 @@ func (b *Bot) deferBackgroundCacheUntilPlaybackStarts(
 
 	go func() {
 		defer b.backgroundCacheWG.Done()
-		if !b.waitForPlaybackStart(p, started, done) {
+		ctx, cancel := context.WithCancel(b.asyncContext())
+		defer cancel()
+		if !b.waitForPlaybackStartContext(ctx, p, started, done) {
 			logger.Timing(
 				"Background cache skipped because playback ended before start",
 				"title", title,
@@ -704,8 +865,6 @@ func (b *Bot) deferBackgroundCacheUntilPlaybackStarts(
 			return
 		}
 
-		ctx, cancel := context.WithCancel(context.Background())
-		defer cancel()
 		if b.waitForCompletionFn == nil {
 			stopWatch := make(chan struct{})
 			go func() {
@@ -926,6 +1085,9 @@ func (b *Bot) handleSeek(s *discordgo.Session, i *discordgo.InteractionCreate) e
 // handleFSeek handles the fseek command
 func (b *Bot) handleFSeek(s *discordgo.Session, i *discordgo.InteractionCreate) error {
 	seconds := int(i.ApplicationCommandData().Options[0].IntValue())
+	if seconds < 0 {
+		return fmt.Errorf("seconds must be zero or greater")
+	}
 
 	p := b.PlayerManager.GetPlayer(i.GuildID)
 	newPosition := p.GetCurrentPosition() + time.Duration(seconds)*time.Second

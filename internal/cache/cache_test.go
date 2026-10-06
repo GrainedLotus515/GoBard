@@ -10,6 +10,31 @@ import (
 	"time"
 )
 
+func BenchmarkCacheAcquire(b *testing.B) {
+	dir := b.TempDir()
+	cache, err := NewCache(dir, 1024*1024)
+	if err != nil {
+		b.Fatal(err)
+	}
+	key := GenerateKey("https://www.youtube.com/watch?v=benchmark")
+	if _, err := cache.GetOrCreate(key, func(path string) error {
+		return os.WriteFile(path, []byte("benchmark audio"), 0o600)
+	}); err != nil {
+		b.Fatal(err)
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			lease, ok := cache.Acquire(key)
+			if !ok {
+				b.Fatal("cache entry disappeared")
+			}
+			lease.Release()
+		}
+	})
+}
+
 func TestGetOrCreateSingleFlight(t *testing.T) {
 	c, err := NewCache(t.TempDir(), 16*1024*1024)
 	if err != nil {
@@ -173,6 +198,87 @@ func TestLeasePreventsEvictionUntilReleased(t *testing.T) {
 	}
 	if _, ok := c.Get(secondKey); !ok {
 		t.Fatal("second entry missing after successful create")
+	}
+}
+
+func TestConcurrentAcquireClearDeletionResizeAndEviction(t *testing.T) {
+	c, err := NewCache(t.TempDir(), 8)
+	if err != nil {
+		t.Fatalf("NewCache() error = %v", err)
+	}
+	firstKey := GenerateKey("https://example.com/concurrent-first")
+	firstPath, err := c.GetOrCreate(firstKey, func(path string) error {
+		return os.WriteFile(path, []byte("1234"), 0o600)
+	})
+	if err != nil {
+		t.Fatalf("create first entry: %v", err)
+	}
+	held, ok := c.Acquire(firstKey)
+	if !ok {
+		t.Fatal("Acquire(first) = false")
+	}
+
+	acquired := make(chan *Lease, 1)
+	clearErr := make(chan error, 1)
+	start := make(chan struct{})
+	go func() {
+		<-start
+		lease, exists := c.Acquire(firstKey)
+		if exists {
+			acquired <- lease
+			return
+		}
+		acquired <- nil
+	}()
+	go func() {
+		<-start
+		clearErr <- c.Clear()
+	}()
+	close(start)
+	if lease := <-acquired; lease == nil {
+		t.Fatal("concurrent Acquire() lost leased entry")
+	} else {
+		lease.Release()
+	}
+	if err := <-clearErr; !errors.Is(err, ErrEntryLeased) {
+		t.Fatalf("concurrent Clear() error = %v, want ErrEntryLeased", err)
+	}
+
+	if err := os.WriteFile(firstPath, []byte("123456"), 0o600); err != nil {
+		t.Fatalf("resize cached entry: %v", err)
+	}
+	resized, ok := c.Acquire(firstKey)
+	if !ok {
+		t.Fatal("Acquire() after external resize = false")
+	}
+	resized.Release()
+	if _, size, _ := c.GetStats(); size != 6 {
+		t.Fatalf("cache size after reconciliation = %d, want 6", size)
+	}
+
+	held.Release()
+	secondKey := GenerateKey("https://example.com/concurrent-second")
+	if _, err := c.GetOrCreate(secondKey, func(path string) error {
+		return os.WriteFile(path, []byte("abcd"), 0o600)
+	}); err != nil {
+		t.Fatalf("evict resized entry: %v", err)
+	}
+	if _, ok := c.Get(firstKey); ok {
+		t.Fatal("resized least-recently-used entry was not evicted")
+	}
+
+	secondPath, ok := c.Get(secondKey)
+	if !ok {
+		t.Fatal("second entry missing after eviction")
+	}
+	if err := os.Remove(secondPath); err != nil {
+		t.Fatalf("delete cached file: %v", err)
+	}
+	if _, ok := c.Acquire(secondKey); ok {
+		t.Fatal("Acquire() accepted externally deleted entry")
+	}
+	if count, size, _ := c.GetStats(); count != 0 || size != 0 {
+		t.Fatalf("cache stats after deletion reconciliation = (%d, %d), want (0, 0)", count, size)
 	}
 }
 

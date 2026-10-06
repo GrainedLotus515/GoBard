@@ -3,7 +3,7 @@ services:
   # exist. This one-shot service fixes only the mount point, never recursively
   # changes the ownership of an existing cache.
   cache-init:
-    image: ${GOBARD_IMAGE:-ghcr.io/grainedlotus515/gobard:latest}
+    image: ${GOBARD_IMAGE:?set GOBARD_IMAGE to an immutable GHCR digest}
     user: "0:0"
     read_only: true
     entrypoint: ["/bin/sh", "-ec"]
@@ -17,7 +17,7 @@ services:
     restart: "no"
 
   gobard:
-    image: ${GOBARD_IMAGE:-ghcr.io/grainedlotus515/gobard:latest}
+    image: ${GOBARD_IMAGE:?set GOBARD_IMAGE to an immutable GHCR digest}
     container_name: gobard
     init: true
     restart: unless-stopped
@@ -28,7 +28,9 @@ services:
       - .env
     environment:
       CACHE_DIR: /app/cache
+      CACHE_LIMIT: ${GOBARD_PROFILE_CACHE_LIMIT:-${CACHE_LIMIT:-2GB}}
       HEALTH_LISTEN_ADDR: ${HEALTH_LISTEN_ADDR:-127.0.0.1:8080}
+      YTDLP_MAX_CONCURRENCY: ${GOBARD_PROFILE_YTDLP_MAX_CONCURRENCY:-${YTDLP_MAX_CONCURRENCY:-4}}
     volumes:
       - ./cache:/app/cache
     read_only: true

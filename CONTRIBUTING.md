@@ -13,6 +13,8 @@ make docker-test
 make docker-lint
 make docker-build
 make docker-smoke
+make docker-profile-check
+make docker-bench
 ```
 
 Use `make docker-run` only for a local Discord-token smoke test. Copy `.env.example` to `.env`, add a test token, and run `chmod 600 .env`. Never commit `.env`, tokens, cache contents, generated media, or private signing keys.

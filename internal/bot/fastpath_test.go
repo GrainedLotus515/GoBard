@@ -219,8 +219,8 @@ func TestHydrateFastURLTrackAsyncKeepsPlaceholderWhenHydrationFails(t *testing.T
 
 	select {
 	case <-editCalled:
-		t.Fatal("interaction response edit was called on hydration failure")
-	default:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for fallback interaction response edit")
 	}
 
 	if current := p.Queue.Current(); current != nil {

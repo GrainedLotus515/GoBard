@@ -42,6 +42,7 @@ type CacheEntry struct {
 	Size         int64
 	LastAccessed time.Time
 	URL          string
+	persistedAt  time.Time
 
 	leases int
 }
@@ -127,6 +128,7 @@ func (c *Cache) loadEntries() error {
 			Path:         path,
 			Size:         info.Size(),
 			LastAccessed: info.ModTime(),
+			persistedAt:  info.ModTime(),
 		}
 		c.currentSize += info.Size()
 	}
@@ -142,12 +144,13 @@ func (c *Cache) loadEntries() error {
 // Get gets a cached file path if it exists. Call Acquire when the returned
 // file will stay in use while concurrent cache writers may evict entries.
 func (c *Cache) Get(key string) (string, bool) {
-	if err := validateKey(key); err != nil {
+	lease, ok := c.Acquire(key)
+	if !ok {
 		return "", false
 	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.getLocked(key)
+	path := lease.Path
+	lease.Release()
+	return path, true
 }
 
 // Acquire gets and pins a cached file until the returned lease is released.
@@ -156,13 +159,50 @@ func (c *Cache) Acquire(key string) (*Lease, bool) {
 		return nil, false
 	}
 	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	path, ok := c.getLocked(key)
+	entry, ok := c.entries[key]
 	if !ok {
+		c.mu.Unlock()
 		return nil, false
 	}
-	c.entries[key].leases++
+	entry.leases++
+	now := time.Now()
+	entry.LastAccessed = now
+	persistTouch := now.Sub(entry.persistedAt) >= time.Minute
+	if persistTouch {
+		entry.persistedAt = now
+	}
+	path := entry.Path
+	wantSize := entry.Size
+	c.mu.Unlock()
+
+	info, err := os.Lstat(path)
+	if err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
+		c.mu.Lock()
+		if c.entries[key] == entry {
+			c.removeEntryLocked(key)
+		}
+		c.mu.Unlock()
+		return nil, false
+	}
+	if info.Size() != wantSize {
+		c.mu.Lock()
+		if c.entries[key] == entry {
+			c.currentSize += info.Size() - entry.Size
+			entry.Size = info.Size()
+		}
+		c.mu.Unlock()
+	}
+	if persistTouch {
+		// Persisted LRU is deliberately coarse. In-process eviction still uses
+		// the exact LastAccessed value above.
+		if err := os.Chtimes(path, now, now); err != nil {
+			c.mu.Lock()
+			if c.entries[key] == entry && entry.persistedAt.Equal(now) {
+				entry.persistedAt = time.Time{}
+			}
+			c.mu.Unlock()
+		}
+	}
 	return &Lease{Path: path, cache: c, key: key}, true
 }
 
@@ -171,37 +211,6 @@ func (c *Cache) release(key string) {
 	defer c.mu.Unlock()
 	if entry, ok := c.entries[key]; ok && entry.leases > 0 {
 		entry.leases--
-	}
-}
-
-func (c *Cache) getLocked(key string) (string, bool) {
-	entry, exists := c.entries[key]
-	if !exists {
-		return "", false
-	}
-
-	info, err := os.Stat(entry.Path)
-	if err != nil || !info.Mode().IsRegular() {
-		c.removeEntryLocked(key)
-		return "", false
-	}
-	if info.Size() != entry.Size {
-		c.currentSize += info.Size() - entry.Size
-		entry.Size = info.Size()
-	}
-	c.touchLocked(entry)
-	return entry.Path, true
-}
-
-func (c *Cache) touchLocked(entry *CacheEntry) {
-	now := time.Now()
-	entry.LastAccessed = now
-	// Persist LRU access where the filesystem permits it. A cache remains
-	// usable on read-only mounts even when updating atime is unavailable.
-	if err := os.Chtimes(entry.Path, now, now); err != nil {
-		// LastAccessed remains authoritative in this process. Persisting it is
-		// opportunistic because a read-only cache mount must still be readable.
-		return
 	}
 }
 
@@ -245,11 +254,12 @@ func (c *Cache) GetOrCreate(key string, create func(path string) error) (string,
 		return "", fmt.Errorf("cache creator is required")
 	}
 
-	c.mu.Lock()
-	if path, exists := c.getLocked(key); exists {
-		c.mu.Unlock()
+	if lease, exists := c.Acquire(key); exists {
+		path := lease.Path
+		lease.Release()
 		return path, nil
 	}
+	c.mu.Lock()
 	if pending, exists := c.inFlight[key]; exists {
 		c.mu.Unlock()
 		<-pending.done
@@ -301,7 +311,7 @@ func (c *Cache) commitTemp(key, tmpPath string, size int64) (string, error) {
 	defer c.mu.Unlock()
 
 	if entry, exists := c.entries[key]; exists {
-		c.touchLocked(entry)
+		entry.LastAccessed = time.Now()
 		return entry.Path, nil
 	}
 	if size > c.maxSize {
@@ -321,6 +331,7 @@ func (c *Cache) commitTemp(key, tmpPath string, size int64) (string, error) {
 		Path:         destPath,
 		Size:         size,
 		LastAccessed: time.Now(),
+		persistedAt:  time.Now(),
 	}
 	c.currentSize += size
 	return destPath, nil

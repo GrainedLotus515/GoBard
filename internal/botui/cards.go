@@ -328,11 +328,30 @@ func linkedTitle(title, url string, limit int) string {
 	if title == "" {
 		title = "Unknown track"
 	}
-	title = truncate(title, limit)
+	title = escapeMarkdownLabel(truncate(title, limit))
 	if url == "" {
 		return title
 	}
 	return fmt.Sprintf("[%s](%s)", title, url)
+}
+
+// escapeMarkdownLabel protects extractor-provided titles from closing or
+// changing the masked-link syntax used in queue cards. URLs are validated at
+// the source boundary; only display text is escaped here.
+func escapeMarkdownLabel(value string) string {
+	replacer := strings.NewReplacer(
+		"\\", "\\\\",
+		"[", "\\[",
+		"]", "\\]",
+		"(", "\\(",
+		")", "\\)",
+		"*", "\\*",
+		"_", "\\_",
+		"`", "\\`",
+		"~", "\\~",
+		"|", "\\|",
+	)
+	return replacer.Replace(value)
 }
 
 func fallback(value, defaultValue string) string {

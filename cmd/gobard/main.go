@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"runtime"
 	"syscall"
 	"time"
 
@@ -50,6 +51,13 @@ func run(args []string) error {
 	if err != nil {
 		return fmt.Errorf("create bot: %w", err)
 	}
+	logger.Info(
+		"Runtime capacity configured",
+		"gomaxprocs", runtime.GOMAXPROCS(0),
+		"ytdlp_processes", cfg.YTDLPMaxConcurrency,
+		"cache_bytes", cfg.CacheLimit,
+		"max_playlist_tracks", cfg.MaxPlaylistTracks,
+	)
 
 	healthServer, err := health.Start(cfg.HealthListenAddr, b)
 	if err != nil {

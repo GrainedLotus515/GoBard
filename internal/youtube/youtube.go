@@ -22,8 +22,10 @@ import (
 const (
 	searchCacheTTL              = 6 * time.Hour
 	negativeSearchCacheTTL      = 5 * time.Minute
+	videoInfoCacheTTL           = 30 * time.Second
 	searchCacheCapacity         = 256
 	negativeSearchCacheCapacity = 128
+	videoInfoCacheCapacity      = 256
 	defaultMaxPlaylistTracks    = 500
 	defaultMaxConcurrency       = 4
 )
@@ -42,6 +44,9 @@ type Client struct {
 	searchCacheEntries         map[string]*list.Element
 	negativeSearchCache        *list.List
 	negativeSearchCacheEntries map[string]*list.Element
+	videoInfoCache             *list.List
+	videoInfoCacheEntries      map[string]*list.Element
+	videoInfoInFlight          map[string]*videoInfoCall
 }
 
 // Options controls bounded external-tool use for a YouTube client.
@@ -62,6 +67,18 @@ type negativeSearchCacheEntry struct {
 	storedAt   time.Time
 	outcome    string
 	errMessage string
+}
+
+type videoInfoCacheEntry struct {
+	key      string
+	storedAt time.Time
+	track    *player.Track
+}
+
+type videoInfoCall struct {
+	done  chan struct{}
+	track *player.Track
+	err   error
 }
 
 // NewClient creates a new YouTube client
@@ -225,6 +242,10 @@ func (c *Client) currentTime() time.Time {
 }
 
 func (c *Client) acquireCommandSlot(ctx context.Context) (func(), error) {
+	return c.acquireCommandSlotClass(ctx, processlimit.Interactive)
+}
+
+func (c *Client) acquireCommandSlotClass(ctx context.Context, class processlimit.WorkClass) (func(), error) {
 	if c == nil {
 		return nil, fmt.Errorf("YouTube client is not initialized")
 	}
@@ -234,7 +255,12 @@ func (c *Client) acquireCommandSlot(ctx context.Context) (func(), error) {
 		// still sharing the production process budget.
 		limiter = processlimit.Global()
 	}
-	return limiter.Acquire(ctx)
+	waitStarted := time.Now()
+	release, err := limiter.AcquireClass(ctx, class)
+	if err == nil {
+		logger.Timing("yt-dlp slot acquired", "work_class", class, "wait_ms", time.Since(waitStarted).Milliseconds())
+	}
+	return release, err
 }
 
 func (c *Client) playlistLimit() int {
@@ -262,6 +288,15 @@ func (c *Client) initSearchCachesLocked() {
 	}
 	if c.negativeSearchCacheEntries == nil {
 		c.negativeSearchCacheEntries = make(map[string]*list.Element)
+	}
+	if c.videoInfoCache == nil {
+		c.videoInfoCache = list.New()
+	}
+	if c.videoInfoCacheEntries == nil {
+		c.videoInfoCacheEntries = make(map[string]*list.Element)
+	}
+	if c.videoInfoInFlight == nil {
+		c.videoInfoInFlight = make(map[string]*videoInfoCall)
 	}
 }
 
@@ -301,6 +336,16 @@ func cloneStableTrack(track *player.Track) *player.Track {
 		Thumbnail: track.Thumbnail,
 		IsLive:    track.IsLive,
 	}
+}
+
+func cloneResolvedTrack(track *player.Track) *player.Track {
+	if track == nil {
+		return nil
+	}
+	cloned := *track
+	cloned.StreamHeaders = cloneHeaders(track.StreamHeaders)
+	cloned.Resolution = nil
+	return &cloned
 }
 
 func cloneStableTracks(tracks []*player.Track) []*player.Track {
@@ -498,8 +543,18 @@ func classifyNegativeSearchFailure(err error) (string, string, bool) {
 
 // Search searches for videos and returns track information
 func (c *Client) Search(query string) ([]*player.Track, error) {
+	return c.SearchContext(context.Background(), query)
+}
+
+// SearchContext searches for videos while honoring the caller's lifecycle.
+// The compatibility wrapper above intentionally retains the historical API for
+// callers that do not own a cancellable operation.
+func (c *Client) SearchContext(parent context.Context, query string) ([]*player.Track, error) {
 	if IsURLLike(query) {
 		return nil, fmt.Errorf("%w: use an HTTPS YouTube video or playlist URL", errUnsupportedYouTubeURL)
+	}
+	if parent == nil {
+		parent = context.Background()
 	}
 
 	start := time.Now()
@@ -516,10 +571,13 @@ func (c *Client) Search(query string) ([]*player.Track, error) {
 		logger.Timing("Search cache miss")
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(parent, 30*time.Second)
 	defer cancel()
 	releaseCommandSlot, err := c.acquireCommandSlot(ctx)
 	if err != nil {
+		if ctx.Err() == context.Canceled {
+			return nil, fmt.Errorf("search canceled")
+		}
 		if ctx.Err() == context.DeadlineExceeded {
 			return nil, fmt.Errorf("search timed out after 30 seconds")
 		}
@@ -538,7 +596,11 @@ func (c *Client) Search(query string) ([]*player.Track, error) {
 	)
 
 	output, err := cmd.Output()
+	//nolint:nestif // Cancellation, timeout, and negative-cache classification share this command outcome.
 	if err != nil {
+		if ctx.Err() == context.Canceled {
+			return nil, fmt.Errorf("search canceled")
+		}
 		if ctx.Err() == context.DeadlineExceeded {
 			return nil, fmt.Errorf("search timed out after 30 seconds")
 		}
@@ -592,6 +654,65 @@ func (c *Client) Search(query string) ([]*player.Track, error) {
 	return []*player.Track{track}, nil
 }
 
+func (c *Client) lookupVideoInfoCache(key string, now time.Time) (*player.Track, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.initSearchCachesLocked()
+	element, ok := c.videoInfoCacheEntries[key]
+	if !ok {
+		return nil, false
+	}
+	entry, ok := element.Value.(*videoInfoCacheEntry)
+	if !ok || entry == nil || now.Sub(entry.storedAt) > videoInfoCacheTTL ||
+		(entry.track.StreamURL != "" && !entry.track.CanUsePrefetchedStream(now, 0)) {
+		delete(c.videoInfoCacheEntries, key)
+		c.videoInfoCache.Remove(element)
+		return nil, false
+	}
+	c.videoInfoCache.MoveToFront(element)
+	return cloneResolvedTrack(entry.track), true
+}
+
+func (c *Client) beginVideoInfoCall(key string) (*videoInfoCall, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.initSearchCachesLocked()
+	if call, ok := c.videoInfoInFlight[key]; ok {
+		return call, false
+	}
+	call := &videoInfoCall{done: make(chan struct{})}
+	c.videoInfoInFlight[key] = call
+	return call, true
+}
+
+func (c *Client) finishVideoInfoCall(key string, call *videoInfoCall, track *player.Track, err error, now time.Time) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	call.track = cloneResolvedTrack(track)
+	call.err = err
+	if current := c.videoInfoInFlight[key]; current == call {
+		delete(c.videoInfoInFlight, key)
+	}
+	if err == nil && track != nil {
+		if old, ok := c.videoInfoCacheEntries[key]; ok {
+			c.videoInfoCache.Remove(old)
+		}
+		entry := &videoInfoCacheEntry{key: key, storedAt: now, track: cloneResolvedTrack(track)}
+		c.videoInfoCacheEntries[key] = c.videoInfoCache.PushFront(entry)
+		for c.videoInfoCache.Len() > videoInfoCacheCapacity {
+			oldest := c.videoInfoCache.Back()
+			if oldest == nil {
+				break
+			}
+			if cached, ok := oldest.Value.(*videoInfoCacheEntry); ok && cached != nil {
+				delete(c.videoInfoCacheEntries, cached.key)
+			}
+			c.videoInfoCache.Remove(oldest)
+		}
+	}
+	close(call.done)
+}
+
 // GetVideoInfo gets information about a YouTube video
 func (c *Client) GetVideoInfo(rawURL string) (*player.Track, error) {
 	return c.GetVideoInfoContext(context.Background(), rawURL)
@@ -600,6 +721,15 @@ func (c *Client) GetVideoInfo(rawURL string) (*player.Track, error) {
 // GetVideoInfoContext gets video metadata while honoring cancellation from a
 // caller-owned operation such as background fast-path hydration.
 func (c *Client) GetVideoInfoContext(parent context.Context, rawURL string) (*player.Track, error) {
+	return c.getVideoInfoContextClass(parent, rawURL, processlimit.Interactive)
+}
+
+// PrefetchVideoInfoContext resolves video metadata as speculative bulk work.
+func (c *Client) PrefetchVideoInfoContext(parent context.Context, rawURL string) (*player.Track, error) {
+	return c.getVideoInfoContextClass(parent, rawURL, processlimit.Bulk)
+}
+
+func (c *Client) getVideoInfoContextClass(parent context.Context, rawURL string, class processlimit.WorkClass) (*player.Track, error) {
 	url, kind, err := ClassifyYouTubeURL(rawURL)
 	if err != nil {
 		return nil, err
@@ -607,15 +737,35 @@ func (c *Client) GetVideoInfoContext(parent context.Context, rawURL string) (*pl
 	if kind != URLKindVideo {
 		return nil, fmt.Errorf("%w: expected a video URL", errUnsupportedYouTubeURL)
 	}
-
-	start := time.Now()
-
 	if parent == nil {
 		parent = context.Background()
 	}
+	now := c.currentTime()
+	if cached, ok := c.lookupVideoInfoCache(url, now); ok {
+		logger.Timing("Video info cache hit", "url", url)
+		return cached, nil
+	}
+	call, owner := c.beginVideoInfoCall(url)
+	if !owner {
+		select {
+		case <-call.done:
+			return cloneResolvedTrack(call.track), call.err
+		case <-parent.Done():
+			return nil, parent.Err()
+		}
+	}
+
+	track, fetchErr := c.fetchVideoInfoContext(parent, url, class)
+	c.finishVideoInfoCall(url, call, track, fetchErr, c.currentTime())
+	return cloneResolvedTrack(track), fetchErr
+}
+
+func (c *Client) fetchVideoInfoContext(parent context.Context, url string, class processlimit.WorkClass) (*player.Track, error) {
+
+	start := time.Now()
 	ctx, cancel := context.WithTimeout(parent, 30*time.Second)
 	defer cancel()
-	releaseCommandSlot, err := c.acquireCommandSlot(ctx)
+	releaseCommandSlot, err := c.acquireCommandSlotClass(ctx, class)
 	if err != nil {
 		if ctx.Err() == context.DeadlineExceeded {
 			return nil, fmt.Errorf("video info fetch timed out after 30 seconds")
@@ -660,6 +810,12 @@ func (c *Client) GetVideoInfoContext(parent context.Context, rawURL string) (*pl
 
 // GetPlaylistInfo gets information about a YouTube playlist
 func (c *Client) GetPlaylistInfo(rawURL string) ([]*player.Track, error) {
+	return c.GetPlaylistInfoContext(context.Background(), rawURL)
+}
+
+// GetPlaylistInfoContext resolves a playlist while honoring cancellation from
+// the command or bot lifecycle that initiated it.
+func (c *Client) GetPlaylistInfoContext(parent context.Context, rawURL string) ([]*player.Track, error) {
 	url, kind, err := ClassifyYouTubeURL(rawURL)
 	if err != nil {
 		return nil, err
@@ -669,11 +825,17 @@ func (c *Client) GetPlaylistInfo(rawURL string) ([]*player.Track, error) {
 	}
 
 	start := time.Now()
+	if parent == nil {
+		parent = context.Background()
+	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	ctx, cancel := context.WithTimeout(parent, 60*time.Second)
 	defer cancel()
 	releaseCommandSlot, err := c.acquireCommandSlot(ctx)
 	if err != nil {
+		if ctx.Err() == context.Canceled {
+			return nil, fmt.Errorf("playlist fetch canceled")
+		}
 		if ctx.Err() == context.DeadlineExceeded {
 			return nil, fmt.Errorf("playlist fetch timed out after 60 seconds")
 		}
@@ -728,116 +890,7 @@ func (c *Client) GetPlaylistInfo(rawURL string) ([]*player.Track, error) {
 
 	logger.Timing("Playlist fetch completed", "url", url, "track_count", len(tracks), "duration_ms", time.Since(start).Milliseconds())
 
-	// Pre-fetch stream URLs for first 3 tracks in parallel
-	if len(tracks) > 0 {
-		c.prefetchStreamURLs(tracks, 3)
-	}
-
 	return tracks, nil
-}
-
-// prefetchStreamURLs fetches stream URLs for the first N tracks in parallel.
-// Results are collected locally in each goroutine and applied after all
-// workers finish to avoid racing with concurrent readers of the tracks.
-func (c *Client) prefetchStreamURLs(tracks []*player.Track, count int) {
-	if count > len(tracks) {
-		count = len(tracks)
-	}
-
-	start := time.Now()
-	var wg sync.WaitGroup
-	var successCount int
-	var mu sync.Mutex
-
-	type prefetchResult struct {
-		track           *player.Track
-		streamURL       string
-		streamHeaders   map[string]string
-		streamExpiresAt time.Time
-		title           string
-		artist          string
-		ok              bool
-	}
-
-	results := make([]prefetchResult, count)
-
-	for i := 0; i < count; i++ {
-		wg.Add(1)
-		go func(track *player.Track, index int) {
-			defer wg.Done()
-
-			// Skip if already has stream URL or is live
-			if track.StreamURL != "" || track.IsLive || track.URL == "" {
-				return
-			}
-
-			// Fetch full video info to get stream URL (10 second timeout)
-			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-			defer cancel()
-			releaseCommandSlot, err := c.acquireCommandSlot(ctx)
-			if err != nil {
-				logger.Debug("Prefetch slot unavailable", "index", index, "title", track.Title, "err", err)
-				return
-			}
-			defer releaseCommandSlot()
-
-			cmd := execCommandContext(ctx,
-				"yt-dlp",
-				"--dump-json",
-				"--no-playlist",
-				"--no-warnings",
-				"--",
-				track.URL,
-			)
-
-			output, err := cmd.Output()
-			if err != nil {
-				logger.Debug("Prefetch failed for track", "index", index, "title", track.Title, "err", err)
-				return // Silently fail, will be fetched later
-			}
-
-			var result SearchResult
-			if err := json.Unmarshal(output, &result); err != nil {
-				return
-			}
-
-			stream := extractBestAudioStream(result.Formats)
-			res := prefetchResult{track: track, ok: true}
-			res.streamURL = stream.URL
-			res.streamHeaders = stream.Headers
-			res.streamExpiresAt = stream.ExpiresAt
-			// Also update title if it was missing from flat playlist
-			if track.Title == "" && result.Title != "" {
-				res.title = result.Title
-			}
-			if track.Artist == "" && result.Uploader != "" {
-				res.artist = result.Uploader
-			}
-
-			mu.Lock()
-			results[index] = res
-			successCount++
-			mu.Unlock()
-		}(tracks[i], i)
-	}
-
-	wg.Wait()
-
-	// Apply all mutations sequentially now that workers are done.
-	for _, res := range results {
-		if !res.ok {
-			continue
-		}
-		res.track.SetPrefetchedStream(res.streamURL, res.streamHeaders, res.streamExpiresAt)
-		if res.title != "" {
-			res.track.Title = res.title
-		}
-		if res.artist != "" {
-			res.track.Artist = res.artist
-		}
-	}
-
-	logger.Timing("Playlist prefetch completed", "requested", count, "success", successCount, "duration_ms", time.Since(start).Milliseconds())
 }
 
 // Download downloads a video to the cache directory
@@ -862,7 +915,7 @@ func (c *Client) DownloadContext(parent context.Context, rawURL, outputPath stri
 	}
 	ctx, cancel := context.WithTimeout(parent, 5*time.Minute)
 	defer cancel()
-	releaseCommandSlot, err := c.acquireCommandSlot(ctx)
+	releaseCommandSlot, err := c.acquireCommandSlotClass(ctx, processlimit.Background)
 	if err != nil {
 		if ctx.Err() == context.DeadlineExceeded {
 			return fmt.Errorf("download timed out after 5 minutes")

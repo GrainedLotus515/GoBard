@@ -1,9 +1,11 @@
-.PHONY: help docker-test docker-lint docker-build docker-run docker-run-secrets docker-prod-run docker-prod-run-secrets docker-stop docker-logs docker-smoke clean
+.PHONY: help docker-test docker-lint docker-build docker-bench docker-profile-check docker-run docker-run-medium docker-run-large docker-run-secrets docker-prod-run docker-prod-run-secrets docker-stop docker-logs docker-smoke clean
 
 DOCKER ?= docker
 COMPOSE ?= $(DOCKER) compose
 DOCKER_IMAGE ?= gobard:local
 LOCAL_COMPOSE = -f docker-compose.yml -f docker-compose.local.yml
+MEDIUM_COMPOSE = -f docker-compose.yml -f docker-compose.medium.yml
+LARGE_COMPOSE = -f docker-compose.yml -f docker-compose.large.yml
 
 help: ## Show this help message
 	@echo 'Usage: make [target]'
@@ -21,11 +23,41 @@ docker-lint: ## Run read-only formatting and vet checks in Docker
 docker-build: ## Build the hardened linux/amd64 runtime image locally
 	$(DOCKER) build --target runtime --platform linux/amd64 -t $(DOCKER_IMAGE) .
 
+docker-bench: ## Run microbenchmarks and 15-minute capacity profiles in Docker
+	$(DOCKER) build --target bench --progress=plain .
+	./scripts/docker-bench.sh
+
+docker-profile-check: ## Validate rendered small, medium, and large Compose resource profiles
+	GOBARD_IMAGE=ghcr.io/grainedlotus515/gobard@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa $(COMPOSE) -f docker-compose.yml config --no-env-resolution | rg -q 'cpus: 2'
+	GOBARD_IMAGE=ghcr.io/grainedlotus515/gobard@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa $(COMPOSE) -f docker-compose.yml config --no-env-resolution | rg -q 'mem_limit: "?1073741824"?'
+	GOBARD_IMAGE=ghcr.io/grainedlotus515/gobard@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa $(COMPOSE) -f docker-compose.yml config --no-env-resolution | rg -q 'CACHE_LIMIT: 2GB'
+	GOBARD_IMAGE=ghcr.io/grainedlotus515/gobard@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa $(COMPOSE) -f docker-compose.yml config --no-env-resolution | rg -q 'YTDLP_MAX_CONCURRENCY: "4"'
+	GOBARD_IMAGE=ghcr.io/grainedlotus515/gobard@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa $(COMPOSE) -f docker-compose.yml config --no-env-resolution | rg -q 'pids_limit: 256'
+	GOBARD_IMAGE=ghcr.io/grainedlotus515/gobard@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa $(COMPOSE) $(MEDIUM_COMPOSE) config --no-env-resolution | rg -q 'cpus: 4'
+	GOBARD_IMAGE=ghcr.io/grainedlotus515/gobard@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa $(COMPOSE) $(MEDIUM_COMPOSE) config --no-env-resolution | rg -q 'mem_limit: "?2147483648"?'
+	GOBARD_IMAGE=ghcr.io/grainedlotus515/gobard@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa $(COMPOSE) $(MEDIUM_COMPOSE) config --no-env-resolution | rg -q 'CACHE_LIMIT: 10GB'
+	GOBARD_IMAGE=ghcr.io/grainedlotus515/gobard@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa $(COMPOSE) $(MEDIUM_COMPOSE) config --no-env-resolution | rg -q 'YTDLP_MAX_CONCURRENCY: "8"'
+	GOBARD_IMAGE=ghcr.io/grainedlotus515/gobard@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa $(COMPOSE) $(MEDIUM_COMPOSE) config --no-env-resolution | rg -q 'pids_limit: 256'
+	GOBARD_IMAGE=ghcr.io/grainedlotus515/gobard@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa $(COMPOSE) $(LARGE_COMPOSE) config --no-env-resolution | rg -q 'cpus: 8'
+	GOBARD_IMAGE=ghcr.io/grainedlotus515/gobard@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa $(COMPOSE) $(LARGE_COMPOSE) config --no-env-resolution | rg -q 'mem_limit: "?4294967296"?'
+	GOBARD_IMAGE=ghcr.io/grainedlotus515/gobard@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa $(COMPOSE) $(LARGE_COMPOSE) config --no-env-resolution | rg -q 'CACHE_LIMIT: 25GB'
+	GOBARD_IMAGE=ghcr.io/grainedlotus515/gobard@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa $(COMPOSE) $(LARGE_COMPOSE) config --no-env-resolution | rg -q 'YTDLP_MAX_CONCURRENCY: "12"'
+	GOBARD_IMAGE=ghcr.io/grainedlotus515/gobard@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa $(COMPOSE) $(LARGE_COMPOSE) config --no-env-resolution | rg -q 'pids_limit: 256'
+	GOBARD_IMAGE=ghcr.io/grainedlotus515/gobard@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa $(COMPOSE) -f docker-compose.bench.yml config --no-env-resolution --quiet
+	! env -u GOBARD_IMAGE $(COMPOSE) --env-file /dev/null -f docker-compose.yml config --no-env-resolution 2>&1 | rg -v 'GOBARD_IMAGE'
+	GOBARD_IMAGE=ghcr.io/grainedlotus515/gobard@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa $(COMPOSE) -f docker-compose.yml config --no-env-resolution | rg -c 'image: ghcr.io/grainedlotus515/gobard@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' | rg -q '^2$$'
+
 docker-run: ## Build the checkout and start it with the local Compose override
-	$(COMPOSE) $(LOCAL_COMPOSE) up -d --build
+	GOBARD_IMAGE=$(DOCKER_IMAGE) $(COMPOSE) $(LOCAL_COMPOSE) up -d --build
+
+docker-run-medium: ## Build and start the checkout with the medium resource profile
+	GOBARD_IMAGE=$(DOCKER_IMAGE) $(COMPOSE) $(LOCAL_COMPOSE) -f docker-compose.medium.yml up -d --build
+
+docker-run-large: ## Build and start the checkout with the large resource profile
+	GOBARD_IMAGE=$(DOCKER_IMAGE) $(COMPOSE) $(LOCAL_COMPOSE) -f docker-compose.large.yml up -d --build
 
 docker-run-secrets: ## Start the checkout using DISCORD_TOKEN_FILE_HOST and a Compose secret
-	$(COMPOSE) $(LOCAL_COMPOSE) -f docker-compose.secrets.yml up -d --build
+	GOBARD_IMAGE=$(DOCKER_IMAGE) $(COMPOSE) $(LOCAL_COMPOSE) -f docker-compose.secrets.yml up -d --build
 
 docker-prod-run: ## Start the configured GHCR image without building locally
 	$(COMPOSE) up -d
@@ -34,13 +66,13 @@ docker-prod-run-secrets: ## Start the GHCR image using DISCORD_TOKEN_FILE_HOST a
 	$(COMPOSE) -f docker-compose.yml -f docker-compose.secrets.yml up -d
 
 docker-stop: ## Stop the local Compose stack without deleting the cache
-	$(COMPOSE) $(LOCAL_COMPOSE) down
+	GOBARD_IMAGE=$(DOCKER_IMAGE) $(COMPOSE) $(LOCAL_COMPOSE) down
 
 docker-logs: ## Follow local Compose logs
-	$(COMPOSE) $(LOCAL_COMPOSE) logs -f
+	GOBARD_IMAGE=$(DOCKER_IMAGE) $(COMPOSE) $(LOCAL_COMPOSE) logs -f
 
 docker-smoke: docker-build ## Verify the final image's runtime tools and permissions
-	$(DOCKER) run --rm --read-only --tmpfs /tmp:rw,noexec,nosuid,size=128m --entrypoint /bin/sh $(DOCKER_IMAGE) -ec 'command -v ffmpeg; command -v yt-dlp; yt-dlp --version >/dev/null; test -x /app/gobard; test ! -w /app/gobard; ! command -v curl; ! command -v pgrep; ldd /app/gobard | grep -q libdave'
+	$(DOCKER) run --rm --read-only --tmpfs /tmp:rw,noexec,nosuid,size=128m --entrypoint /bin/sh $(DOCKER_IMAGE) -ec 'command -v ffmpeg; command -v yt-dlp; yt-dlp --version >/dev/null; command -v deno; deno eval --no-config --no-npm "0"; test ! -w /usr/local/bin/deno; python3 -c "import sys; sys.path.insert(0, \"/usr/local/bin/yt-dlp\"); import yt_dlp_ejs"; test -x /app/gobard; test ! -w /app/gobard; ! command -v curl; ! command -v pgrep; ldd /app/gobard | grep -q libdave'
 
 clean: ## Remove Go build cache only; never delete the persisted audio cache
 	@echo 'No project files were removed. Docker build caches are managed by Docker; ./cache is intentionally preserved.'

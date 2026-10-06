@@ -189,6 +189,9 @@ func (b *Bot) respondEmbed(s *discordgo.Session, i *discordgo.InteractionCreate,
 }
 
 func (b *Bot) deferInteractionResponse(s *discordgo.Session, i *discordgo.InteractionCreate) error {
+	if b != nil && b.deferInteractionFn != nil {
+		return b.deferInteractionFn(s, i)
+	}
 	if s == nil || i == nil || i.Interaction == nil {
 		return fmt.Errorf("missing session or interaction")
 	}

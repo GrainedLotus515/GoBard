@@ -1,6 +1,31 @@
 package player
 
-import "testing"
+import (
+	"context"
+	"errors"
+	"testing"
+	"time"
+)
+
+func TestTrackResolutionPublishesOnceAndHonorsCancellation(t *testing.T) {
+	resolution := NewTrackResolution()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	defer cancel()
+	if _, err := resolution.Wait(ctx); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Wait() error = %v, want deadline exceeded", err)
+	}
+
+	want := &Track{Title: "resolved"}
+	resolution.Complete(want, nil)
+	resolution.Complete(&Track{Title: "ignored"}, errors.New("ignored"))
+	got, err := resolution.Wait(context.Background())
+	if err != nil {
+		t.Fatalf("Wait() after Complete error = %v", err)
+	}
+	if got != want {
+		t.Fatalf("Wait() track = %#v, want first completed result %#v", got, want)
+	}
+}
 
 func TestQueueReplaceTrackReplacesCurrentTrack(t *testing.T) {
 	queue := NewQueue()
@@ -49,6 +74,29 @@ func TestQueueReplaceTrackReplacesUpcomingTrack(t *testing.T) {
 	index, isCurrent, ok := queue.FindTrack(replacement)
 	if !ok || index != 1 || isCurrent {
 		t.Fatalf("FindTrack() = (%d, %v, %v), want (1, false, true)", index, isCurrent, ok)
+	}
+}
+
+func TestQueueReplaceUpcomingTrackRejectsCurrentTrack(t *testing.T) {
+	queue := NewQueue()
+	current := &Track{Title: "current"}
+	upcoming := &Track{Title: "upcoming"}
+	replacement := &Track{Title: "replacement"}
+
+	queue.Add(current)
+	queue.Add(upcoming)
+	queue.Next()
+	if ok := queue.ReplaceUpcomingTrack(upcoming, replacement); !ok {
+		t.Fatal("ReplaceUpcomingTrack(upcoming) = false, want true")
+	}
+	if got := queue.Next(); got != replacement {
+		t.Fatalf("Next() = %p, want %p", got, replacement)
+	}
+	if ok := queue.ReplaceUpcomingTrack(replacement, upcoming); ok {
+		t.Fatal("ReplaceUpcomingTrack(current) = true, want false")
+	}
+	if got := queue.Current(); got != replacement {
+		t.Fatalf("Current() = %p after rejected replacement, want %p", got, replacement)
 	}
 }
 

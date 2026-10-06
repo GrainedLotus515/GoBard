@@ -124,6 +124,14 @@ func TestBuildStatusCardUsesDefaultColor(t *testing.T) {
 	}
 }
 
+func TestLinkedTitleEscapesUntrustedMarkdown(t *testing.T) {
+	got := linkedTitle("title](https://attacker.invalid) *bold*", "https://example.com/watch", 80)
+	want := "[title\\]\\(https://attacker.invalid\\) \\*bold\\*](https://example.com/watch)"
+	if got != want {
+		t.Fatalf("linkedTitle() = %q, want %q", got, want)
+	}
+}
+
 func TestParseCustomIDRoundTrip(t *testing.T) {
 	tests := []struct {
 		name string

@@ -108,6 +108,7 @@ func (b *Bot) registerCommands() error {
 					Name:        "seconds",
 					Description: "Number of seconds to skip forward",
 					Required:    true,
+					MinValue:    func() *float64 { v := 0.0; return &v }(),
 				},
 			},
 		},
@@ -215,23 +216,39 @@ func (b *Bot) bulkOverwriteGuildCommands(applicationID string, commands []*disco
 		return nil
 	}
 
-	errCh := make(chan error, len(guilds))
-	workers := make(chan struct{}, commandRegistrationWorkers)
-	var wg sync.WaitGroup
-	for _, guild := range guilds {
-		if guild == nil || guild.ID == "" {
-			continue
-		}
-		wg.Add(1)
-		go func(guildID, guildName string) {
-			defer wg.Done()
-			workers <- struct{}{}
-			defer func() { <-workers }()
-			if err := b.bulkOverwriteCommands(applicationID, guildID, commands); err != nil {
-				errCh <- fmt.Errorf("reconcile commands for guild %s (%s): %w", guildName, guildID, err)
-			}
-		}(guild.ID, guild.Name)
+	type guildJob struct {
+		id   string
+		name string
 	}
+	jobs := make([]guildJob, 0, len(guilds))
+	for _, guild := range guilds {
+		if guild != nil && guild.ID != "" {
+			jobs = append(jobs, guildJob{id: guild.ID, name: guild.Name})
+		}
+	}
+	if len(jobs) == 0 {
+		return nil
+	}
+
+	errCh := make(chan error, len(jobs))
+	jobCh := make(chan guildJob)
+	var wg sync.WaitGroup
+	workerCount := min(commandRegistrationWorkers, len(jobs))
+	for range workerCount {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for job := range jobCh {
+				if err := b.bulkOverwriteCommands(applicationID, job.id, commands); err != nil {
+					errCh <- fmt.Errorf("reconcile commands for guild %s (%s): %w", job.name, job.id, err)
+				}
+			}
+		}()
+	}
+	for _, job := range jobs {
+		jobCh <- job
+	}
+	close(jobCh)
 	wg.Wait()
 	close(errCh)
 

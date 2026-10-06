@@ -2,6 +2,7 @@ package bot
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"reflect"
@@ -84,9 +85,95 @@ func TestPlayLoopSeekReplaysCurrentTrackBeforeAdvancing(t *testing.T) {
 		t.Fatal("playLoop did not finish in time")
 	}
 
-	want := []string{"track-a", "track-a", "track-b"}
+	// The hook intentionally has no active player session. A seek requested
+	// while preparation is selected must retain only the start offset, not
+	// fabricate a replay transition after normal completion.
+	want := []string{"track-a", "track-b"}
 	if !reflect.DeepEqual(playOrder, want) {
 		t.Fatalf("play order = %v, want %v", playOrder, want)
+	}
+}
+
+func TestPlayLoopPreStartSeekUsesOffsetWithoutReplayTransition(t *testing.T) {
+	cacheStore, err := cache.NewCache(t.TempDir(), 64*1024*1024)
+	if err != nil {
+		t.Fatalf("NewCache() error = %v", err)
+	}
+	trackA := &player.Track{Title: "track-a", URL: "https://example.com/a", Duration: time.Minute}
+	trackB := &player.Track{Title: "track-b", URL: "https://example.com/b", Duration: time.Minute}
+	seedCacheEntry(t, cacheStore, trackA.URL)
+	seedCacheEntry(t, cacheStore, trackB.URL)
+
+	manager := player.NewManager()
+	p := manager.GetPlayer("guild-prestart-seek")
+	p.SetVoiceConnection(stubVoiceConn{})
+	p.Queue.Add(trackA)
+	p.Queue.Add(trackB)
+	if got := p.Queue.Next(); got != trackA {
+		t.Fatal("failed to select first track for preparation")
+	}
+	if err := p.Seek(15 * time.Second); err != nil {
+		t.Fatalf("pre-start Seek() error = %v", err)
+	}
+
+	var order []string
+	waits := 0
+	b := &Bot{PlayerManager: manager, Cache: cacheStore}
+	b.playTrackFn = func(gp *player.GuildPlayer) error {
+		order = append(order, gp.Queue.Current().Title)
+		return nil
+	}
+	b.waitForCompletionFn = func(gp *player.GuildPlayer) {
+		waits++
+		if waits == 2 {
+			gp.ClearVoiceConnection()
+		}
+	}
+
+	b.playLoop("guild-prestart-seek", "channel")
+	if want := []string{"track-a", "track-b"}; !reflect.DeepEqual(order, want) {
+		t.Fatalf("play order = %v, want %v", order, want)
+	}
+}
+
+func TestPlayLoopContextCancellationWhileResolutionIsPendingDoesNotPlay(t *testing.T) {
+	cacheStore, err := cache.NewCache(t.TempDir(), 64*1024*1024)
+	if err != nil {
+		t.Fatalf("NewCache() error = %v", err)
+	}
+	manager := player.NewManager()
+	p := manager.GetPlayer("guild-resolution-cancel")
+	p.SetVoiceConnection(stubVoiceConn{})
+	track := &player.Track{Title: "pending", URL: "https://example.com/pending", Resolution: player.NewTrackResolution()}
+	p.Queue.Add(track)
+
+	called := make(chan struct{}, 1)
+	b := &Bot{PlayerManager: manager, Cache: cacheStore}
+	b.playTrackFn = func(*player.GuildPlayer) error {
+		called <- struct{}{}
+		return nil
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		b.playLoopContext(ctx, "guild-resolution-cancel", "channel")
+		close(done)
+	}()
+	select {
+	case <-called:
+		t.Fatal("playback started while resolution was pending")
+	case <-time.After(50 * time.Millisecond):
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("play loop did not exit after resolution wait was canceled")
+	}
+	select {
+	case <-called:
+		t.Fatal("playback started after lifecycle cancellation")
+	default:
 	}
 }
 
@@ -566,6 +653,55 @@ func TestPlayLoopSkipsBlockingMetadataFetchForMetadataPendingTrack(t *testing.T)
 
 	if got := atomic.LoadInt32(&hydrateCalls); got != 0 {
 		t.Fatalf("hydrate stream calls = %d, want 0", got)
+	}
+}
+
+func TestPlayLoopWaitsForMetadataFailureBeforePlaybackFallback(t *testing.T) {
+	cacheStore, manager, p := newPlayLoopTestEnv(t)
+	resolution := player.NewTrackResolution()
+	track := &player.Track{
+		Title:           "Loading track...",
+		URL:             "https://www.youtube.com/watch?v=sequential",
+		MetadataPending: true,
+		Resolution:      resolution,
+	}
+	p.Queue.Add(track)
+
+	var hydrateCalls atomic.Int32
+	playCalled := make(chan struct{}, 1)
+	b := &Bot{PlayerManager: manager, Cache: cacheStore}
+	b.hydrateStreamInfoFn = func(*player.Track) error {
+		hydrateCalls.Add(1)
+		return nil
+	}
+	b.playTrackFn = func(*player.GuildPlayer) error {
+		playCalled <- struct{}{}
+		return nil
+	}
+	b.waitForCompletionFn = func(gp *player.GuildPlayer) {
+		gp.ClearVoiceConnection()
+	}
+
+	done := runPlayLoopAsync(b, p.GuildID)
+	select {
+	case <-playCalled:
+		t.Fatal("playback fallback started while metadata resolution was still running")
+	case <-time.After(20 * time.Millisecond):
+	}
+	resolution.Complete(nil, errors.New("metadata unavailable"))
+
+	select {
+	case <-playCalled:
+	case <-time.After(time.Second):
+		t.Fatal("playback fallback did not start after metadata resolution failed")
+	}
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("playLoop did not finish")
+	}
+	if got := hydrateCalls.Load(); got != 0 {
+		t.Fatalf("separate metadata hydration calls = %d, want 0", got)
 	}
 }
 

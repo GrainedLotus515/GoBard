@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-VERSION="${1:-v1.1.0}"
+VERSION="${1:-v1.2.1}"
 
 if ! command -v go >/dev/null 2>&1; then
 	echo "go is required to locate the GoDave installer" >&2

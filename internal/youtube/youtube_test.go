@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"strconv"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -17,6 +18,7 @@ type commandResponse struct {
 	stdout   string
 	stderr   string
 	exitCode int
+	delay    time.Duration
 }
 
 func TestYouTubeHelperProcess(t *testing.T) {
@@ -29,6 +31,10 @@ func TestYouTubeHelperProcess(t *testing.T) {
 	}
 	if _, err := fmt.Fprint(os.Stderr, os.Getenv("GO_YOUTUBE_HELPER_STDERR")); err != nil {
 		os.Exit(1)
+	}
+	delayMillis, delayErr := strconv.Atoi(os.Getenv("GO_YOUTUBE_HELPER_DELAY_MS"))
+	if delayErr == nil && delayMillis > 0 {
+		time.Sleep(time.Duration(delayMillis) * time.Millisecond)
 	}
 
 	exitCode, err := strconv.Atoi(os.Getenv("GO_YOUTUBE_HELPER_EXIT_CODE"))
@@ -340,6 +346,94 @@ func TestSearchRejectsExplicitURLsWithoutLaunchingYTDLP(t *testing.T) {
 	}
 }
 
+func TestGetVideoInfoSingleFlightAndShortCache(t *testing.T) {
+	client := NewClient()
+	calls := stubSearchCommands(t, []commandResponse{{
+		stdout: `{"id":"single-flight","title":"One Fetch","duration":120,"uploader":"Artist","webpage_url":"https://www.youtube.com/watch?v=single-flight","formats":[]}`,
+		delay:  100 * time.Millisecond,
+	}})
+
+	start := make(chan struct{})
+	errs := make(chan error, 2)
+	for range 2 {
+		go func() {
+			<-start
+			track, err := client.GetVideoInfoContext(context.Background(), "https://youtu.be/single-flight")
+			if err == nil && (track == nil || track.Title != "One Fetch") {
+				err = fmt.Errorf("unexpected track %#v", track)
+			}
+			errs <- err
+		}()
+	}
+	close(start)
+	for range 2 {
+		if err := <-errs; err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := client.GetVideoInfo("https://www.youtube.com/watch?v=single-flight"); err != nil {
+		t.Fatalf("cached GetVideoInfo() error = %v", err)
+	}
+	if got := atomic.LoadInt32(calls); got != 1 {
+		t.Fatalf("yt-dlp calls = %d, want one shared and cached call", got)
+	}
+}
+
+func TestSearchContextCancellationStopsBlockedCommand(t *testing.T) {
+	client := NewClient()
+	started := make(chan struct{})
+	original := execCommandContext
+	//nolint:gosec // fixed test-binary invocation, not user-controlled command execution.
+	execCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		close(started)
+		// #nosec G204 -- this invokes the current test binary with fixed arguments.
+		cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=TestYouTubeHelperProcess", "--")
+		cmd.Env = append(os.Environ(), "GO_WANT_YOUTUBE_HELPER_PROCESS=1", "GO_YOUTUBE_HELPER_DELAY_MS=10000")
+		return cmd
+	}
+	t.Cleanup(func() { execCommandContext = original })
+
+	ctx, cancel := context.WithCancel(context.Background())
+	result := make(chan error, 1)
+	go func() {
+		_, err := client.SearchContext(ctx, "blocked search")
+		result <- err
+	}()
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("search command did not start")
+	}
+	cancel()
+	select {
+	case err := <-result:
+		if err == nil || !strings.Contains(err.Error(), "canceled") {
+			t.Fatalf("SearchContext() error = %v, want cancellation", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("canceled search did not return promptly")
+	}
+}
+
+func TestGetPlaylistInfoDoesNotSynchronouslyPrefetchEntries(t *testing.T) {
+	client := NewClientWithOptions(Options{MaxPlaylistTracks: 500})
+	calls := stubSearchCommands(t, []commandResponse{{
+		stdout: "{\"id\":\"playlist-one\",\"title\":\"One\",\"webpage_url\":\"https://www.youtube.com/watch?v=playlist-one\"}\n" +
+			"{\"id\":\"playlist-two\",\"title\":\"Two\",\"webpage_url\":\"https://www.youtube.com/watch?v=playlist-two\"}\n",
+	}})
+
+	tracks, err := client.GetPlaylistInfo("https://www.youtube.com/playlist?list=PL-performance")
+	if err != nil {
+		t.Fatalf("GetPlaylistInfo() error = %v", err)
+	}
+	if len(tracks) != 2 {
+		t.Fatalf("playlist tracks = %d, want 2", len(tracks))
+	}
+	if got := atomic.LoadInt32(calls); got != 1 {
+		t.Fatalf("yt-dlp calls = %d, want flat playlist enumeration only", got)
+	}
+}
+
 func stubSearchCommands(t *testing.T, responses []commandResponse) *int32 {
 	t.Helper()
 
@@ -365,6 +459,7 @@ func stubSearchCommands(t *testing.T, responses []commandResponse) *int32 {
 			"GO_YOUTUBE_HELPER_STDOUT="+response.stdout,
 			"GO_YOUTUBE_HELPER_STDERR="+response.stderr,
 			"GO_YOUTUBE_HELPER_EXIT_CODE="+strconv.Itoa(response.exitCode),
+			"GO_YOUTUBE_HELPER_DELAY_MS="+strconv.FormatInt(response.delay.Milliseconds(), 10),
 		)
 		return cmd
 	}
