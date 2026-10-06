@@ -28,24 +28,7 @@ docker-bench: ## Run microbenchmarks and 15-minute capacity profiles in Docker
 	./scripts/docker-bench.sh
 
 docker-profile-check: ## Validate rendered small, medium, and large Compose resource profiles
-	GOBARD_IMAGE=ghcr.io/grainedlotus515/gobard@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa $(COMPOSE) -f docker-compose.yml config --no-env-resolution | rg -q 'cpus: 2'
-	GOBARD_IMAGE=ghcr.io/grainedlotus515/gobard@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa $(COMPOSE) -f docker-compose.yml config --no-env-resolution | rg -q 'mem_limit: "?1073741824"?'
-	GOBARD_IMAGE=ghcr.io/grainedlotus515/gobard@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa $(COMPOSE) -f docker-compose.yml config --no-env-resolution | rg -q 'CACHE_LIMIT: 2GB'
-	GOBARD_IMAGE=ghcr.io/grainedlotus515/gobard@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa $(COMPOSE) -f docker-compose.yml config --no-env-resolution | rg -q 'YTDLP_MAX_CONCURRENCY: "4"'
-	GOBARD_IMAGE=ghcr.io/grainedlotus515/gobard@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa $(COMPOSE) -f docker-compose.yml config --no-env-resolution | rg -q 'pids_limit: 256'
-	GOBARD_IMAGE=ghcr.io/grainedlotus515/gobard@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa $(COMPOSE) $(MEDIUM_COMPOSE) config --no-env-resolution | rg -q 'cpus: 4'
-	GOBARD_IMAGE=ghcr.io/grainedlotus515/gobard@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa $(COMPOSE) $(MEDIUM_COMPOSE) config --no-env-resolution | rg -q 'mem_limit: "?2147483648"?'
-	GOBARD_IMAGE=ghcr.io/grainedlotus515/gobard@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa $(COMPOSE) $(MEDIUM_COMPOSE) config --no-env-resolution | rg -q 'CACHE_LIMIT: 10GB'
-	GOBARD_IMAGE=ghcr.io/grainedlotus515/gobard@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa $(COMPOSE) $(MEDIUM_COMPOSE) config --no-env-resolution | rg -q 'YTDLP_MAX_CONCURRENCY: "8"'
-	GOBARD_IMAGE=ghcr.io/grainedlotus515/gobard@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa $(COMPOSE) $(MEDIUM_COMPOSE) config --no-env-resolution | rg -q 'pids_limit: 256'
-	GOBARD_IMAGE=ghcr.io/grainedlotus515/gobard@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa $(COMPOSE) $(LARGE_COMPOSE) config --no-env-resolution | rg -q 'cpus: 8'
-	GOBARD_IMAGE=ghcr.io/grainedlotus515/gobard@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa $(COMPOSE) $(LARGE_COMPOSE) config --no-env-resolution | rg -q 'mem_limit: "?4294967296"?'
-	GOBARD_IMAGE=ghcr.io/grainedlotus515/gobard@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa $(COMPOSE) $(LARGE_COMPOSE) config --no-env-resolution | rg -q 'CACHE_LIMIT: 25GB'
-	GOBARD_IMAGE=ghcr.io/grainedlotus515/gobard@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa $(COMPOSE) $(LARGE_COMPOSE) config --no-env-resolution | rg -q 'YTDLP_MAX_CONCURRENCY: "12"'
-	GOBARD_IMAGE=ghcr.io/grainedlotus515/gobard@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa $(COMPOSE) $(LARGE_COMPOSE) config --no-env-resolution | rg -q 'pids_limit: 256'
-	GOBARD_IMAGE=ghcr.io/grainedlotus515/gobard@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa $(COMPOSE) -f docker-compose.bench.yml config --no-env-resolution --quiet
-	! env -u GOBARD_IMAGE $(COMPOSE) --env-file /dev/null -f docker-compose.yml config --no-env-resolution 2>&1 | rg -v 'GOBARD_IMAGE'
-	GOBARD_IMAGE=ghcr.io/grainedlotus515/gobard@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa $(COMPOSE) -f docker-compose.yml config --no-env-resolution | rg -c 'image: ghcr.io/grainedlotus515/gobard@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' | rg -q '^2$$'
+	sh ./scripts/check-compose-profiles.sh $(COMPOSE)
 
 docker-run: ## Build the checkout and start it with the local Compose override
 	GOBARD_IMAGE=$(DOCKER_IMAGE) $(COMPOSE) $(LOCAL_COMPOSE) up -d --build
