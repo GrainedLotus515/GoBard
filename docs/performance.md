@@ -29,6 +29,12 @@ requires explicit session and queue limits; it rejects saturation and retains a
 slot through shutdown. The current production bot has not yet adopted these
 replacement admission budgets.
 
+Cache storage has a 65,536-entry index cap, 256-entry directory scan batches,
+16 distinct concurrent creators, and one filesystem mutation at a time. The
+index cap fails startup without deleting completed media. Snapshot sorting and
+unlink/rename occur outside the metadata lock. External processes modifying the
+same directory are outside the cache's byte-accounting guarantee.
+
 Measure allocations/frame, codec CPU, memory/session, stalled-consumer behavior,
 shutdown latency and concurrent guild workloads independently of live provider
 latency. Report machine, image/tool versions, frame count and concurrency with

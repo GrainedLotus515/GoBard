@@ -1,7 +1,9 @@
 package cache
 
 import (
+	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sync"
@@ -9,6 +11,151 @@ import (
 	"testing"
 	"time"
 )
+
+func TestCanceledWaiterDoesNotCancelCreator(t *testing.T) {
+	c, err := NewCache(t.TempDir(), 1024)
+	if err != nil {
+		t.Fatal(err)
+	}
+	started, release, done := make(chan struct{}), make(chan struct{}), make(chan error, 1)
+	go func() {
+		_, err := c.GetOrCreate("one.webm", func(path string) error {
+			close(started)
+			<-release
+			return os.WriteFile(path, []byte("audio"), 0o600)
+		})
+		done <- err
+	}()
+	<-started
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	_, err = c.GetOrCreateContext(ctx, "one.webm", func(string) error { t.Error("duplicate creator"); return nil })
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("wait error = %v", err)
+	}
+	close(release)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := c.Get("one.webm"); !ok {
+		t.Fatal("creator did not publish")
+	}
+}
+
+func TestCanceledCreatorCannotPublish(t *testing.T) {
+	c, err := NewCache(t.TempDir(), 1024)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	_, err = c.GetOrCreateContext(ctx, "track.webm", func(path string) error {
+		if err := os.WriteFile(path, []byte("audio"), 0o600); err != nil {
+			return err
+		}
+		cancel()
+		return nil
+	})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("publish error = %v", err)
+	}
+	files, err := os.ReadDir(c.dir)
+	if err != nil || len(files) != 0 {
+		t.Fatalf("canceled files = %v, %v", files, err)
+	}
+}
+
+func TestCreatorAdmissionIsBoundedAndReleased(t *testing.T) {
+	c, err := NewCache(t.TempDir(), 1024)
+	if err != nil {
+		t.Fatal(err)
+	}
+	started, release, done := make(chan struct{}, maxCreators), make(chan struct{}), make(chan error, maxCreators)
+	for i := range maxCreators {
+		go func() {
+			_, err := c.GetOrCreate(fmt.Sprintf("%d.webm", i), func(path string) error {
+				started <- struct{}{}
+				<-release
+				return os.WriteFile(path, []byte("audio"), 0o600)
+			})
+			done <- err
+		}()
+	}
+	for range maxCreators {
+		<-started
+	}
+	_, err = c.GetOrCreate("overflow.webm", func(string) error { t.Error("excess creator admitted"); return nil })
+	if !errors.Is(err, ErrBusy) {
+		t.Errorf("overflow error = %v", err)
+	}
+	close(release)
+	for range maxCreators {
+		if err := <-done; err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := c.GetOrCreate("after.webm", func(path string) error { return os.WriteFile(path, []byte("audio"), 0o600) }); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestOldLeaseCannotUnpinReplacement(t *testing.T) {
+	c, err := NewCache(t.TempDir(), 1024)
+	if err != nil {
+		t.Fatal(err)
+	}
+	create := func(path string) error { return os.WriteFile(path, []byte("audio"), 0o600) }
+	path, err := c.GetOrCreate("track.webm", create)
+	if err != nil {
+		t.Fatal(err)
+	}
+	old, ok := c.Acquire("track.webm")
+	if !ok {
+		t.Fatal("missing original")
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.GetOrCreate("track.webm", create); err != nil {
+		t.Fatal(err)
+	}
+	replacement, ok := c.Acquire("track.webm")
+	if !ok {
+		t.Fatal("missing replacement")
+	}
+	old.Release()
+	if err := c.Clear(); !errors.Is(err, ErrEntryLeased) {
+		t.Fatalf("replacement lease lost: %v", err)
+	}
+	if _, err := os.Stat(replacement.Path); err != nil {
+		t.Fatal(err)
+	}
+	replacement.Release()
+	if err := c.Clear(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestCreatorSymlinkRejected(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "outside")
+	if err := os.WriteFile(target, []byte("private"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c, err := NewCache(filepath.Join(dir, "cache"), 1024)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.GetOrCreate("track.webm", func(path string) error { return os.Symlink(target, path) }); err == nil {
+		t.Fatal("symlink published")
+	}
+	if count, size, _ := c.GetStats(); count != 0 || size != 0 {
+		t.Fatal("rejected file indexed")
+	}
+	if data, err := os.ReadFile(target); err != nil || string(data) != "private" {
+		t.Fatal("symlink target changed")
+	}
+}
 
 func BenchmarkCacheAcquire(b *testing.B) {
 	dir := b.TempDir()

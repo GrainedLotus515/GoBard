@@ -87,7 +87,7 @@ func (c *Cached) run() {
 				return
 			}
 			key := cache.GenerateKey(url)
-			_, err := c.store.GetOrCreate(key, func(path string) error { return c.downloader.Download(c.ctx, url, path, c.maxBytes) })
+			_, err := c.store.GetOrCreateContext(c.ctx, key, func(path string) error { return c.downloader.Download(c.ctx, url, path, c.maxBytes) })
 			if err != nil && c.ctx.Err() == nil {
 				category := failure.Source
 				var classified *failure.Error

@@ -24,7 +24,7 @@ completed v2 release.
   leases/warming ownership and bounded guild registry are implemented and tested.
   They are replacement components, not yet the production composition.
 * Phases 3–6 remaining: production command/composition migration,
-  metadata-worker bounds, cache storage lock/index review, complete interaction/reconnect
+  metadata-worker bounds, complete interaction/reconnect
   contracts, health dimensions, production logger wiring, load measurements and
   final removal of old implementations. Do not deploy this as a completed v2.
 
@@ -40,3 +40,11 @@ passed (read-only runtime, UID/GID/tool/linked-libdave checks; no bot start).
 The new source tests include nonzero extractor exit after real audio delivery,
 not only empty/auth failures. The packet adapter is tested against a fake
 deadline-capable transport. Neither result establishes real Discord connectivity.
+
+Cache storage review: filesystem mutation now occurs outside the shared metadata
+lock; the index admits at most 65,536 entries and creation at most 16 distinct
+keys concurrently. Directory scans use 256-entry batches. Duplicate waiters can
+cancel, symlink publication is rejected, and leases identify file incarnations
+so an old lease cannot unpin a replacement. Docker race and lint gates passed.
+Existing cache names and completed media are preserved; the actual persisted
+cache has not been opened or modified during development.
