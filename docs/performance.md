@@ -141,3 +141,30 @@ The final Docker microbenchmark gate also passed. Its sample reported
 is now explicitly 128 kbit/s and the runtime-image build overlapped this gate.
 They are not a controlled before/after CPU comparison. The sustained quota
 measurements above ran sequentially without concurrent quality builds.
+
+## Fifteen-minute soak (2026-10-08)
+
+`make docker-bench` passed its microbenchmarks and all three 900-second profiles.
+Same i9-12900K host; the profiles ran concurrently, with some Docker quality
+builds and an idle local Discord bot on the host. This is sustained capacity
+evidence under that workload, not a controlled before/after optimization result.
+
+| Guilds | CPU quota | CPU / quota | Peak anonymous MiB | Frames | Maximum gap ms | Maximum session shutdown ms |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 4 | 2 | 8.49% | 80.21 | 179,994 | 25.88 | 23.51 |
+| 12 | 4 | 11.11% | 178.78 | 539,969 | 31.90 | 14.94 |
+| 24 | 8 | 10.94% | 399.98 | 1,079,932 | 29.19 | 30.90 |
+
+Each run had zero missed 60 ms deadlines, worker failures and leftover temporary
+files; goroutines returned from 2 to 1. The image inherited irrelevant idle bot
+health probes; the benchmark stage now disables those probes. Raw metrics,
+image identity and limitations are in
+[capacity-soak-2026-10-08.json](rewrite/capacity-soak-2026-10-08.json).
+Microbenchmark samples in this run: synthetic 1,000-frame attempt 8,917 ns,
+4,168 B/4 allocations; real 1,000-frame decode/encode attempt 222,682,651 ns,
+118,544 Go B/91 allocations. No statistical improvement claim is made.
+
+Separately, an idle real Discord-connected local v2 container handled SIGTERM
+and exited code 0 without OOM in 1.377 seconds. That includes container/SDK
+shutdown overhead but does not prove active DAVE shutdown or a strict join of
+unexposed SDK workers.
