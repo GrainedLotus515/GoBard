@@ -34,3 +34,17 @@ SDK remains in adapters until its independent replacement exists.
 Implementation status and temporary migration boundaries are in
 [rewrite/status.md](rewrite/status.md); this document distinguishes intended
 architecture from the old runtime still being migrated.
+
+Current replacement packages are `internal/session` (queue/controls),
+`internal/playback` (attempts and bounded control data), `internal/audio`
+(FFmpeg/libopus), `internal/source` (YouTube acquisition), and `internal/failure`
+(safe classifications). The Discord output implementation remains in
+`internal/discordvoice`. An AST-based test in `internal/architecture` enforces
+the SDK import boundary over internal packages and commands.
+
+Review decision (2026-10-08): queue admission clones bounded metadata strings,
+because a short Go substring can otherwise retain an arbitrarily large backing
+allocation. Session IDs include a random incarnation to avoid reusing request
+IDs after a guild session is recreated. Source failure classification is shared
+across open, read and finalization, rather than treating all close errors as
+codec errors. These are ownership/correctness changes, not performance claims.

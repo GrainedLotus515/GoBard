@@ -43,6 +43,7 @@ type Request struct {
 	Provider  string
 	MediaID   string
 	Offset    time.Duration
+	Controls  *Controls
 }
 
 // Stream has one consumer. Next writes one 20 ms stereo 48 kHz Opus packet
@@ -95,6 +96,7 @@ func (e *Engine) Run(ctx context.Context, request Request, output Output) (resul
 	result.Request = request
 	result.Outcome = SourceFailure
 	defer func() {
+		result.Request.Controls = nil
 		if cause := context.Cause(ctx); cause != nil {
 			var control Cancellation
 			result.Outcome = Shutdown
@@ -118,6 +120,7 @@ func (e *Engine) Run(ctx context.Context, request Request, output Output) (resul
 	stream, err := e.opener.Open(ctx, request)
 	if err != nil {
 		result.Failure = classify("source", failure.Source, err)
+		result.Outcome = failedOutcome(result.Failure.Category)
 		return result
 	}
 	if stream == nil {
@@ -126,13 +129,13 @@ func (e *Engine) Run(ctx context.Context, request Request, output Output) (resul
 	}
 	defer func() {
 		if err := stream.Close(); err != nil && result.Failure == nil {
-			result.Outcome = EncodeFailure
 			result.Failure = classify("close", failure.Cleanup, err)
+			result.Outcome = failedOutcome(result.Failure.Category)
 		}
 	}()
 	var packet [MaxPacketBytes]byte
 	for {
-		if ctx.Err() != nil {
+		if request.Controls.wait(ctx) != nil {
 			return result
 		}
 		n, err := stream.Next(ctx, packet[:])
@@ -147,14 +150,15 @@ func (e *Engine) Run(ctx context.Context, request Request, output Output) (resul
 				category = failure.ZeroFrames
 			}
 			result.Failure = classify("read", category, err)
-			if result.Failure.Category == failure.Source || result.Failure.Category == failure.Authentication || result.Failure.Category == failure.Unavailable || result.Failure.Category == failure.Throttled {
-				result.Outcome = SourceFailure
-			}
+			result.Outcome = failedOutcome(result.Failure.Category)
 			return result
 		}
 		if n <= 0 || n > len(packet) {
 			result.Outcome = EncodeFailure
 			result.Failure = failure.Wrap("read", failure.InvalidFrame, errors.New("invalid packet size"))
+			return result
+		}
+		if request.Controls.wait(ctx) != nil {
 			return result
 		}
 		if err := output.Send(ctx, packet[:n]); err != nil {
@@ -163,6 +167,20 @@ func (e *Engine) Run(ctx context.Context, request Request, output Output) (resul
 			return result
 		}
 		result.Frames++
+		if request.Controls != nil {
+			request.Controls.frames.Add(1)
+		}
+	}
+}
+
+func failedOutcome(category failure.Category) Outcome {
+	switch category {
+	case failure.Source, failure.Authentication, failure.Unavailable, failure.Throttled:
+		return SourceFailure
+	case failure.Transport:
+		return TransportFailure
+	default:
+		return EncodeFailure
 	}
 }
 

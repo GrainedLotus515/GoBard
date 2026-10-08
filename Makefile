@@ -55,7 +55,7 @@ docker-logs: ## Follow local Compose logs
 	GOBARD_IMAGE=$(DOCKER_IMAGE) $(COMPOSE) $(LOCAL_COMPOSE) logs -f
 
 docker-smoke: docker-build ## Verify the final image's runtime tools and permissions
-	$(DOCKER) run --rm --read-only --tmpfs /tmp:rw,noexec,nosuid,size=128m --entrypoint /bin/sh $(DOCKER_IMAGE) -ec 'command -v ffmpeg; command -v yt-dlp; yt-dlp --version >/dev/null; command -v deno; deno eval --no-config --no-npm "0"; test ! -w /usr/local/bin/deno; python3 -c "import sys; sys.path.insert(0, \"/usr/local/bin/yt-dlp\"); import yt_dlp_ejs"; test -x /app/gobard; test ! -w /app/gobard; ! command -v curl; ! command -v pgrep; ldd /app/gobard | grep -q libdave'
+	$(DOCKER) run --rm --read-only --tmpfs /tmp:rw,noexec,nosuid,size=128m --entrypoint /bin/sh $(DOCKER_IMAGE) -ec 'test "$$(id -u)" = 1000; test "$$(id -g)" = 1000; test "$$(stat -c %u /app/gobard)" = 0; command -v ffmpeg; command -v yt-dlp; yt-dlp --version >/dev/null; command -v deno; deno eval --no-config --no-npm "0"; test ! -w /usr/local/bin/deno; python3 -c "import sys; sys.path.insert(0, \"/usr/local/bin/yt-dlp\"); import yt_dlp_ejs"; test -x /app/gobard; test ! -w /app/gobard; ! command -v curl; ! command -v pgrep; ldd /app/gobard | grep -q libdave'
 
 clean: ## Remove Go build cache only; never delete the persisted audio cache
 	@echo 'No project files were removed. Docker build caches are managed by Docker; ./cache is intentionally preserved.'

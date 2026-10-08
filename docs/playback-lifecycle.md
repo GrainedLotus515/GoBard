@@ -31,3 +31,28 @@ Close stops/reaps any owned processes before returning. The session joins its
 attempt before declaring shutdown complete. First owner-accepted control reason
 wins over later cancellation side effects; completion already observed by the
 owner wins over a later control. Tests must exercise both orders.
+
+## Implemented session controls
+
+The session mailbox is 32 entries. Add admits a bounded batch atomically;
+queue capacity is validated at construction (1–500). Display metadata has
+per-field byte bounds. Snapshots copy the queue. Completed entries retain their
+display positions until the queue drains, preserving the previous indexing.
+Loop retries only successful completion. Skip/removal bypass loop; seek creates
+a new attempt for the same request; disconnect/transport failure retain selection.
+Reconnect requires an explicit new output. No automatic retry is implemented.
+
+Pause uses a cancellation-aware notification gate, with at most one encoded
+packet held. Session owns gain/ducking policy; codecs read an atomic gain value.
+Speaking membership is capped at 256. Controls during a pending transition
+receive busy, except stop and inspection; stop supersedes queue retention and
+clears admitted requests after the attempt joins. A request Ticket settles once;
+loop, seek and disconnect can generate several distinct attempts before then.
+
+Source acquisition now validates canonical YouTube input before launching
+yt-dlp, disables hidden config/retries, retains 16 KiB of stderr, kills the
+extractor process group on cancellation and waits before returning capacity.
+Finalization after stdout EOF is bounded to two seconds plus the subprocess
+WaitDelay. FFmpeg receives a pipe with only the pipe protocol enabled.
+Tests use a fake extractor executable and real FFmpeg; live YouTube remains
+unverified. The old production source pipeline is still awaiting replacement.

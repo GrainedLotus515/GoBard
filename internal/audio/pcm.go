@@ -41,7 +41,7 @@ func (o *FileOpener) Open(ctx context.Context, request playback.Request) (playba
 	if err != nil {
 		return nil, failure.Wrap("open", failure.Source, err)
 	}
-	stream, err := Decode(ctx, f, request.Offset)
+	stream, err := Decode(ctx, f, request.Offset, request.Controls)
 	// exec duplicates the file descriptor for the child; the parent releases it.
 	closeErr := f.Close()
 	if err != nil {
@@ -58,7 +58,7 @@ func (o *FileOpener) Open(ctx context.Context, request playback.Request) (playba
 // goroutine). The caller closes its descriptor after this returns. Close on the
 // returned stream always cancels and reaps the child. Offset is decoded from a
 // nonseekable pipe; large offsets cost decoding time and remain cancellable.
-func Decode(parent context.Context, input *os.File, offset time.Duration) (playback.Stream, error) {
+func Decode(parent context.Context, input *os.File, offset time.Duration, controls *playback.Controls) (playback.Stream, error) {
 	if input == nil || offset < 0 {
 		return nil, errors.New("invalid decoder input or offset")
 	}
@@ -79,7 +79,7 @@ func Decode(parent context.Context, input *os.File, offset time.Duration) (playb
 	args = append(args, "-vn", "-f", "s16le", "-ar", "48000", "-ac", "2", "pipe:1")
 	cmd := exec.CommandContext(ctx, "ffmpeg", args...)
 	cmd.WaitDelay = time.Second
-	s := &pcmStream{cmd: cmd, cancel: cancel, stdout: r, encoder: encoder}
+	s := &pcmStream{cmd: cmd, cancel: cancel, stdout: r, encoder: encoder, controls: controls}
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = input, w, &s.stderr
 	if err := cmd.Start(); err != nil {
 		cancel()
@@ -104,6 +104,7 @@ type pcmStream struct {
 	closeOnce sync.Once
 	closeErr  error
 	ended     bool
+	controls  *playback.Controls
 }
 
 func (s *pcmStream) Next(ctx context.Context, packet []byte) (int, error) {
@@ -133,6 +134,13 @@ func (s *pcmStream) Next(ctx context.Context, packet []byte) (int, error) {
 	for i := range s.samples {
 		// #nosec G115 -- reinterpret the signed 16-bit PCM representation.
 		s.samples[i] = int16(binary.LittleEndian.Uint16(s.pcm[i*2:]))
+	}
+	volume := s.controls.Volume()
+	if volume != 100 {
+		for i, sample := range s.samples {
+			// #nosec G115 -- gain is validated 0..100, so scaled PCM remains int16.
+			s.samples[i] = int16(int32(sample) * volume / 100)
+		}
 	}
 	n, err = s.encoder.Encode(s.samples[:], packet)
 	if err != nil {

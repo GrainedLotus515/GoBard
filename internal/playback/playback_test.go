@@ -52,6 +52,7 @@ func TestTerminalOutcomes(t *testing.T) {
 		{"codec", 1, cause, nil, nil, EncodeFailure, failure.Codec},
 		{"transport", 3, io.EOF, cause, nil, TransportFailure, failure.Transport},
 		{"cleanup", 3, io.EOF, nil, cause, EncodeFailure, failure.Cleanup},
+		{"source_finalization", 3, io.EOF, nil, failure.Wrap("acquire", failure.Source, cause), SourceFailure, failure.Source},
 		{"auth", 0, failure.Wrap("extract", failure.Authentication, cause), nil, nil, SourceFailure, failure.Authentication},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

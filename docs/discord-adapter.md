@@ -31,3 +31,20 @@ Replacement checklist:
    reconnect and graceful close in an authorized test guild.
 6. Replace adapter/composition imports, remove the old SDK, rerun Docker/race
    gates. A fake delivery test does not satisfy step 5.
+
+## Implemented v2 packet adapter
+
+`discordvoice.Connection.Output` exposes a playback Output after a successful
+voice join. It serializes writes, paces 20 ms packets, rejects empty/over-1,400-byte
+packets, rejects short writes and joins a pending send during Close. Deadline
+support was checked against the pinned
+[disgo v0.19.6 UDP implementation](https://github.com/disgoorg/disgo/blob/v0.19.6/voice/udp_conn.go).
+Network writes have a 250 ms maximum deadline (or the caller's sooner deadline).
+Cancellation during pacing is immediate; cancellation during an SDK write is
+bounded by that deadline. Native encryption cannot be preempted by this adapter.
+
+Deterministic tests cover pacing, copied packet ownership, stalled writes,
+short writes, deadlines, close joining and repeated close. The connection owner
+must still manage speaking state and close the SDK connection after closing
+Output. Current production wiring still uses the old player-facing interface;
+reconnect, SDK worker shutdown and real DAVE delivery remain cutover gates.

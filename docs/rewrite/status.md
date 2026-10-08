@@ -15,8 +15,14 @@ completed v2 release.
   Repeated skip/completion races, canceled admission/wait and 16 independent
   sessions also pass. Synthetic and real FFmpeg/Opus benchmarks are recorded in
   performance.md. The slice is not yet wired to the production Discord runtime.
-* Phases 3–6: runtime migration, provider assessment, complete adapter contracts,
-  measurements and final review remain.
+* Phase 3 underway: session controls implement loop/skip/removal, move/clear,
+  seek, pause/resume, volume/ducking, retained disconnect and explicit reconnect.
+  New source acquisition and Discord packet adapters have deterministic tests.
+  Spotify/YouTube technical and terms assessment is recorded in providers.md.
+* Phases 3–6 remaining: production command/composition migration, cache integration,
+  global guild admission, metadata-worker bounds, complete interaction/reconnect
+  contracts, health dimensions, production logger wiring, load measurements and
+  final removal of old implementations. Do not deploy this as a completed v2.
 
 Evidence: baseline and slice `make docker-test` passed (race-enabled).
 `make docker-lint` passed with zero issues after explicit cancellation ownership
@@ -24,3 +30,9 @@ and bounded fixture conversion annotations. Docker socket access
 required escalation. No live Discord/YouTube integration has been exercised.
 User-reported YouTube anti-bot rejection remains an external risk. Native
 libdave is not assumed. Production service/cache/secrets are untouched.
+
+2026-10-08 checkpoint evidence: Docker runtime build and `make docker-smoke`
+passed (read-only runtime, UID/GID/tool/linked-libdave checks; no bot start).
+The new source tests include nonzero extractor exit after real audio delivery,
+not only empty/auth failures. The packet adapter is tested against a fake
+deadline-capable transport. Neither result establishes real Discord connectivity.
