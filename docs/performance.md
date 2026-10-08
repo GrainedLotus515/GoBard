@@ -19,6 +19,16 @@ Reference slice target budgets:
 | Extraction | Existing configured 1–16 shared process limit |
 | Retry | No retry inside attempt/provider; session policy only |
 
+Additional implemented bounds: metadata subprocess stdout is limited to 8 MiB
+(the standard bytes.Buffer can retain up to twice that in capacity); stderr
+remains 16 KiB; metadata calls have a 30-second deadline. Cache warming has one
+worker/eight hints and drops hints on saturation. Downloads enforce
+min(cache limit, 256 MiB) while writing, with a five-minute deadline; this scratch
+allowance is additional to the committed cache budget. Guild manager construction
+requires explicit session and queue limits; it rejects saturation and retains a
+slot through shutdown. The current production bot has not yet adopted these
+replacement admission budgets.
+
 Measure allocations/frame, codec CPU, memory/session, stalled-consumer behavior,
 shutdown latency and concurrent guild workloads independently of live provider
 latency. Report machine, image/tool versions, frame count and concurrency with

@@ -48,3 +48,14 @@ allocation. Session IDs include a random incarnation to avoid reusing request
 IDs after a guild session is recreated. Source failure classification is shared
 across open, read and finalization, rather than treating all close errors as
 codec errors. These are ownership/correctness changes, not performance claims.
+
+Metadata now lives in the SDK-independent `internal/media` value type. The
+session manager bounds admitted guilds and joins constructors/removals before
+shutdown; it never holds its registry mutex across joins or external calls.
+Adapter-owned outputs outlive their sessions and are closed after the manager.
+
+`source.Resolver` handles metadata; `source.YouTubeOpener` handles bytes;
+`source.Cached` owns one optional cache worker. Cached media leases last until
+decoder cleanup, and the stable cache-key algorithm is retained. The shared URL
+grammar now lives in `sourceurl`; the legacy YouTube client delegates to it while
+production command migration is pending.

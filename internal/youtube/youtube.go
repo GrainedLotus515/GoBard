@@ -145,16 +145,16 @@ type audioStream struct {
 // URLKind identifies the supported YouTube resource represented by a
 // canonical URL. GoBard intentionally accepts only video and playlist URLs;
 // accepting arbitrary extractor URLs turns yt-dlp into an SSRF primitive.
-type URLKind uint8
+type URLKind = sourceurl.URLKind
 
 const (
-	URLKindUnknown URLKind = iota
-	URLKindVideo
-	URLKindPlaylist
+	URLKindUnknown  = sourceurl.URLKindUnknown
+	URLKindVideo    = sourceurl.URLKindVideo
+	URLKindPlaylist = sourceurl.URLKindPlaylist
 )
 
 var (
-	errUnsupportedYouTubeURL = errors.New("unsupported YouTube URL")
+	errUnsupportedYouTubeURL = sourceurl.ErrUnsafeSourceURL
 )
 
 // extractBestAudioStream finds the best audio-only stream metadata from formats.
@@ -947,161 +947,25 @@ func (c *Client) DownloadContext(parent context.Context, rawURL, outputPath stri
 	return nil
 }
 
-// ClassifyYouTubeURL validates an externally supplied URL and returns a
-// canonical video or playlist URL. It intentionally accepts a small, explicit
-// grammar rather than passing arbitrary URLs through to yt-dlp.
-func ClassifyYouTubeURL(raw string) (canonicalURL string, kind URLKind, err error) {
-	trimmed := strings.TrimSpace(raw)
-	if trimmed == "" {
-		return "", URLKindUnknown, fmt.Errorf("%w: URL is empty", errUnsupportedYouTubeURL)
-	}
-
-	parsed, parseErr := url.ParseRequestURI(trimmed)
-	if parseErr != nil || parsed == nil {
-		return "", URLKindUnknown, fmt.Errorf("%w: invalid URL", errUnsupportedYouTubeURL)
-	}
-	if !strings.EqualFold(parsed.Scheme, "https") {
-		return "", URLKindUnknown, fmt.Errorf("%w: only HTTPS URLs are accepted", errUnsupportedYouTubeURL)
-	}
-	if parsed.User != nil {
-		return "", URLKindUnknown, fmt.Errorf("%w: userinfo is not allowed", errUnsupportedYouTubeURL)
-	}
-	if parsed.Host == "" || (parsed.Port() != "" && parsed.Port() != "443") {
-		return "", URLKindUnknown, fmt.Errorf("%w: invalid host", errUnsupportedYouTubeURL)
-	}
-
-	host := strings.ToLower(parsed.Hostname())
-	if !isYouTubeHost(host) {
-		return "", URLKindUnknown, fmt.Errorf("%w: host is not YouTube", errUnsupportedYouTubeURL)
-	}
-
-	query := parsed.Query()
-	playlistID := strings.TrimSpace(query.Get("list"))
-	if playlistID != "" {
-		if !isSafeYouTubeIdentifier(playlistID, 128) {
-			return "", URLKindUnknown, fmt.Errorf("%w: invalid playlist identifier", errUnsupportedYouTubeURL)
-		}
-		if host == "youtu.be" {
-			shortID := strings.Trim(parsed.EscapedPath(), "/")
-			if strings.Contains(shortID, "/") {
-				return "", URLKindUnknown, fmt.Errorf("%w: invalid short playlist path", errUnsupportedYouTubeURL)
-			}
-			unescaped, unescapeErr := url.PathUnescape(shortID)
-			if unescapeErr != nil || !isSafeYouTubeIdentifier(unescaped, 32) {
-				return "", URLKindUnknown, fmt.Errorf("%w: invalid short playlist path", errUnsupportedYouTubeURL)
-			}
-		} else if parsed.Path != "/playlist" && parsed.Path != "/watch" {
-			return "", URLKindUnknown, fmt.Errorf("%w: expected /watch or /playlist", errUnsupportedYouTubeURL)
-		}
-		return canonicalPlaylistURL(playlistID), URLKindPlaylist, nil
-	}
-
-	var videoID string
-	switch host {
-	case "youtube.com", "www.youtube.com", "music.youtube.com":
-		if parsed.Path != "/watch" {
-			return "", URLKindUnknown, fmt.Errorf("%w: expected /watch or a playlist", errUnsupportedYouTubeURL)
-		}
-		videoID = strings.TrimSpace(query.Get("v"))
-	case "youtu.be":
-		videoID = strings.Trim(parsed.EscapedPath(), "/")
-		if strings.Contains(videoID, "/") {
-			return "", URLKindUnknown, fmt.Errorf("%w: invalid short video path", errUnsupportedYouTubeURL)
-		}
-		unescaped, unescapeErr := url.PathUnescape(videoID)
-		if unescapeErr != nil {
-			return "", URLKindUnknown, fmt.Errorf("%w: invalid short video path", errUnsupportedYouTubeURL)
-		}
-		videoID = unescaped
-	}
-
-	if !isSafeYouTubeIdentifier(videoID, 32) {
-		return "", URLKindUnknown, fmt.Errorf("%w: invalid video identifier", errUnsupportedYouTubeURL)
-	}
-	return canonicalVideoURL(videoID), URLKindVideo, nil
+// ClassifyYouTubeURL delegates to the shared source trust boundary.
+func ClassifyYouTubeURL(raw string) (string, URLKind, error) {
+	return sourceurl.ClassifyYouTubeURL(raw)
 }
-
-// IsPlaylist reports whether raw is a supported YouTube playlist URL.
-func IsPlaylist(raw string) bool {
-	_, kind, err := ClassifyYouTubeURL(raw)
-	return err == nil && kind == URLKindPlaylist
+func IsPlaylist(raw string) bool { return sourceurl.IsPlaylist(raw) }
+func NormalizeSingleVideoURL(raw string) (string, string, bool) {
+	return sourceurl.NormalizeSingleVideoURL(raw)
 }
-
-// NormalizeSingleVideoURL extracts a locally resolvable YouTube video ID and
-// canonicalizes it to the standard watch URL without network access.
-func NormalizeSingleVideoURL(raw string) (canonicalURL string, videoID string, ok bool) {
-	canonicalURL, kind, err := ClassifyYouTubeURL(raw)
-	if err != nil || kind != URLKindVideo {
-		return "", "", false
-	}
-
-	parsed, err := url.Parse(canonicalURL)
-	if err != nil {
-		return "", "", false
-	}
-	return canonicalURL, parsed.Query().Get("v"), true
+func IsYouTubeURL(raw string) bool { return sourceurl.IsYouTubeURL(raw) }
+func IsURLLike(raw string) bool    { return sourceurl.IsURLLike(raw) }
+func canonicalVideoURL(id string) string {
+	return "https://www.youtube.com/watch?v=" + url.QueryEscape(id)
 }
-
-// IsYouTubeURL reports whether raw is one of the supported HTTPS YouTube URL
-// forms. It does not use substring matching, which previously allowed hosts
-// such as 127.0.0.1/youtube.com to reach yt-dlp.
-func IsYouTubeURL(raw string) bool {
-	_, _, err := ClassifyYouTubeURL(raw)
+func isSafeYouTubeIdentifier(id string, maxLength int) bool {
+	if len(id) > maxLength {
+		return false
+	}
+	_, err := sourceurl.ValidateCanonicalYouTubeVideoURL(canonicalVideoURL(id))
 	return err == nil
-}
-
-func isYouTubeHost(host string) bool {
-	switch host {
-	case "youtube.com", "www.youtube.com", "music.youtube.com", "youtu.be":
-		return true
-	default:
-		return false
-	}
-}
-
-func canonicalVideoURL(videoID string) string {
-	return "https://www.youtube.com/watch?v=" + url.QueryEscape(videoID)
-}
-
-func canonicalPlaylistURL(playlistID string) string {
-	return "https://www.youtube.com/playlist?list=" + url.QueryEscape(playlistID)
-}
-
-func isSafeYouTubeIdentifier(value string, maxLength int) bool {
-	if value == "" || len(value) > maxLength {
-		return false
-	}
-	for _, r := range value {
-		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-' || r == '_' {
-			continue
-		}
-		return false
-	}
-	return true
-}
-
-// looksLikeURL prevents an unsupported explicit URL from becoming a YouTube
-// search query. Ordinary search phrases with punctuation remain valid.
-// IsURLLike reports whether raw is explicitly URL-shaped. It is used by the
-// command layer to reject unsupported URLs instead of treating them as a
-// YouTube search query.
-func IsURLLike(raw string) bool {
-	value := strings.TrimSpace(strings.ToLower(raw))
-	if value == "" {
-		return false
-	}
-	if strings.HasPrefix(value, "//") || strings.Contains(value, "://") {
-		return true
-	}
-	if strings.HasPrefix(value, "file:") || strings.HasPrefix(value, "spotify:") {
-		return true
-	}
-	for _, host := range []string{"youtube.com/", "www.youtube.com/", "music.youtube.com/", "youtu.be/", "www.spotify.com/", "open.spotify.com/"} {
-		if strings.HasPrefix(value, host) {
-			return true
-		}
-	}
-	return false
 }
 
 // isPublicHTTPURL is a defence-in-depth check for yt-dlp-generated stream

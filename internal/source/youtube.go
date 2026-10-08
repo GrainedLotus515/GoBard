@@ -8,7 +8,6 @@ import (
 	"os"
 	"os/exec"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/GrainedLotus515/gobard/internal/audio"
@@ -50,22 +49,8 @@ func (o *YouTubeOpener) Open(parent context.Context, request playback.Request) (
 		return nil, failure.Wrap("acquire", failure.Source, err)
 	}
 	// #nosec G204 -- executable is fixed by construction; URL is canonicalized above and follows --.
-	cmd := exec.CommandContext(ctx, o.executable,
-		"--ignore-config", "--no-playlist", "--no-progress", "--no-warnings",
-		"--retries", "0", "--fragment-retries", "0", "--socket-timeout", "15",
-		"--extractor-retries", "0", "--file-access-retries", "0",
-		"-f", "bestaudio[ext=webm]/bestaudio", "-o", "-", "--", url)
-	// The deployment target is Linux. Kill the entire extractor process group,
-	// including any fragment helper, so inherited pipes cannot prevent cleanup.
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	cmd.Cancel = func() error {
-		err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-		if errors.Is(err, syscall.ESRCH) {
-			return os.ErrProcessDone
-		}
-		return err
-	}
-	cmd.WaitDelay = time.Second
+	cmd := exec.CommandContext(ctx, o.executable, extractionArgs(url)...)
+	configureProcess(cmd)
 	s := &extractorStream{cmd: cmd, cancel: cancel, release: release}
 	cmd.Stdout = w
 	cmd.Stderr = &s.stderr

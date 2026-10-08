@@ -19,8 +19,12 @@ completed v2 release.
   seek, pause/resume, volume/ducking, retained disconnect and explicit reconnect.
   New source acquisition and Discord packet adapters have deterministic tests.
   Spotify/YouTube technical and terms assessment is recorded in providers.md.
-* Phases 3–6 remaining: production command/composition migration, cache integration,
-  global guild admission, metadata-worker bounds, complete interaction/reconnect
+* Additional Phase 3 work: shared metadata values, bounded metadata subprocess
+  output, canonical URL policy reuse, streaming download byte limits, cache
+  leases/warming ownership and bounded guild registry are implemented and tested.
+  They are replacement components, not yet the production composition.
+* Phases 3–6 remaining: production command/composition migration,
+  metadata-worker bounds, cache storage lock/index review, complete interaction/reconnect
   contracts, health dimensions, production logger wiring, load measurements and
   final removal of old implementations. Do not deploy this as a completed v2.
 

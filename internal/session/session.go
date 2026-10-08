@@ -93,13 +93,13 @@ func (s *Session) Add(ctx context.Context, tracks []Track) ([]*Ticket, error) {
 		return nil, ErrFull
 	}
 	for _, track := range tracks {
-		if err := track.validate(); err != nil {
+		if err := track.Validate(); err != nil {
 			return nil, err
 		}
 	}
 	owned := make([]Track, len(tracks))
 	for i, track := range tracks {
-		owned[i] = track.clone()
+		owned[i] = track.Clone()
 	}
 	r := s.submit(command{ctx: ctx, tracks: owned})
 	return r.tickets, r.err
