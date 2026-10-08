@@ -23,3 +23,33 @@ Measure allocations/frame, codec CPU, memory/session, stalled-consumer behavior,
 shutdown latency and concurrent guild workloads independently of live provider
 latency. Report machine, image/tool versions, frame count and concurrency with
 results. Microbenchmarks do not establish a production guild-capacity claim.
+
+## First checkpoint measurements
+
+`docker build --target bench --progress=plain .`, 2026-10-07, linux/amd64,
+pinned Go 1.27.1 image, Intel i9-12900K, 24 logical CPUs visible, no explicit
+container CPU quota. Single benchmark samples, not statistically established
+improvements:
+
+| Workload | ns/op | B/op | allocs/op |
+| --- | ---: | ---: | ---: |
+| New attempt, 1,000 synthetic packets, immediate fake output, discarded log | 8,182 | 4,168 | 4 |
+| Existing frame pool borrow/return | 51.68 | 0 | 0 |
+| Existing stereo PCM volume, 20 ms | 1,009 | 0 | 0 |
+| Existing cache acquire | 1,125 | 352 | 3 |
+| Existing extractor limiter acquire | 78.09 | 64 | 2 |
+| Existing fake registration, 1,000 guilds | 355,079 | 73,947 | 1,010 |
+
+The synthetic attempt has four allocations per attempt, not per packet
+(amortized 4.168 bytes/packet for this workload). It excludes codec, subprocess,
+network, pacing and audible output. Existing workloads are reference baselines,
+not direct comparisons with the new attempt. Real-codec and concurrent-session
+measurements remain separate gates.
+
+Real-media follow-up on the same host/image: `BenchmarkRealMedia` processes a
+20-second stereo WAV (1,000 packets), launches FFmpeg, encodes libopus and
+decodes each packet in the fake voice sink. Five measured attempts averaged
+225,065,114 ns/attempt, 17.06 MB/s input, 117,993 Go B/attempt and 91 Go
+allocations/attempt. There is no real-time pacing in this throughput workload.
+Go allocation counts exclude native Opus memory and FFmpeg RSS; these numbers
+cannot be used as total memory/session or production concurrency limits.

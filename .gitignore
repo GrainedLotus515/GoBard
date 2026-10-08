@@ -42,8 +42,7 @@ go.work.sum
 .DS_Store
 Thumbs.db
 
-# Documentation and planning (local only)
-/docs/
+# Planning scratch files (architecture and rewrite evidence are versioned)
 /plans/
 
 # AI assistant directory

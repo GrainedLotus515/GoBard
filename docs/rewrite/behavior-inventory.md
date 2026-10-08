@@ -50,6 +50,12 @@ current supported behavior. They are not silently added by this rewrite.
 SOPS/age is an operator compatibility requirement; no tracked decrypt/deploy
 workflow establishes how the stopped VPS currently obtains its secrets.
 
+Previously ignored local documents `docs/ERROR_4006_ANALYSIS.md` and
+`docs/PARALLEL_COMMAND_REGISTRATION.md` were discovered when versioning rewrite
+documentation. They remain untouched and untracked. They report historical
+stale voice-session events and registration latency respectively; these are
+investigation evidence, not verified claims about the current SDK version.
+
 ## Concrete issues, not preservation requirements
 
 * `player.GuildPlayer` and `Queue` expose mutable state; bot workers separately

@@ -11,6 +11,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 	build-essential \
 	ca-certificates \
 	curl \
+	ffmpeg \
 	libopus-dev \
 	libopusfile-dev \
 	libsodium-dev \
@@ -67,7 +68,8 @@ COPY . .
 RUN --mount=type=cache,target=/go/pkg/mod \
 	--mount=type=cache,target=/root/.cache/go-build \
 	go test -run '^$' -bench . -benchmem \
-		./internal/player ./internal/cache ./internal/processlimit ./internal/bot ./internal/youtube
+		./internal/player ./internal/cache ./internal/processlimit ./internal/bot ./internal/youtube \
+		./internal/playback ./internal/session ./internal/audio
 
 FROM dependencies AS capacity-bench-builder
 
