@@ -14,23 +14,25 @@ type Track = media.Track
 type Action string
 
 const (
-	Inspect    Action = "inspect"
-	Pause      Action = "pause"
-	Resume     Action = "resume"
-	Skip       Action = "skip"
-	Stop       Action = "stop"
-	Disconnect Action = "disconnect"
-	Connect    Action = "connect"
-	Clear      Action = "clear"
-	Shuffle    Action = "shuffle"
-	Loop       Action = "loop"
-	Remove     Action = "remove"
-	Move       Action = "move"
-	Seek       Action = "seek"
-	Volume     Action = "volume"
-	Ducking    Action = "ducking"
-	DuckTarget Action = "duck_target"
-	Speaking   Action = "speaking"
+	Inspect     Action = "inspect"
+	Pause       Action = "pause"
+	Resume      Action = "resume"
+	TogglePause Action = "toggle_pause"
+	Skip        Action = "skip"
+	Stop        Action = "stop"
+	Disconnect  Action = "disconnect"
+	Connect     Action = "connect"
+	Clear       Action = "clear"
+	Shuffle     Action = "shuffle"
+	Loop        Action = "loop"
+	Remove      Action = "remove"
+	Move        Action = "move"
+	Seek        Action = "seek"
+	ForwardSeek Action = "forward_seek"
+	Volume      Action = "volume"
+	Ducking     Action = "ducking"
+	DuckTarget  Action = "duck_target"
+	Speaking    Action = "speaking"
 )
 
 type Operation struct {
@@ -41,11 +43,22 @@ type Operation struct {
 	Enabled  bool
 	Speaker  string
 	Output   playback.Output
+	Channel  string
+}
+
+// Access contains the adapter's current voice/permission observation. The
+// coordinator checks it against its own channel at the mutation boundary.
+// The adapter must refresh this observation after slow external work.
+type Access struct {
+	Channel     string
+	ManageGuild bool
 }
 
 // Snapshot is a value copy. Current is -1 when idle. Queue positions remain
 // stable across completion until the queue drains, matching existing commands.
 type Snapshot struct {
+	Generation uint64
+	Channel    string
 	Tracks     []Track
 	Current    int
 	Active     bool

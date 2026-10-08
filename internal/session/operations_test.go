@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"math"
 	"testing"
 	"time"
 
@@ -11,6 +12,28 @@ import (
 
 	"github.com/GrainedLotus515/gobard/internal/playback"
 )
+
+func TestToggleAndForwardSeekUseOwnedState(t *testing.T) {
+	s, source := newControlsTest(t)
+	if _, err := s.Add(context.Background(), []Track{{Provider: "test", MediaID: "one", Duration: 10 * time.Minute}}); err != nil {
+		t.Fatal(err)
+	}
+	first := nextAttempt(t, source)
+	if !apply(t, s, Operation{Action: TogglePause}).Paused {
+		t.Fatal("toggle did not pause")
+	}
+	if apply(t, s, Operation{Action: TogglePause}).Paused {
+		t.Fatal("toggle did not resume")
+	}
+	apply(t, s, Operation{Action: ForwardSeek, Offset: time.Minute})
+	second := nextAttempt(t, source)
+	if second.request.ID != first.request.ID || second.request.Offset < time.Minute || second.request.Offset > time.Minute+playback.FrameDuration {
+		t.Fatalf("forward seek lost position: %+v", second.request)
+	}
+	if _, err := s.Apply(context.Background(), Operation{Action: ForwardSeek, Offset: time.Duration(math.MaxInt64)}); err == nil {
+		t.Fatal("overflowing forward seek accepted")
+	}
+}
 
 type attemptFixture struct {
 	request playback.Request

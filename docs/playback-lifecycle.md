@@ -49,6 +49,14 @@ receive busy, except stop and inspection; stop supersedes queue retention and
 clears admitted requests after the attempt joins. A request Ticket settles once;
 loop, seek and disconnect can generate several distinct attempts before then.
 
+Play-command resolution is separately bounded (constructor limit 1–16 workers,
+no pending queue). Each admitted lookup receives a command ID carried by every
+resulting request/attempt. Stop/disconnect advance a session generation; a late
+lookup cannot add tracks into a later generation, even if already reconnected.
+Voice membership is checked again after lookup and compared to the owned channel
+at admission. Closing the command service cancels and joins all accepted work
+before sessions and sources are closed.
+
 Source acquisition now validates canonical YouTube input before launching
 yt-dlp, disables hidden config/retries, retains 16 KiB of stderr, kills the
 extractor process group on cancellation and waits before returning capacity.

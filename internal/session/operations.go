@@ -15,14 +15,8 @@ func (c *coordinator) apply(op Operation) error {
 	switch op.Action {
 	case Inspect:
 		return nil
-	case Pause, Resume:
-		if c.queue.current() == nil {
-			return errors.New("nothing is playing")
-		}
-		c.paused = op.Action == Pause
-		if c.controls != nil {
-			c.controls.SetPaused(c.paused)
-		}
+	case Pause, Resume, TogglePause:
+		return c.pause(op.Action)
 	case Skip:
 		if c.active != nil {
 			c.interrupt(playback.Skipped)
@@ -31,6 +25,7 @@ func (c *coordinator) apply(op Operation) error {
 			c.queue.advance()
 		}
 	case Stop:
+		c.generation++
 		c.connected = false
 		if c.active != nil {
 			c.stopAfter = true
@@ -41,17 +36,11 @@ func (c *coordinator) apply(op Operation) error {
 			c.paused = false
 		}
 	case Disconnect:
+		c.generation++
 		c.connected = false
 		c.interrupt(playback.Disconnected)
 	case Connect:
-		if c.active != nil {
-			return errors.New("cannot replace active output")
-		}
-		if op.Output == nil {
-			return errors.New("output required")
-		}
-		c.output = op.Output
-		c.connected = true
+		return c.connect(op)
 	case Clear:
 		c.clearUpcoming()
 	case Shuffle:
@@ -64,10 +53,66 @@ func (c *coordinator) apply(op Operation) error {
 		return c.queue.move(op.Position, op.To)
 	case Seek:
 		return c.seek(op.Offset)
+	case ForwardSeek:
+		position := c.position()
+		if op.Offset < 0 || op.Offset > time.Duration(math.MaxInt64)-position {
+			return errors.New("invalid forward seek position")
+		}
+		return c.seek(position + op.Offset)
 	case Volume, DuckTarget, Ducking, Speaking:
 		return c.configure(op)
 	default:
 		return errors.New("unknown session operation")
+	}
+	return nil
+}
+
+func (c *coordinator) pause(action Action) error {
+	if c.queue.current() == nil {
+		return errors.New("nothing is playing")
+	}
+	if action == TogglePause {
+		c.paused = !c.paused
+	} else {
+		c.paused = action == Pause
+	}
+	if c.controls != nil {
+		c.controls.SetPaused(c.paused)
+	}
+	return nil
+}
+
+func (c *coordinator) connect(op Operation) error {
+	if len(op.Channel) > 32 {
+		return errors.New("invalid voice channel")
+	}
+	if c.active != nil {
+		return errors.New("cannot replace active output")
+	}
+	if op.Output == nil {
+		return errors.New("output required")
+	}
+	c.output, c.channel, c.connected = op.Output, op.Channel, true
+	return nil
+}
+
+func (c *coordinator) authorize(access Access, action Action) error {
+	switch action {
+	case Inspect:
+		return nil
+	case Connect, Speaking:
+		return errors.New("operation requires lifecycle authority")
+	case Ducking, DuckTarget:
+		if !access.ManageGuild {
+			return ErrManageGuild
+		}
+		// Existing behavior permits administrator configuration before joining.
+		if !c.connected {
+			return nil
+		}
+	}
+	if !c.connected || c.channel == "" || access.Channel != c.channel {
+		return ErrVoiceAccess
 	}
 	return nil
 }

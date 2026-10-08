@@ -24,7 +24,7 @@ completed v2 release.
   leases/warming ownership and bounded guild registry are implemented and tested.
   They are replacement components, not yet the production composition.
 * Phases 3–6 remaining: production command/composition migration,
-  metadata-worker bounds, complete interaction/reconnect
+  complete interaction/reconnect
   contracts, health dimensions, production logger wiring, load measurements and
   final removal of old implementations. Do not deploy this as a completed v2.
 
@@ -48,3 +48,14 @@ cancel, symlink publication is rejected, and leases identify file incarnations
 so an old lease cannot unpin a replacement. Docker race and lint gates passed.
 Existing cache names and completed media are preserved; the actual persisted
 cache has not been opened or modified during development.
+
+Command admission checkpoint: bounded synchronous metadata workers, joined
+shutdown, stable command-to-attempt correlation, owner-checked voice/Manage Guild
+authorization and stop/disconnect generations are implemented. Deterministic
+tests cover saturation, shutdown, late lookup after reconnect, voice moves during
+lookup, safe auth diagnostics, and correlation reaching the actual attempt.
+The production Discord command adapter has not yet adopted these contracts.
+The replacement interaction mapper covers every existing command/button and has
+malformed-input fixtures plus a JSON fuzz target. Mapping-to-real-session tests
+verify voice/Manage Guild enforcement. Toggle-pause and forward-seek operations
+now execute atomically against coordinator-owned state.

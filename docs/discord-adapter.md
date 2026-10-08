@@ -12,6 +12,18 @@ mutations carry verified voice membership; configuration carries Manage Guild.
 Responses always suppress allowed mentions. User-visible acceptance is distinct
 from first frame and completion.
 
+The implemented `command.AccessSource` returns current `session.Access` values
+(voice channel and Manage Guild capability). `Session.ApplyAs` serializes the
+authorization check with mutations; `AddResolved` also checks the generation
+captured before metadata lookup. Stop/disconnect and voice-move lookup races
+have deterministic tests. This is core contract evidence; mapping real Discord
+interactions and gateway state to these values remains a cutover requirement.
+`bot.MapInteraction` now maps every existing slash command and music button to
+core operations. Tests feed fake SDK interactions through the mapper into a real
+session to verify permission enforcement. Wrong types, missing/duplicate options,
+integer overflow/NaN and malformed subcommands are rejected before SDK helpers
+can panic. The production event handler still awaits cutover to this mapper.
+
 Audio delivery is stereo Opus at 48 kHz in 20 ms packets. Caller owns bytes;
 Send may read them only until it returns. Adapter owns pacing, RTP/encryption,
 DAVE and connection state. A successful Send means transport acceptance, not

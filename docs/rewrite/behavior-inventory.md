@@ -85,6 +85,13 @@ admission rejection at finite resource limits. Preserve command names and
 permissions. Keep old runtime until replacement contract tests cover its behavior;
 temporary coexistence is a migration checkpoint, not the final architecture.
 
+The replacement interaction grammar preserves `1:30`, `90`, `90s` and `1m30s`
+seek forms, while rejecting negative/overflowing values, colon seconds above 59,
+and offsets above seven days (the metadata duration bound). This tightens invalid
+input handling; no existing documented valid timestamp form is removed. Button
+pause toggles and forward seeks now read state inside the coordinator, avoiding
+read-then-write races between concurrent controls.
+
 ## Initial verification
 
 Docker initially required sandbox escalation to access `/var/run/docker.sock`;

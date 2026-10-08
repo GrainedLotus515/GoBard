@@ -5,16 +5,21 @@ import (
 	"context"
 	"crypto/rand"
 	"errors"
+	"math"
 	"strconv"
 	"sync"
+	"time"
 
 	"github.com/GrainedLotus515/gobard/internal/playback"
 )
 
 var (
-	ErrBusy   = errors.New("session command mailbox full")
-	ErrFull   = errors.New("session queue full")
-	ErrClosed = errors.New("session closed")
+	ErrBusy        = errors.New("session command mailbox full")
+	ErrFull        = errors.New("session queue full")
+	ErrClosed      = errors.New("session closed")
+	ErrSuperseded  = errors.New("command superseded by stop or disconnect")
+	ErrVoiceAccess = errors.New("join the bot's active voice channel to control playback")
+	ErrManageGuild = errors.New("manage server permission required")
 )
 
 const MailboxCapacity = 32
@@ -39,10 +44,13 @@ func (t *Ticket) Wait(ctx context.Context) (playback.Result, error) {
 }
 
 type command struct {
-	ctx       context.Context
-	tracks    []Track
-	operation Operation
-	reply     chan response
+	ctx        context.Context
+	tracks     []Track
+	operation  Operation
+	reply      chan response
+	access     *Access
+	generation *uint64
+	commandID  string
 }
 type response struct {
 	tickets  []*Ticket
@@ -89,6 +97,26 @@ func (s *Session) Enqueue(ctx context.Context, request playback.Request) (*Ticke
 // Add admits all tracks atomically or rejects the entire batch. Caller strings
 // are bounded and the slice is copied before crossing the ownership boundary.
 func (s *Session) Add(ctx context.Context, tracks []Track) ([]*Ticket, error) {
+	return s.add(command{ctx: ctx}, tracks)
+}
+
+// AddResolved admits results only into the same session generation that began
+// resolution. Stop/disconnect supersede pending lookups even after reconnect.
+func (s *Session) AddResolved(ctx context.Context, access Access, generation uint64, commandID string, tracks []Track) ([]*Ticket, error) {
+	if len(commandID) == 0 || len(commandID) > 128 {
+		return nil, errors.New("invalid command correlation identifier")
+	}
+	for _, c := range commandID {
+		switch {
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9', c == '-', c == '_', c == '/':
+		default:
+			return nil, errors.New("invalid command correlation identifier")
+		}
+	}
+	return s.add(command{ctx: ctx, access: &access, generation: &generation, commandID: commandID}, tracks)
+}
+
+func (s *Session) add(cmd command, tracks []Track) ([]*Ticket, error) {
 	if len(tracks) == 0 || len(tracks) > MaxQueue {
 		return nil, ErrFull
 	}
@@ -101,8 +129,16 @@ func (s *Session) Add(ctx context.Context, tracks []Track) ([]*Ticket, error) {
 	for i, track := range tracks {
 		owned[i] = track.Clone()
 	}
-	r := s.submit(command{ctx: ctx, tracks: owned})
+	cmd.tracks = owned
+	r := s.submit(cmd)
 	return r.tickets, r.err
+}
+
+// ApplyAs is the untrusted interaction boundary. Apply remains for trusted
+// lifecycle operations (connect, speaking events and shutdown composition).
+func (s *Session) ApplyAs(ctx context.Context, access Access, operation Operation) (Snapshot, error) {
+	r := s.submit(command{ctx: ctx, access: &access, operation: operation})
+	return r.snapshot, r.err
 }
 func (s *Session) Apply(ctx context.Context, operation Operation) (Snapshot, error) {
 	r := s.submit(command{ctx: ctx, operation: operation})
@@ -154,6 +190,8 @@ type coordinator struct {
 	session               *Session
 	id                    string
 	sequence              uint64
+	generation            uint64
+	channel               string
 	engine                *playback.Engine
 	output                playback.Output
 	connected             bool
@@ -202,8 +240,20 @@ func (c *coordinator) run() {
 				continue
 			}
 			if len(cmd.tracks) > 0 {
-				cmd.reply <- c.add(cmd.tracks)
+				if cmd.generation != nil && *cmd.generation != c.generation {
+					cmd.reply <- response{err: ErrSuperseded}
+				} else if cmd.access != nil && (!c.connected || c.channel == "" || cmd.access.Channel != c.channel) {
+					cmd.reply <- response{err: ErrVoiceAccess}
+				} else {
+					cmd.reply <- c.add(cmd.tracks, cmd.commandID)
+				}
 				continue
+			}
+			if cmd.access != nil {
+				if err := c.authorize(*cmd.access, cmd.operation.Action); err != nil {
+					cmd.reply <- response{err: err}
+					continue
+				}
 			}
 			err := c.apply(cmd.operation)
 			cmd.reply <- response{snapshot: c.snapshot(), err: err}
@@ -211,7 +261,7 @@ func (c *coordinator) run() {
 	}
 }
 
-func (c *coordinator) add(tracks []Track) response {
+func (c *coordinator) add(tracks []Track, commandID string) response {
 	if c.stopAfter {
 		return response{err: ErrBusy}
 	}
@@ -221,7 +271,7 @@ func (c *coordinator) add(tracks []Track) response {
 	tickets := make([]*Ticket, 0, len(tracks))
 	for _, track := range tracks {
 		c.sequence++
-		request := playback.Request{ID: c.id + "/" + strconv.FormatUint(c.sequence, 10), Provider: track.Provider, MediaID: track.MediaID}
+		request := playback.Request{ID: c.id + "/" + strconv.FormatUint(c.sequence, 10), CommandID: commandID, Provider: track.Provider, MediaID: track.MediaID}
 		ticket := &Ticket{done: make(chan struct{}), request: request}
 		c.queue.entries = append(c.queue.entries, entry{track: track, ticket: ticket})
 		tickets = append(tickets, ticket)
@@ -280,6 +330,9 @@ func (c *coordinator) complete(result playback.Result) {
 	case playback.Seeked:
 		return
 	case playback.Disconnected, playback.TransportFailure:
+		if reason == playback.TransportFailure {
+			c.generation++
+		}
 		c.connected = false
 		return
 	case playback.Stopped:
@@ -336,19 +389,31 @@ func (c *coordinator) interrupt(reason playback.Outcome) {
 }
 
 func (c *coordinator) snapshot() Snapshot {
-	s := Snapshot{Current: c.queue.index, Active: c.active != nil, Connected: c.connected, Paused: c.paused,
+	s := Snapshot{Generation: c.generation, Channel: c.channel, Current: c.queue.index, Active: c.active != nil, Connected: c.connected, Paused: c.paused,
 		Loop: c.loop, Volume: c.volume, Ducking: c.ducking, DuckTarget: c.duckTarget, Last: c.last}
 	s.Last.Request.Controls = nil
 	s.Tracks = make([]Track, len(c.queue.entries))
 	for i, e := range c.queue.entries {
 		s.Tracks[i] = e.track
 	}
-	if e := c.queue.current(); e != nil {
-		s.Position = e.ticket.request.Offset
-	}
+	s.Position = c.position()
 	if c.controls != nil {
 		s.Frames = c.controls.Frames()
-		s.Position += timeForFrames(s.Frames)
 	}
 	return s
+}
+
+func (c *coordinator) position() time.Duration {
+	var offset time.Duration
+	if e := c.queue.current(); e != nil {
+		offset = e.ticket.request.Offset
+	}
+	if c.controls != nil {
+		elapsed := timeForFrames(c.controls.Frames())
+		if elapsed > time.Duration(math.MaxInt64)-offset {
+			return time.Duration(math.MaxInt64)
+		}
+		offset += elapsed
+	}
+	return offset
 }

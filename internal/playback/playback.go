@@ -40,6 +40,7 @@ func (c Cancellation) Error() string { return string(c.Outcome) }
 type Request struct {
 	ID        string
 	AttemptID string
+	CommandID string
 	Provider  string
 	MediaID   string
 	Offset    time.Duration
@@ -194,7 +195,7 @@ func classify(stage string, category failure.Category, err error) *failure.Error
 
 func (e *Engine) terminal(r Result) {
 	fields := []any{"event", "playback.terminal", "request_id", r.Request.ID, "attempt_id", r.Request.AttemptID,
-		"provider", r.Request.Provider, "outcome", r.Outcome, "recovery", "none", "frames", r.Frames, "elapsed_ms", r.Elapsed.Milliseconds()}
+		"command_id", r.Request.CommandID, "provider", r.Request.Provider, "outcome", r.Outcome, "recovery", "none", "frames", r.Frames, "elapsed_ms", r.Elapsed.Milliseconds()}
 	if r.Failure != nil {
 		fields = append(fields, "stage", r.Failure.Stage, "category", r.Failure.Category, "fingerprint", r.Failure.Fingerprint, "exit_code", r.Failure.ExitCode)
 		e.logger.Error("Playback failed", fields...)

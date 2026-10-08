@@ -12,6 +12,7 @@ session, queue, source or playback packages.
 | --- | --- |
 | Composition | Root context, config, Charm logger, budgets, adapters, shutdown join. |
 | Discord adapter | SDK interaction parsing, responses, voice membership, gateway events, command registration. |
+| Command | Bounded metadata operations; refresh authorization after external work; correlate queue acceptance with later attempts. |
 | Session | One event loop owns queue, selected request, control transitions and attempt policy; commands have explicit acknowledgement. |
 | Playback | One synchronous attempt owns open → read → send → cleanup → terminal result. It never advances queues or reconnects. |
 | Source | Metadata resolution and authorized acquisition. No implicit fallback to another provider. |
@@ -59,3 +60,12 @@ Adapter-owned outputs outlive their sessions and are closed after the manager.
 decoder cleanup, and the stable cache-key algorithm is retained. The shared URL
 grammar now lives in `sourceurl`; the legacy YouTube client delegates to it while
 production command migration is pending.
+
+Decision (2026-10-08): `command.Player` owns a finite number of concurrent play
+lookups with no waiting queue; excess requests receive a busy result. The
+Discord adapter supplies current voice observations through a two-field core
+value. The session coordinator checks that observation against its owned channel
+when applying the mutation. Slow lookups capture a session generation; stop,
+disconnect and transport failure invalidate it. A reconnect cannot revive an
+older lookup. Trusted lifecycle calls use `Apply`; interactions use `ApplyAs`
+and `AddResolved`. The adapter must establish the connected target before lookup.
