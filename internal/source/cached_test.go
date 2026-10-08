@@ -153,11 +153,19 @@ func TestCachedAudioHoldsLeaseThroughDecoderCleanup(t *testing.T) {
 		}
 		frames++
 	}
-	if frames == 0 {
-		t.Fatal("cached media produced no audio")
+	if frames != 2 {
+		t.Fatalf("cached fixture frames: got %d, want 2", frames)
 	}
 	if err := stream.Close(); err != nil {
 		t.Fatal(err)
+	}
+	engine, err := playback.New(c, log.New(io.Discard))
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := engine.Run(context.Background(), playback.Request{MediaID: url, Offset: playback.FrameDuration}, discardOutput{})
+	if result.Outcome != playback.Completed || result.Frames != 1 {
+		t.Fatalf("cached resume did not honor delivered position: %+v", result)
 	}
 	if err := store.Clear(); err != nil {
 		t.Fatal(err)

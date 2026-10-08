@@ -10,6 +10,13 @@ import (
 
 type Category string
 
+type Reason string
+
+const (
+	ConnectionReset Reason = "connection_reset"
+	NetworkTimeout  Reason = "network_timeout"
+)
+
 const (
 	Source         Category = "source"
 	Authentication Category = "authentication"
@@ -27,6 +34,7 @@ const (
 type Error struct {
 	Stage       string
 	Category    Category
+	Reason      Reason
 	Fingerprint string
 	ExitCode    int
 	Cause       error
@@ -64,6 +72,14 @@ func (d *Diagnostic) Failure(stage string, fallback Category, cause error) *Erro
 	}
 	hash := sha256.Sum256(d.data[:d.n])
 	f := Wrap(stage, category, cause)
+	if category == Source {
+		switch {
+		case strings.Contains(text, "connection reset"):
+			f.Reason = ConnectionReset
+		case strings.Contains(text, "timed out"), strings.Contains(text, "timeout error"):
+			f.Reason = NetworkTimeout
+		}
+	}
 	f.Fingerprint = hex.EncodeToString(hash[:8])
 	var status interface{ ExitCode() int }
 	if errors.As(cause, &status) {

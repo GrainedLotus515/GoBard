@@ -197,6 +197,12 @@ func commandMessage(err error) string {
 	}
 	var classified *failure.Error
 	if errors.As(err, &classified) {
+		switch classified.Reason {
+		case failure.ConnectionReset:
+			return "The media connection was reset before playback finished."
+		case failure.NetworkTimeout:
+			return "The media connection timed out before playback finished."
+		}
 		switch classified.Category {
 		case failure.Authentication:
 			return "The provider or Discord rejected authentication. No automatic authentication bypass is attempted."

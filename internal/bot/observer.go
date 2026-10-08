@@ -74,7 +74,11 @@ func (r *Runtime) observe(guild string, target *session.Session) {
 			continue
 		}
 		ctx, cancel := context.WithTimeout(r.ctx, 8*time.Second)
-		err = r.rest.send(ctx, http.MethodPost, "channels/"+channel+"/messages", &discordgo.MessageSend{Content: fmt.Sprintf("Playback failed after %d delivered frames. %s", result.Frames, commandMessage(result.Failure)), AllowedMentions: noAllowedMentions()}, true)
+		message := fmt.Sprintf("Playback attempt failed after %d delivered frames. %s", result.Frames, commandMessage(result.Failure))
+		if snapshot.Recovery == "source_resume" {
+			message += " Resuming once from the last delivered position."
+		}
+		err = r.rest.send(ctx, http.MethodPost, "channels/"+channel+"/messages", &discordgo.MessageSend{Content: message, AllowedMentions: noAllowedMentions()}, true)
 		cancel()
 		if err != nil && r.ctx.Err() == nil {
 			r.logger.Warn("Playback notice could not be delivered", "event", "discord.response", "attempt_id", last, "error", err)

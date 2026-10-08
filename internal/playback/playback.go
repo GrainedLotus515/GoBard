@@ -197,7 +197,7 @@ func (e *Engine) terminal(r Result) {
 	fields := []any{"event", "playback.terminal", "request_id", r.Request.ID, "attempt_id", r.Request.AttemptID,
 		"command_id", r.Request.CommandID, "provider", r.Request.Provider, "outcome", r.Outcome, "recovery", "none", "frames", r.Frames, "elapsed_ms", r.Elapsed.Milliseconds()}
 	if r.Failure != nil {
-		fields = append(fields, "stage", r.Failure.Stage, "category", r.Failure.Category, "fingerprint", r.Failure.Fingerprint, "exit_code", r.Failure.ExitCode)
+		fields = append(fields, "stage", r.Failure.Stage, "category", r.Failure.Category, "reason", r.Failure.Reason, "fingerprint", r.Failure.Fingerprint, "exit_code", r.Failure.ExitCode)
 		e.logger.Error("Playback failed", fields...)
 		return
 	}

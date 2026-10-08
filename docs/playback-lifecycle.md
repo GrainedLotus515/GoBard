@@ -10,7 +10,7 @@ Reference contracts for the replacement:
   and one terminal event are published after cleanup.
 * Session: idle → active ↔ paused → idle/disconnected → closed. Only the owner
   mutates selection. Skip/removal bypass loop; completion may repeat; source
-  failures advance; stop clears; intentional disconnect preserves queue.
+  exhausted source failures advance; stop clears; intentional disconnect preserves queue.
 * Transport: disconnected → connecting → ready → failed/closing → disconnected.
   No attempt success implies human audibility; delivered frames mean output
   accepted complete packets.
@@ -24,6 +24,16 @@ nonzero exit after some audio remains failure with a nonzero delivered count.
 The attempt has no retries. The session is the only recovery owner. Provider
 auth/rejection is terminal; it must not trigger cookies, provider switching or
 loop retries. Transport reconnect policy requires a finite attempt/time budget.
+
+A classified connection reset or network timeout after accepted audio permits
+one source resume per logical request. The track must have a known finite
+duration and the delivered position must precede its end. The coordinator joins
+the failed attempt, advances the offset by accepted 20 ms frames, and starts a
+distinct attempt with the same request ID. The existing opener prefers a complete
+cache entry when available; otherwise it reacquires the same source. Authentication,
+throttling, unknown failures, zero frames and live media do not qualify. A second
+failure exhausts the budget and advances the queue. Stop/skip/shutdown override
+recovery; seek and looping do not replenish this per-request source budget.
 
 Cancellation is cooperative and propagated through every boundary. Output Send
 must release the packet before returning and unblock on context cancellation.
@@ -40,7 +50,8 @@ per-field byte bounds. Snapshots copy the queue. Completed entries retain their
 display positions until the queue drains, preserving the previous indexing.
 Loop retries only successful completion. Skip/removal bypass loop; seek creates
 a new attempt for the same request; disconnect/transport failure retain selection.
-Reconnect requires an explicit new output. No automatic retry is implemented.
+The managed voice path supplies a new output through the finite reconnect policy
+below. The fixture constructor requires an explicitly supplied output.
 
 Pause uses a cancellation-aware notification gate, with at most one encoded
 packet held. Session owns gain/ducking policy; codecs read an atomic gain value.
@@ -62,8 +73,10 @@ yt-dlp, disables hidden config/retries, retains 16 KiB of stderr, kills the
 extractor process group on cancellation and waits before returning capacity.
 Finalization after stdout EOF is bounded to two seconds plus the subprocess
 WaitDelay. FFmpeg receives a pipe with only the pipe protocol enabled.
-Tests use a fake extractor executable and real FFmpeg; live YouTube remains
-unverified. The old production source pipeline is still awaiting replacement.
+Tests use a fake extractor executable and real FFmpeg. The v2 pipeline is wired
+into production composition. A local live test confirmed partial YouTube audio
+and human audibility, then exposed a source connection reset after 2,233 frames.
+Full-track live completion and real recovery remain separate verification gates.
 # Managed voice lifecycle
 
 The guild coordinator serializes Connect/Disconnect after the preceding audio

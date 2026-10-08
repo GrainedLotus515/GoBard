@@ -74,13 +74,15 @@ type Snapshot struct {
 	Position   time.Duration
 	Frames     uint64
 	Last       playback.Result
+	Recovery   string
 }
 
 type entry struct {
-	track    Track
-	ticket   *Ticket
-	attempts uint64
-	settled  bool
+	track         Track
+	ticket        *Ticket
+	attempts      uint64
+	sourceRetries int
+	settled       bool
 }
 
 // queue is used exclusively by its coordinator; no locks or callbacks.

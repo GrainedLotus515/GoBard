@@ -32,3 +32,28 @@ func TestBoundedSafeDiagnostics(t *testing.T) {
 		}
 	}
 }
+
+func TestTransientNetworkReasonIsSafeAndCannotOverrideAuth(t *testing.T) {
+	for _, tc := range []struct {
+		text     string
+		category Category
+		reason   Reason
+	}{
+		{"Connection reset by peer [Errno 104] https://private.invalid/signed?token=secret", Source, ConnectionReset},
+		{"The read operation timed out", Source, NetworkTimeout},
+		{"Sign in to confirm you're not a bot; connection reset", Authentication, ""},
+		{"HTTP Error 429; connection reset", Throttled, ""},
+	} {
+		var d Diagnostic
+		if _, err := d.Write([]byte(tc.text)); err != nil {
+			t.Fatal(err)
+		}
+		f := d.Failure("acquire", Source, errors.New("exit"))
+		if f.Category != tc.category || f.Reason != tc.reason {
+			t.Fatalf("classification %+v", f)
+		}
+		if strings.Contains(f.Error(), "secret") || strings.Contains(string(f.Reason), "https") {
+			t.Fatal("unsafe diagnostic")
+		}
+	}
+}

@@ -150,7 +150,7 @@ func (p *Player) terminal(a Admission, err error, elapsed time.Duration) {
 			}
 			f = inner
 		}
-		p.logger.Error("Command failed", append(fields, "outcome", "failed", "stage", f.Stage, "category", f.Category, "fingerprint", f.Fingerprint, "exit_code", f.ExitCode)...)
+		p.logger.Error("Command failed", append(fields, "outcome", "failed", "stage", f.Stage, "category", f.Category, "reason", f.Reason, "fingerprint", f.Fingerprint, "exit_code", f.ExitCode)...)
 		return
 	}
 	reason := "invalid_operation"

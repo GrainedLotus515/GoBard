@@ -272,6 +272,7 @@ type coordinator struct {
 	retryTimer            *time.Timer
 	retry                 <-chan time.Time
 	dirty                 bool
+	recovery              string
 }
 
 func (c *coordinator) run() {
@@ -410,6 +411,7 @@ func (c *coordinator) start() {
 }
 
 func (c *coordinator) complete(result playback.Result) {
+	c.recovery = ""
 	defer func() {
 		if c.queue.current() == nil {
 			c.drained = true
@@ -434,6 +436,10 @@ func (c *coordinator) complete(result playback.Result) {
 		c.pending = ""
 	}
 	switch reason {
+	case playback.SourceFailure:
+		if c.resumeSource(e, result) {
+			return
+		}
 	case playback.Seeked:
 		return
 	case playback.Disconnected, playback.TransportFailure:
@@ -500,7 +506,7 @@ func (c *coordinator) interrupt(reason playback.Outcome) {
 
 func (c *coordinator) snapshot() Snapshot {
 	s := Snapshot{Generation: c.generation, Channel: c.channel, Current: c.queue.index, Active: c.active != nil, Connected: c.connected, Connecting: c.transportKind == "connect" || c.transportKind == "recover", Paused: c.paused,
-		Loop: c.loop, Volume: c.volume, Ducking: c.ducking, DuckTarget: c.duckTarget, Last: c.last}
+		Loop: c.loop, Volume: c.volume, Ducking: c.ducking, DuckTarget: c.duckTarget, Last: c.last, Recovery: c.recovery}
 	s.Last.Request.Controls = nil
 	s.Tracks = make([]Track, len(c.queue.entries))
 	for i, e := range c.queue.entries {

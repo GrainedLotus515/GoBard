@@ -2,7 +2,7 @@
 
 | Provider/backend | Metadata | Audio acquisition | Official player | Discord delivery | Status |
 | --- | --- | --- | --- | --- | --- |
-| YouTube/yt-dlp | Search/video/playlist | Conditional on provider availability and permitted use | Separate browser embedding | Through decode/Opus pipeline | Existing backend; live verification pending |
+| YouTube/yt-dlp | Search/video/playlist | Conditional on provider availability and permitted use | Separate browser embedding | Through decode/Opus pipeline | Partial live audio verified; full-track completion/recovery pending |
 | Local test media | Fixture metadata | Caller-owned bytes | None | Through tested codec/output boundary | Real FFmpeg/Opus slice verified offline; not a public path input |
 | Spotify | Historical track/playlist bridge | No supported raw full-track backend established | SDK/player-control is a separate capability | Not established | Assessed; not enabled |
 | Self-hosted HTTP | Possible | Requires explicit origin/redirect policy | None required | Technically possible | Proposed only |
@@ -10,6 +10,14 @@
 YouTube authentication/anti-bot rejection is an external terminal condition.
 Rewriting internals cannot guarantee successful extraction. Personal cookies,
 undocumented capture and bypasses are not baseline requirements.
+
+On 2026-10-08, a local `/play hope` search produced audible Discord audio and
+2,233 accepted frames before yt-dlp exited with a connection reset. A separate
+paced extraction reproduced the same safe diagnostic fingerprint and errno 104.
+The optional cache download contained a complete 110.961-second Opus file
+(5,548 frames checked with ffprobe). That verifies acquisition of this test item,
+not provider-wide reliability or completed live delivery. A finite source-resume
+policy is tested offline; plain search retains the first-result selection behavior.
 
 An independent official-player wrapper would expose device/session selection,
 authorized play/pause/seek, state and errors. It would not imply a PCM reader or

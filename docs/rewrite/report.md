@@ -1,8 +1,8 @@
 # V2 implementation report — 2026-10-08
 
 The runtime has been replaced and is available for local Discord testing. It is
-not declared a completed production rewrite: provider retrieval, live DAVE audio,
-reconnect behavior and active SDK shutdown still require external verification.
+not declared a completed production rewrite: full-track live completion,
+recovery, live controls and active SDK shutdown still require verification.
 
 ## Implemented
 
@@ -12,7 +12,8 @@ reconnect behavior and active SDK shutdown still require external verification.
   bounded queue/guild/command admission and retained disconnect selection.
 - Owned attempts, cancellation and cleanup; exactly one authoritative terminal
   per attempt; zero-frame rejection; explicit source/codec/transport outcomes;
-  bounded voice recovery and stop/skip/reconnect race handling.
+  bounded voice recovery, one classified transient source resume from delivered
+  position, and stop/skip/reconnect race handling.
 - Charm JSON/text events with stable command/request/attempt correlation and
   safe extractor classifications; bounded Discord HTTP responses, cancellation,
   mention suppression, Gateway membership observations and callback shutdown.
@@ -30,14 +31,20 @@ reconnect behavior and active SDK shutdown still require external verification.
 - Full 15-minute offline capacity gates at 4/12/24 guilds. No missed 60 ms
   deadlines, worker failures, temporary files or workload goroutine growth.
   See `capacity-soak-2026-10-08.json` and `../performance.md` for measurements.
-- Actual local Discord login and command reconciliation in four guilds; loopback
-  readiness reports Discord/commands ready and source/pipeline unknown.
+- Actual local Discord login and command reconciliation in four guilds.
+- User-confirmed audible `/play hope`; 2,233 accepted frames before a source
+  connection reset, independently reproduced with the same diagnostic fingerprint.
+  A separate cache download contains all 5,548 Opus frames (110.961 seconds).
+  This is partial live playback evidence, not successful full-track completion.
+- Deterministic source-resume tests cover offset/identity, one-retry budget,
+  auth/unknown/empty/live exclusions, and stop/shutdown during the resumed attempt.
 - Idle connected-container SIGTERM: exit 0, no OOM, 1.377-second shutdown.
 
 ## External gates and limitations
 
-- No real audio command has yet established provider retrieval, DAVE delivery,
-  audibility, channel controls or live reconnect. Fake output is not that proof.
+- Partial provider retrieval and audible Discord delivery are confirmed. Live
+  full-track completion, source recovery, channel controls and reconnect remain
+  unverified. Deterministic fake output does not replace those gates.
 - YouTube authentication/anti-bot rejection remains possible and is terminal
   when appropriate. A rewrite cannot guarantee provider availability.
 - The current SDK exposes no strict heartbeat/listener join and has internal
