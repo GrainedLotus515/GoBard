@@ -14,9 +14,9 @@ import (
 const writeTimeout = 250 * time.Millisecond
 const maxVoicePacket = 1400
 
-// packetConn is the consumed SDK capability, not a mirror of its UDP API.
+// PacketWriter is the consumed SDK capability, not a mirror of its UDP API.
 // SetWriteDeadline and Close must be safe concurrently with Write.
-type packetConn interface {
+type PacketWriter interface {
 	Write([]byte) (int, error)
 	SetWriteDeadline(time.Time) error
 	Close() error
@@ -26,7 +26,7 @@ type packetConn interface {
 // Discord UDP transport. The session must close it before closing its voice
 // connection. It never retains caller packets or starts a sender goroutine.
 type Output struct {
-	conn      packetConn
+	conn      PacketWriter
 	gate      chan struct{}
 	done      chan struct{}
 	timer     *time.Timer
@@ -41,10 +41,13 @@ func (c *Connection) Output() (*Output, error) {
 	if c == nil || c.conn == nil {
 		return nil, errors.New("voice connection required")
 	}
-	return newOutput(c.conn.UDP())
+	return NewOutput(c.conn.UDP())
 }
 
-func newOutput(conn packetConn) (*Output, error) {
+// NewOutput takes ownership of a connected packet writer until Close. This
+// boundary also permits offline workloads to exercise the actual pacing path.
+// Typed nil writers are prohibited; an interface nil check cannot detect them.
+func NewOutput(conn PacketWriter) (*Output, error) {
 	if conn == nil {
 		return nil, errors.New("voice UDP transport required")
 	}
@@ -97,7 +100,7 @@ func (o *Output) Send(ctx context.Context, packet []byte) error {
 	}
 	sentAt := time.Now()
 	n, err := o.conn.Write(packet)
-	o.next = sentAt.Add(playback.FrameDuration)
+	o.next = nextPacketDeadline(o.next, sentAt)
 	if err != nil {
 		return failure.Wrap("output", failure.Transport, err)
 	}
@@ -105,6 +108,16 @@ func (o *Output) Send(ctx context.Context, packet []byte) error {
 		return failure.Wrap("output", failure.Transport, io.ErrShortWrite)
 	}
 	return nil
+}
+
+// Keep the media clock's phase through ordinary timer jitter. After a long
+// stall reset the phase, rather than emitting a burst of overdue packets.
+func nextPacketDeadline(previous, sentAt time.Time) time.Time {
+	next := previous.Add(playback.FrameDuration)
+	if previous.IsZero() || next.Before(sentAt.Add(playback.FrameDuration/2)) {
+		return sentAt.Add(playback.FrameDuration)
+	}
+	return next
 }
 
 // Close unblocks writes, then acquires the send gate as a join barrier. A

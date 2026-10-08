@@ -5,10 +5,15 @@ accepted request has a stable request ID; each attempt has a distinct attempt
 ID. Session/guild IDs are operational correlation, not metric labels.
 
 The attempt owner emits `playback.terminal` after cleanup with request_id,
-attempt_id, stage, outcome, category, recovery, frames and elapsed_ms. Completion
+attempt_id, command_id, stage, outcome, category, recovery, frames and elapsed_ms. Completion
 requires at least one accepted frame and successful source finalization. ERROR
 means a terminal failure; INFO means completion or intentional cancellation.
 Lower layers return wrapped causes without duplicate terminal logs.
+
+The command owner separately emits `command.terminal` for accepted/rejected,
+canceled or failed metadata/admission work. Its command ID is generated before
+lookup and carried into every resulting request and attempt. An accepted
+command event reports accepted track count; it never claims delivered audio.
 
 Never log raw errors from external commands/SDKs blindly. Bounded stderr is
 classified using allowlisted patterns (authentication, unavailable, throttled);

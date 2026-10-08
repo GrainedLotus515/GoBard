@@ -7,7 +7,24 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/GrainedLotus515/gobard/internal/playback"
 )
+
+func TestMediaClockAbsorbsJitterWithoutCatchupBursts(t *testing.T) {
+	start := time.Unix(100, 0)
+	next := nextPacketDeadline(time.Time{}, start)
+	for range 99 {
+		next = nextPacketDeadline(next, next.Add(750*time.Microsecond))
+	}
+	if got := next.Sub(start); got != 100*playback.FrameDuration {
+		t.Fatalf("media clock accumulated wakeup drift: %v", got)
+	}
+	stalledAt := next.Add(500 * time.Millisecond)
+	if got := nextPacketDeadline(next, stalledAt).Sub(stalledAt); got != playback.FrameDuration {
+		t.Fatalf("catchup after stall: %v", got)
+	}
+}
 
 type packetFake struct {
 	mu       sync.Mutex
@@ -55,7 +72,7 @@ func (f *packetFake) Close() error { close(f.closed); return nil }
 
 func TestOutputPacketOwnershipAndPacing(t *testing.T) {
 	f := &packetFake{closed: make(chan struct{})}
-	o, err := newOutput(f)
+	o, err := NewOutput(f)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -70,7 +87,7 @@ func TestOutputPacketOwnershipAndPacing(t *testing.T) {
 		t.Fatal("retained caller packet")
 	}
 	for i := 1; i < len(f.writes); i++ {
-		if f.writes[i].Sub(f.writes[i-1]) < 19*time.Millisecond {
+		if f.writes[i].Sub(f.writes[i-1]) < 9*time.Millisecond {
 			t.Fatal("packets sent in a burst")
 		}
 	}
@@ -87,7 +104,7 @@ func TestOutputPacketOwnershipAndPacing(t *testing.T) {
 
 func TestOutputCloseJoinsStalledWrite(t *testing.T) {
 	f := &packetFake{closed: make(chan struct{}), entered: make(chan struct{}), stall: true}
-	o, err := newOutput(f)
+	o, err := NewOutput(f)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -104,7 +121,7 @@ func TestOutputCloseJoinsStalledWrite(t *testing.T) {
 
 func TestOutputDeadlineCancellationAndShortWrite(t *testing.T) {
 	f := &packetFake{closed: make(chan struct{}), entered: make(chan struct{}), stall: true}
-	o, err := newOutput(f)
+	o, err := NewOutput(f)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -119,7 +136,7 @@ func TestOutputDeadlineCancellationAndShortWrite(t *testing.T) {
 		t.Fatal(err)
 	}
 	f = &packetFake{closed: make(chan struct{}), short: true}
-	o, err = newOutput(f)
+	o, err = NewOutput(f)
 	if err != nil {
 		t.Fatal(err)
 	}

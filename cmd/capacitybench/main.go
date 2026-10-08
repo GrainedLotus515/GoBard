@@ -20,11 +20,15 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/hraban/opus"
+	"github.com/charmbracelet/log"
 
+	"github.com/GrainedLotus515/gobard/internal/audio"
 	"github.com/GrainedLotus515/gobard/internal/cache"
-	"github.com/GrainedLotus515/gobard/internal/player"
+	"github.com/GrainedLotus515/gobard/internal/discordvoice"
+	"github.com/GrainedLotus515/gobard/internal/failure"
+	"github.com/GrainedLotus515/gobard/internal/playback"
 	"github.com/GrainedLotus515/gobard/internal/processlimit"
+	"github.com/GrainedLotus515/gobard/internal/session"
 )
 
 const opusInterval = 20 * time.Millisecond
@@ -46,29 +50,35 @@ type measurements struct {
 	maximumBackground      atomic.Int64
 	maximumInteractiveNS   atomic.Int64
 	workerFailures         atomic.Uint64
+	maximumShutdownNS      atomic.Int64
+	frameGaps              [1001]atomic.Uint64
 }
 
 type report struct {
-	Profile                    string  `json:"profile"`
-	DurationSeconds            float64 `json:"duration_seconds"`
-	SimultaneousGuilds         int     `json:"simultaneous_guilds"`
-	Frames                     uint64  `json:"frames"`
-	AverageCPUPercentOfQuota   float64 `json:"average_cpu_percent_of_quota"`
-	PeakRSSBytes               uint64  `json:"peak_rss_bytes"`
-	MemoryLimitBytes           uint64  `json:"memory_limit_bytes"`
-	PeakRSSPercentOfLimit      float64 `json:"peak_rss_percent_of_limit"`
-	MissedThreeFrameDeadlines  uint64  `json:"missed_three_frame_deadlines"`
-	MaximumFrameDelayMS        float64 `json:"maximum_frame_delay_ms"`
-	AverageFirstFrameLatencyMS float64 `json:"average_first_frame_latency_ms"`
-	MaximumFirstFrameLatencyMS float64 `json:"maximum_first_frame_latency_ms"`
-	MaximumYTDLPWork           int64   `json:"maximum_stubbed_ytdlp_work"`
-	YTDLPConfiguredLimit       int     `json:"ytdlp_configured_limit"`
-	MaximumCacheDownloads      int64   `json:"maximum_cache_downloads"`
-	MaximumInteractiveWaitMS   float64 `json:"maximum_interactive_wait_ms"`
-	GoroutinesBefore           int     `json:"goroutines_before"`
-	GoroutinesAfter            int     `json:"goroutines_after"`
-	TemporaryFilesAfter        int     `json:"temporary_files_after"`
-	WorkerFailures             uint64  `json:"worker_failures"`
+	Profile                     string  `json:"profile"`
+	DurationSeconds             float64 `json:"duration_seconds"`
+	SimultaneousGuilds          int     `json:"simultaneous_guilds"`
+	Frames                      uint64  `json:"frames"`
+	AverageCPUPercentOfQuota    float64 `json:"average_cpu_percent_of_quota"`
+	PeakCgroupMemoryBytes       uint64  `json:"peak_cgroup_memory_bytes"`
+	PeakAnonymousMemoryBytes    uint64  `json:"peak_anonymous_memory_bytes"`
+	AddedAnonymousBytesPerGuild uint64  `json:"added_anonymous_bytes_per_guild"`
+	MemoryLimitBytes            uint64  `json:"memory_limit_bytes"`
+	PeakMemoryPercentOfLimit    float64 `json:"peak_memory_percent_of_limit"`
+	MissedThreeFrameDeadlines   uint64  `json:"missed_three_frame_deadlines"`
+	MaximumFrameDelayMS         float64 `json:"maximum_frame_delay_ms"`
+	AverageFirstFrameLatencyMS  float64 `json:"average_first_frame_latency_ms"`
+	MaximumFirstFrameLatencyMS  float64 `json:"maximum_first_frame_latency_ms"`
+	MaximumYTDLPWork            int64   `json:"maximum_stubbed_ytdlp_work"`
+	YTDLPConfiguredLimit        int     `json:"ytdlp_configured_limit"`
+	MaximumCacheDownloads       int64   `json:"maximum_cache_downloads"`
+	MaximumInteractiveWaitMS    float64 `json:"maximum_interactive_wait_ms"`
+	GoroutinesBefore            int     `json:"goroutines_before"`
+	GoroutinesAfter             int     `json:"goroutines_after"`
+	TemporaryFilesAfter         int     `json:"temporary_files_after"`
+	WorkerFailures              uint64  `json:"worker_failures"`
+	MaximumSessionShutdownMS    float64 `json:"maximum_session_shutdown_ms"`
+	P99FrameGapMS               int     `json:"p99_frame_gap_ms"`
 }
 
 func main() {
@@ -86,7 +96,7 @@ func run() error {
 	duration := 15 * time.Minute
 	if raw := os.Getenv("GOBARD_BENCH_DURATION"); raw != "" {
 		duration, err = time.ParseDuration(raw)
-		if err != nil || duration < time.Second {
+		if err != nil || duration < time.Second || duration > time.Hour {
 			return fmt.Errorf("invalid GOBARD_BENCH_DURATION %q", raw)
 		}
 	}
@@ -103,12 +113,13 @@ func run() error {
 	if err := seedCache(cacheStore); err != nil {
 		return err
 	}
-	mediaPath, err := createDeterministicMedia(tempDir)
+	mediaPath, err := createDeterministicMedia(tempDir, duration+time.Second)
 	if err != nil {
 		return err
 	}
 
 	baselineGoroutines := runtime.NumGoroutine()
+	baselineAnonymous := readAnonymousMemory()
 	startCPU, quotaCPUs := readCPUUsage()
 	ctx, cancel := context.WithTimeout(context.Background(), duration)
 	defer cancel()
@@ -129,7 +140,12 @@ func run() error {
 	workers.Wait()
 	elapsed := time.Since(startedAt)
 	endCPU, _ := readCPUUsage()
-	peakRSS := <-peakMemory
+	memory := <-peakMemory
+	var addedAnonymous uint64
+	if memory.anonymous > baselineAnonymous {
+		// #nosec G115 -- selectedProfile admits only 1, 4, 12 or 24 guilds.
+		addedAnonymous = (memory.anonymous - baselineAnonymous) / uint64(cfg.guilds)
+	}
 
 	if err := cacheStore.Clear(); err != nil {
 		return fmt.Errorf("cache leases remained after shutdown: %w", err)
@@ -144,26 +160,30 @@ func run() error {
 
 	frames := measured.frames.Load()
 	result := report{
-		Profile:                    cfg.name,
-		DurationSeconds:            elapsed.Seconds(),
-		SimultaneousGuilds:         cfg.guilds,
-		Frames:                     frames,
-		AverageCPUPercentOfQuota:   cpuPercent(startCPU, endCPU, elapsed, quotaCPUs),
-		PeakRSSBytes:               peakRSS,
-		MemoryLimitBytes:           cfg.memoryBytes,
-		PeakRSSPercentOfLimit:      percent(float64(peakRSS), float64(cfg.memoryBytes)),
-		MissedThreeFrameDeadlines:  measured.missedDeadlines.Load(),
-		MaximumFrameDelayMS:        durationMS(time.Duration(measured.maximumDeadlineDelayNS.Load())),
-		AverageFirstFrameLatencyMS: durationMS(time.Duration(measured.firstFrameTotalNS.Load() / int64(cfg.guilds))),
-		MaximumFirstFrameLatencyMS: durationMS(time.Duration(measured.maximumFirstFrameNS.Load())),
-		MaximumYTDLPWork:           measured.maximumYTDLP.Load(),
-		YTDLPConfiguredLimit:       cfg.ytdlpConcurrency,
-		MaximumCacheDownloads:      measured.maximumBackground.Load(),
-		MaximumInteractiveWaitMS:   durationMS(time.Duration(measured.maximumInteractiveNS.Load())),
-		GoroutinesBefore:           baselineGoroutines,
-		GoroutinesAfter:            afterGoroutines,
-		TemporaryFilesAfter:        temporaryFiles,
-		WorkerFailures:             measured.workerFailures.Load(),
+		Profile:                     cfg.name,
+		DurationSeconds:             elapsed.Seconds(),
+		SimultaneousGuilds:          cfg.guilds,
+		Frames:                      frames,
+		AverageCPUPercentOfQuota:    cpuPercent(startCPU, endCPU, elapsed, quotaCPUs),
+		PeakCgroupMemoryBytes:       memory.total,
+		PeakAnonymousMemoryBytes:    memory.anonymous,
+		AddedAnonymousBytesPerGuild: addedAnonymous,
+		MemoryLimitBytes:            cfg.memoryBytes,
+		PeakMemoryPercentOfLimit:    percent(float64(memory.total), float64(cfg.memoryBytes)),
+		MissedThreeFrameDeadlines:   measured.missedDeadlines.Load(),
+		MaximumFrameDelayMS:         durationMS(time.Duration(measured.maximumDeadlineDelayNS.Load())),
+		AverageFirstFrameLatencyMS:  durationMS(time.Duration(measured.firstFrameTotalNS.Load() / int64(cfg.guilds))),
+		MaximumFirstFrameLatencyMS:  durationMS(time.Duration(measured.maximumFirstFrameNS.Load())),
+		MaximumYTDLPWork:            measured.maximumYTDLP.Load(),
+		YTDLPConfiguredLimit:        cfg.ytdlpConcurrency,
+		MaximumCacheDownloads:       measured.maximumBackground.Load(),
+		MaximumInteractiveWaitMS:    durationMS(time.Duration(measured.maximumInteractiveNS.Load())),
+		GoroutinesBefore:            baselineGoroutines,
+		GoroutinesAfter:             afterGoroutines,
+		TemporaryFilesAfter:         temporaryFiles,
+		WorkerFailures:              measured.workerFailures.Load(),
+		MaximumSessionShutdownMS:    durationMS(time.Duration(measured.maximumShutdownNS.Load())),
+		P99FrameGapMS:               frameGapPercentile(&measured, 99),
 	}
 	encoded, err := json.Marshal(result)
 	if err != nil {
@@ -175,8 +195,8 @@ func run() error {
 	if result.AverageCPUPercentOfQuota >= 80 {
 		failures = append(failures, fmt.Errorf("average CPU %.2f%% is not below 80%% of quota", result.AverageCPUPercentOfQuota))
 	}
-	if result.PeakRSSPercentOfLimit >= 75 {
-		failures = append(failures, fmt.Errorf("peak RSS %.2f%% is not below 75%% of memory limit", result.PeakRSSPercentOfLimit))
+	if result.PeakMemoryPercentOfLimit >= 75 {
+		failures = append(failures, fmt.Errorf("peak cgroup memory %.2f%% is not below 75%% of memory limit", result.PeakMemoryPercentOfLimit))
 	}
 	if result.MissedThreeFrameDeadlines != 0 {
 		failures = append(failures, fmt.Errorf("%d frame deadlines exceeded three intervals", result.MissedThreeFrameDeadlines))
@@ -204,6 +224,8 @@ func run() error {
 
 func selectedProfile(name string) (profile, error) {
 	switch strings.ToLower(name) {
+	case "single":
+		return profile{name: "single", guilds: 1, ytdlpConcurrency: 4, memoryBytes: 1 << 30}, nil
 	case "small":
 		return profile{name: "small", guilds: 4, ytdlpConcurrency: 4, memoryBytes: 1 << 30}, nil
 	case "medium":
@@ -215,127 +237,150 @@ func selectedProfile(name string) (profile, error) {
 	}
 }
 
-func runGuild(
-	ctx context.Context,
-	workers *sync.WaitGroup,
-	guild int,
-	mediaPath string,
-	cacheStore *cache.Cache,
-	measured *measurements,
-) {
+// runGuild exercises the actual v2 coordinator, decoder, encoder, controls and
+// cancellation path. Only network delivery and provider work are simulated.
+func runGuild(ctx context.Context, workers *sync.WaitGroup, guild int, mediaPath string, cacheStore *cache.Cache, measured *measurements) {
 	defer workers.Done()
-	launchedAt := time.Now()
-	ffmpegCtx, stopFFmpeg := context.WithCancel(ctx)
-	defer stopFFmpeg()
-	ffmpeg := exec.CommandContext( // #nosec G204 -- fixed executable and arguments; path is an agent-created fixture.
-		ffmpegCtx,
-		"ffmpeg",
-		"-nostdin", "-hide_banner", "-loglevel", "error",
-		"-threads", "1", "-filter_threads", "1",
-		"-stream_loop", "-1", "-i", mediaPath,
-		"-f", "s16le", "-ar", "48000", "-ac", "2", "pipe:1",
-	)
-	stdout, err := ffmpeg.StdoutPipe()
+	opener, err := audio.NewFileOpener(mediaPath)
 	if err != nil {
 		measured.workerFailures.Add(1)
 		return
 	}
-	if err := ffmpeg.Start(); err != nil {
+	engine, err := playback.New(opener, log.New(io.Discard))
+	if err != nil {
+		measured.workerFailures.Add(1)
+		return
+	}
+	delivery, err := discordvoice.NewOutput(discardPackets{})
+	if err != nil {
 		measured.workerFailures.Add(1)
 		return
 	}
 	defer func() {
-		stopFFmpeg()
-		if err := ffmpeg.Wait(); err != nil && ctx.Err() == nil {
+		if err := delivery.Close(); err != nil {
 			measured.workerFailures.Add(1)
 		}
 	}()
-
-	encoder, err := opus.NewEncoder(48000, 2, opus.AppAudio)
+	output := &probeOutput{started: time.Now(), measured: measured, cache: cacheStore, guild: guild, delivery: delivery}
+	target, err := session.New(ctx, fmt.Sprintf("bench-%d", guild), engine, output, 8)
 	if err != nil {
 		measured.workerFailures.Add(1)
 		return
 	}
-	if err := encoder.SetBitrate(128000); err != nil {
+	defer func() {
+		start := time.Now()
+		target.Close()
+		updateMaximum(&measured.maximumShutdownNS, time.Since(start).Nanoseconds())
+	}()
+	for _, op := range []session.Operation{{Action: session.Volume, Position: 85}, {Action: session.Loop}} {
+		if _, err := target.Apply(ctx, op); err != nil {
+			measured.workerFailures.Add(1)
+			return
+		}
+	}
+	_, err = target.Enqueue(ctx, playback.Request{Provider: "file", MediaID: "deterministic"})
+	if err != nil {
 		measured.workerFailures.Add(1)
 		return
 	}
-	pcmBytes := make([]byte, 960*2*2)
-	pcm := make([]int16, 960*2)
-	opusBuffer := make([]byte, 4000)
-	queue := player.NewQueue()
-	for track := range 8 {
-		queue.Add(&player.Track{ID: fmt.Sprintf("%d-%d", guild, track), Title: "deterministic", URL: fmt.Sprintf("https://www.youtube.com/watch?v=%d-%d", guild, track)})
-	}
-	queue.Next()
-
-	var localFrames uint64
-	encodeFrame := func() bool {
-		if _, readErr := io.ReadFull(stdout, pcmBytes); readErr != nil {
-			if ctx.Err() == nil {
-				measured.workerFailures.Add(1)
-			}
-			return false
-		}
-		for index := range pcm {
-			pcm[index] = int16(pcmBytes[index*2]) | int16(pcmBytes[index*2+1])<<8
-		}
-		applyVolume(pcm, 85)
-		n, encodeErr := encoder.Encode(pcm, opusBuffer)
-		if encodeErr != nil || n == 0 {
-			measured.workerFailures.Add(1)
-			return false
-		}
-		localFrames++
-		measured.frames.Add(1)
-		return true
-	}
-	if !encodeFrame() {
-		return
-	}
-	firstLatency := time.Since(launchedAt).Nanoseconds()
-	measured.firstFrameTotalNS.Add(firstLatency)
-	updateMaximum(&measured.maximumFirstFrameNS, firstLatency)
-	lastFrame := time.Now()
-	ticker := time.NewTicker(opusInterval)
+	ticker := time.NewTicker(500 * time.Millisecond)
 	defer ticker.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			now := time.Now()
-			delay := now.Sub(lastFrame)
-			lastFrame = now
-			updateMaximum(&measured.maximumDeadlineDelayNS, delay.Nanoseconds())
-			if delay > 3*opusInterval {
-				measured.missedDeadlines.Add(1)
-			}
-			if !encodeFrame() {
+			snapshot, err := target.Apply(ctx, session.Operation{Action: session.Inspect})
+			if ctx.Err() != nil {
 				return
 			}
-			if localFrames%25 == 0 {
-				queue.ToggleLoop()
-				queue.Snapshot()
-				key := cache.GenerateKey(fmt.Sprintf("guild-%d-cache-%d", guild, localFrames%3))
-				if lease, ok := cacheStore.Acquire(key); ok {
-					lease.Release()
-				}
+			if err != nil || snapshot.Last.Failure != nil {
+				measured.workerFailures.Add(1)
+				return
 			}
 		}
 	}
 }
 
-func createDeterministicMedia(dir string) (string, error) {
+type probeOutput struct {
+	started, last time.Time
+	delivery      *discordvoice.Output
+	measured      *measurements
+	cache         *cache.Cache
+	guild         int
+	frames        uint64
+}
+
+func (o *probeOutput) Send(ctx context.Context, packet []byte) error {
+	if err := o.delivery.Send(ctx, packet); err != nil {
+		return err
+	}
+	now := time.Now()
+	if o.frames == 0 {
+		latency := now.Sub(o.started).Nanoseconds()
+		o.measured.firstFrameTotalNS.Add(latency)
+		updateMaximum(&o.measured.maximumFirstFrameNS, latency)
+	} else {
+		gap := now.Sub(o.last)
+		updateMaximum(&o.measured.maximumDeadlineDelayNS, gap.Nanoseconds())
+		o.measured.frameGaps[min(gap.Milliseconds(), 1000)].Add(1)
+		if gap > 3*opusInterval {
+			o.measured.missedDeadlines.Add(1)
+		}
+	}
+	o.last = now
+	o.frames++
+	o.measured.frames.Add(1)
+	if o.frames%25 == 0 {
+		key := cache.GenerateKey(fmt.Sprintf("guild-%d-cache-%d", o.guild, o.frames%3))
+		if lease, ok := o.cache.Acquire(key); ok {
+			lease.Release()
+		}
+	}
+	return nil
+}
+
+type discardPackets struct{}
+
+func (discardPackets) Write(packet []byte) (int, error) { return len(packet), nil }
+func (discardPackets) SetWriteDeadline(time.Time) error { return nil }
+func (discardPackets) Close() error                     { return nil }
+
+func frameGapPercentile(m *measurements, percentile uint64) int {
+	var total uint64
+	for i := range m.frameGaps {
+		total += m.frameGaps[i].Load()
+	}
+	if total == 0 {
+		return 0
+	}
+	target := (total*percentile + 99) / 100
+	var seen uint64
+	for i := range m.frameGaps {
+		seen += m.frameGaps[i].Load()
+		if seen >= target {
+			return i
+		}
+	}
+	return 1000
+}
+
+func createDeterministicMedia(dir string, duration time.Duration) (string, error) {
 	path := filepath.Join(dir, "deterministic.opus")
-	cmd := exec.Command( // #nosec G204 -- fixed executable and arguments; path is inside the private temporary directory.
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext( // #nosec G204 G702 -- no shell; duration is parsed/bounded then formatted numerically, path is a private fixture.
+		ctx,
 		"ffmpeg",
 		"-nostdin", "-hide_banner", "-loglevel", "error",
 		"-f", "lavfi", "-i", "sine=frequency=997:sample_rate=48000",
-		"-t", "5", "-ac", "2", "-c:a", "libopus", "-b:a", "128k", "-y", path,
+		"-t", strconv.FormatFloat(duration.Seconds(), 'f', 3, 64), "-ac", "2", "-c:a", "libopus", "-b:a", "128k", "-y", path,
 	)
-	if output, err := cmd.CombinedOutput(); err != nil {
-		return "", fmt.Errorf("create deterministic media: %w: %s", err, strings.TrimSpace(string(output)))
+	var stderr failure.Diagnostic
+	cmd.Stderr = &stderr
+	cmd.WaitDelay = time.Second
+	if err := cmd.Run(); err != nil {
+		return "", stderr.Failure("fixture", failure.Codec, err)
 	}
 	return path, nil
 }
@@ -423,10 +468,12 @@ func runCachePressure(ctx context.Context, workers *sync.WaitGroup, cacheStore *
 		case <-ticker.C:
 			iteration++
 			key := cache.GenerateKey(fmt.Sprintf("pressure-%d", iteration%96))
-			if _, err := cacheStore.GetOrCreate(key, func(path string) error {
+			if _, err := cacheStore.GetOrCreateContext(ctx, key, func(path string) error {
 				return os.WriteFile(path, make([]byte, 4096), 0o600)
 			}); err != nil {
-				measured.workerFailures.Add(1)
+				if ctx.Err() == nil {
+					measured.workerFailures.Add(1)
+				}
 				return
 			}
 		}
@@ -445,30 +492,17 @@ func seedCache(cacheStore *cache.Cache) error {
 	return nil
 }
 
-func applyVolume(samples []int16, volume int32) {
-	gain := volume * 32768 / 100
-	for index, sample := range samples {
-		product := int32(sample) * gain
-		if product < 0 {
-			// #nosec G115 -- Q15 scaling cannot exceed the int16 input range.
-			samples[index] = int16(-((-product) >> 15))
-		} else {
-			// #nosec G115 -- Q15 scaling cannot exceed the int16 input range.
-			samples[index] = int16(product >> 15)
-		}
-	}
-}
+type memorySample struct{ total, anonymous uint64 }
 
-func sampleMemory(ctx context.Context) <-chan uint64 {
-	result := make(chan uint64, 1)
+func sampleMemory(ctx context.Context) <-chan memorySample {
+	result := make(chan memorySample, 1)
 	go func() {
 		ticker := time.NewTicker(100 * time.Millisecond)
 		defer ticker.Stop()
-		var peak uint64
+		var peak memorySample
 		for {
-			if current := readUintFile("/sys/fs/cgroup/memory.current"); current > peak {
-				peak = current
-			}
+			peak.total = max(peak.total, readUintFile("/sys/fs/cgroup/memory.current"))
+			peak.anonymous = max(peak.anonymous, readAnonymousMemory())
 			select {
 			case <-ctx.Done():
 				result <- peak
@@ -478,6 +512,23 @@ func sampleMemory(ctx context.Context) <-chan uint64 {
 		}
 	}()
 	return result
+}
+
+func readAnonymousMemory() uint64 {
+	data, err := os.ReadFile("/sys/fs/cgroup/memory.stat")
+	if err != nil {
+		return 0
+	}
+	for line := range strings.SplitSeq(string(data), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) == 2 && fields[0] == "anon" {
+			value, err := strconv.ParseUint(fields[1], 10, 64)
+			if err == nil {
+				return value
+			}
+		}
+	}
+	return 0
 }
 
 func readCPUUsage() (uint64, float64) {

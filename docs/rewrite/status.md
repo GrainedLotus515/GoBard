@@ -25,7 +25,7 @@ completed v2 release.
   They are replacement components, not yet the production composition.
 * Phases 3–6 remaining: production command/composition migration,
   complete interaction/reconnect
-  contracts, health dimensions, production logger wiring, load measurements and
+  contracts, health dimensions, production logger wiring, longer soak tests and
   final removal of old implementations. Do not deploy this as a completed v2.
 
 Evidence: baseline and slice `make docker-test` passed (race-enabled).
@@ -59,3 +59,34 @@ The replacement interaction mapper covers every existing command/button and has
 malformed-input fixtures plus a JSON fuzz target. Mapping-to-real-session tests
 verify voice/Manage Guild enforcement. Toggle-pause and forward-seek operations
 now execute atomically against coordinator-owned state.
+
+Performance checkpoint: the capacity tool now uses actual v2 sessions,
+FFmpeg/libopus (explicit 128 kbit/s), and the Discord pacing adapter over a fake
+packet writer. Independent 30-second runs at 1/4/12/24 guilds passed their quota,
+deadline and cleanup checks. Raw results and workload limits are in
+`capacity-2026-10-08.json` and `../performance.md`. The review corrected cumulative
+timer drift, bounded decoder/filter threads and separated anonymous memory from
+total cgroup memory. These runs do not verify DAVE, network delivery, provider
+capacity, gapless track changes, or the default 15-minute soak.
+Final checkpoint gates passed: Docker race tests, Docker lint (zero issues),
+runtime build/tool-permission smoke check, and Docker microbenchmarks. The latest
+microbenchmark samples and their comparison limits are recorded explicitly.
+
+## Remaining cutover work
+
+1. Compose the command/session/source components into the Discord runtime;
+   `cmd/gobard` still starts the original implementation. Apply finite interaction
+   and guild limits before SDK callback work can grow.
+2. Finish adapter-owned voice joins, speaking state, intentional disconnect,
+   queue-drain disconnect and bounded transport recovery, including shutdown
+   during connection attempts. Keep SDK types inside the existing boundary.
+3. Wire production Charm JSON/text semantics and distinct health dimensions;
+   map terminal failures to safe Discord responses without claiming audibility.
+4. Remove the original bot/player/YouTube orchestration and obsolete tests only
+   after retained command/UI/cache/lifecycle behavior has cutover coverage.
+5. Verify a separate authorized Discord test guild and permitted provider path;
+   credentials/live connectivity remain unverified. Spotify metadata/official
+   player designs remain proposals; no Spotify audio backend is implemented.
+
+The full rewrite is not complete and must not be deployed as v2 yet. No external
+gate prevents continuing the independent cutover work above.

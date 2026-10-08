@@ -55,6 +55,12 @@ Network writes have a 250 ms maximum deadline (or the caller's sooner deadline).
 Cancellation during pacing is immediate; cancellation during an SDK write is
 bounded by that deadline. Native encryption cannot be preempted by this adapter.
 
+The media clock keeps its 20 ms phase through ordinary scheduler lateness, with
+a 10 ms minimum scheduled interval. Longer stalls reset the clock to a full
+interval; overdue packets are never sent in a catch-up burst. This avoids
+accumulating each timer wakeup's lateness into sustained playback drift.
+The capacity workload uses this actual adapter over a discard packet writer.
+
 Deterministic tests cover pacing, copied packet ownership, stalled writes,
 short writes, deadlines, close joining and repeated close. The connection owner
 must still manage speaking state and close the SDK connection after closing

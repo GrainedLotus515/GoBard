@@ -66,13 +66,18 @@ func Decode(parent context.Context, input *os.File, offset time.Duration, contro
 	if err != nil {
 		return nil, failure.Wrap("encode", failure.Codec, err)
 	}
+	if err := encoder.SetBitrate(128000); err != nil {
+		return nil, failure.Wrap("encode", failure.Codec, err)
+	}
 	ctx, cancel := context.WithCancel(parent)
 	r, w, err := os.Pipe()
 	if err != nil {
 		cancel()
 		return nil, failure.Wrap("decode", failure.Codec, err)
 	}
-	args := []string{"-nostdin", "-hide_banner", "-loglevel", "error", "-protocol_whitelist", "pipe", "-i", "pipe:0"}
+	// Audio decoding needs no per-core worker fanout. Bound decoder/filter
+	// threads independently of the host CPU count and number of guilds.
+	args := []string{"-nostdin", "-hide_banner", "-loglevel", "error", "-threads", "1", "-filter_threads", "1", "-filter_complex_threads", "1", "-protocol_whitelist", "pipe", "-i", "pipe:0"}
 	if offset > 0 {
 		args = append(args, "-ss", strconv.FormatFloat(offset.Seconds(), 'f', 3, 64))
 	}
