@@ -69,3 +69,12 @@ when applying the mutation. Slow lookups capture a session generation; stop,
 disconnect and transport failure invalidate it. A reconnect cannot revive an
 older lookup. Trusted lifecycle calls use `Apply`; interactions use `ApplyAs`
 and `AddResolved`. The adapter must establish the connected target before lookup.
+
+Runtime cutover decision: a guild-scoped voice capability connects/disconnects
+adapter-owned transport. The session coordinator owns the connection operation,
+its cancellation/join, and at most three transport-recovery attempts. Connection
+I/O never runs on the coordinator or under registry locks. Pending metadata work
+holds an explicit session reservation so queue-drain cleanup cannot race a new
+play lookup. Stop invalidates reservations and cancels joins. Discord callbacks
+perform bounded admission; accepted handler goroutines are canceled and joined
+by the adapter before its dependencies close.

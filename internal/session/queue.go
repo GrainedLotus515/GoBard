@@ -63,6 +63,7 @@ type Snapshot struct {
 	Current    int
 	Active     bool
 	Connected  bool
+	Connecting bool
 	Paused     bool
 	Loop       bool
 	Volume     int

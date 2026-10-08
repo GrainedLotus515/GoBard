@@ -64,3 +64,22 @@ Finalization after stdout EOF is bounded to two seconds plus the subprocess
 WaitDelay. FFmpeg receives a pipe with only the pipe protocol enabled.
 Tests use a fake extractor executable and real FFmpeg; live YouTube remains
 unverified. The old production source pipeline is still awaiting replacement.
+# Managed voice lifecycle
+
+The guild coordinator serializes Connect/Disconnect after the preceding audio
+attempt joins. Join has a 12-second budget; cleanup has a separate 3-second
+budget. Stop during a join cancels it and rejects late success. Session shutdown
+joins the transport operation and performs idempotent cleanup. A voice adapter
+owns both the returned packet output and the underlying connection.
+
+Metadata commands reserve a slot in their session before resolution. At most 16
+reservations exist; queue-drain disconnect waits for them, including a failed
+lookup. Stop/disconnect still invalidate the admission generation immediately.
+Transport failure retains the selected request and permits at most three
+reconnect attempts, with 0/1/2-second delays. Successful connection alone does
+not reset this budget: replay failures consume it too. A completed/advanced
+request resets the budget. Exhaustion retains the queue and disconnects.
+
+Session Changes notifications have capacity one and coalesce. Inspect does not
+produce another notification. These are UI hints, not terminal accounting;
+Engine remains the authoritative attempt-result owner.

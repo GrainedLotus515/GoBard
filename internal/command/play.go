@@ -98,13 +98,14 @@ func (p *Player) Play(caller context.Context, target *session.Session, guild, us
 		}
 	}()
 	admission.CommandID = rand.Text()
+	defer target.EndResolution(admission.CommandID)
 	started := time.Now()
 	defer func() { p.terminal(admission, err, time.Since(started)) }()
 	access, err := p.access.Access(ctx, guild, user)
 	if err != nil {
 		return admission, failure.Wrap("voice_access", failure.Transport, err)
 	}
-	snapshot, err := target.Apply(ctx, session.Operation{Action: session.Inspect})
+	snapshot, err := target.BeginResolution(ctx, access, admission.CommandID)
 	if err != nil {
 		return admission, err
 	}

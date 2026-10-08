@@ -25,6 +25,7 @@ func (c *coordinator) apply(op Operation) error {
 			c.queue.advance()
 		}
 	case Stop:
+		c.disconnectVoice()
 		c.generation++
 		c.connected = false
 		if c.active != nil {
@@ -36,6 +37,7 @@ func (c *coordinator) apply(op Operation) error {
 			c.paused = false
 		}
 	case Disconnect:
+		c.disconnectVoice()
 		c.generation++
 		c.connected = false
 		c.interrupt(playback.Disconnected)
@@ -107,11 +109,11 @@ func (c *coordinator) authorize(access Access, action Action) error {
 			return ErrManageGuild
 		}
 		// Existing behavior permits administrator configuration before joining.
-		if !c.connected {
+		if !c.connected && c.transportKind != "connect" && c.transportKind != "recover" && c.retry == nil {
 			return nil
 		}
 	}
-	if !c.connected || c.channel == "" || access.Channel != c.channel {
+	if (!c.connected && c.transportKind != "connect" && c.transportKind != "recover" && c.retry == nil) || c.channel == "" || access.Channel != c.channel {
 		return ErrVoiceAccess
 	}
 	return nil

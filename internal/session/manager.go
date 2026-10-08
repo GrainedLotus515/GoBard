@@ -5,6 +5,8 @@ import (
 	"errors"
 	"sync"
 
+	"github.com/charmbracelet/log"
+
 	"github.com/GrainedLotus515/gobard/internal/playback"
 )
 
@@ -53,6 +55,17 @@ func (m *Manager) Create(guild string, output playback.Output) (*Session, error)
 	if guild == "" || len(guild) > 64 || output == nil {
 		return nil, errors.New("guild and output required")
 	}
+	return m.create(guild, func() (*Session, error) { return New(m.ctx, guild, m.engine, output, m.queueCapacity) })
+}
+
+func (m *Manager) CreateVoice(guild string, voice Voice, logger *log.Logger) (*Session, error) {
+	if guild == "" || len(guild) > 64 || voice == nil || logger == nil {
+		return nil, errors.New("guild, voice and logger required")
+	}
+	return m.create(guild, func() (*Session, error) { return NewVoice(m.ctx, guild, m.engine, voice, logger, m.queueCapacity) })
+}
+
+func (m *Manager) create(guild string, construct func() (*Session, error)) (*Session, error) {
 	m.mu.Lock()
 	if m.stopping || m.ctx.Err() != nil {
 		m.mu.Unlock()
@@ -71,7 +84,7 @@ func (m *Manager) Create(guild string, output playback.Output) (*Session, error)
 	m.work.Add(1)
 	m.mu.Unlock()
 	defer m.work.Done()
-	s, err := New(m.ctx, guild, m.engine, output, m.queueCapacity)
+	s, err := construct()
 	if err == nil {
 		err = m.configure(s)
 	}

@@ -10,6 +10,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/charmbracelet/log"
+
 	"github.com/GrainedLotus515/gobard/internal/playback"
 )
 
@@ -44,13 +46,16 @@ func (t *Ticket) Wait(ctx context.Context) (playback.Result, error) {
 }
 
 type command struct {
-	ctx        context.Context
-	tracks     []Track
-	operation  Operation
-	reply      chan response
-	access     *Access
-	generation *uint64
-	commandID  string
+	ctx         context.Context
+	tracks      []Track
+	operation   Operation
+	reply       chan response
+	access      *Access
+	generation  *uint64
+	commandID   string
+	joinChannel string
+	reserve     string
+	release     string
 }
 type response struct {
 	tickets  []*Ticket
@@ -66,21 +71,55 @@ type Session struct {
 	done      chan struct{}
 	commands  chan command
 	closeOnce sync.Once
+	changed   chan struct{}
 }
 
 func New(parent context.Context, id string, engine *playback.Engine, output playback.Output, capacity int) (*Session, error) {
-	if parent == nil || id == "" || len(id) > 64 || engine == nil || output == nil || capacity < 1 || capacity > MaxQueue {
+	return newSession(parent, id, engine, output, nil, nil, capacity)
+}
+
+func NewVoice(parent context.Context, id string, engine *playback.Engine, voice Voice, logger *log.Logger, capacity int) (*Session, error) {
+	if voice == nil || logger == nil {
+		return nil, errors.New("voice and logger required")
+	}
+	return newSession(parent, id, engine, nil, voice, logger, capacity)
+}
+
+func newSession(parent context.Context, id string, engine *playback.Engine, output playback.Output, voice Voice, logger *log.Logger, capacity int) (*Session, error) {
+	if parent == nil || id == "" || len(id) > 64 || engine == nil || output == nil && voice == nil || capacity < 1 || capacity > MaxQueue {
 		return nil, errors.New("invalid session dependencies or capacity")
 	}
 	// #nosec G118 -- Session.Close owns cancellation; parent also terminates run.
 	ctx, cancel := context.WithCancel(parent)
-	s := &Session{ctx: ctx, cancel: cancel, done: make(chan struct{}), commands: make(chan command, MailboxCapacity)}
-	c := &coordinator{session: s, id: id + "/" + rand.Text(), engine: engine, output: output, connected: true,
+	s := &Session{ctx: ctx, cancel: cancel, done: make(chan struct{}), commands: make(chan command, MailboxCapacity), changed: make(chan struct{}, 1)}
+	c := &coordinator{session: s, id: id + "/" + rand.Text(), engine: engine, output: output, connected: output != nil, voice: voice, logger: logger,
 		queue:   queue{entries: make([]entry, 0, capacity), index: -1, capacity: capacity},
-		results: make(chan playback.Result, 1), volume: 100, duckTarget: 70, speakers: make(map[string]bool)}
+		results: make(chan playback.Result, 1), volume: 100, duckTarget: 70, speakers: make(map[string]bool), reservations: make(map[string]struct{}), transportResults: make(chan transportResult, 1)}
 	go c.run()
 	return s, nil
 }
+
+// Changes coalesces state-change notifications into one slot. Consumers inspect
+// a fresh snapshot; no payload or unbounded event history is retained.
+func (s *Session) Changes() <-chan struct{} { return s.changed }
+func (s *Session) Done() <-chan struct{}    { return s.done }
+
+func (s *Session) Join(ctx context.Context, channel string) (Snapshot, error) {
+	if channel == "" || len(channel) > 32 {
+		return Snapshot{}, ErrVoiceAccess
+	}
+	r := s.submit(command{ctx: ctx, joinChannel: channel})
+	return r.snapshot, r.err
+}
+
+func (s *Session) BeginResolution(ctx context.Context, access Access, id string) (Snapshot, error) {
+	if id == "" || len(id) > 128 {
+		return Snapshot{}, errors.New("invalid resolution identifier")
+	}
+	r := s.submit(command{ctx: ctx, access: &access, reserve: id})
+	return r.snapshot, r.err
+}
+func (s *Session) EndResolution(id string) { s.submit(command{ctx: s.ctx, release: id}) }
 
 // Enqueue is the metadata-free operation used by test-media integrations.
 func (s *Session) Enqueue(ctx context.Context, request playback.Request) (*Ticket, error) {
@@ -206,13 +245,37 @@ type coordinator struct {
 	volume, duckTarget    int
 	speakers              map[string]bool
 	last                  playback.Result
+	voice                 Voice
+	logger                *log.Logger
+	reservations          map[string]struct{}
+	drained               bool
+	transportResults      chan transportResult
+	transportCancel       context.CancelFunc
+	transportKind         string
+	joinReply             chan response
+	needDisconnect        bool
+	recoveryAttempts      int
+	retryTimer            *time.Timer
+	retry                 <-chan time.Time
+	dirty                 bool
 }
 
 func (c *coordinator) run() {
 	defer close(c.session.done)
+	defer c.closeVoice()
+	c.dirty = true
 	for {
-		if c.active == nil && c.connected && c.queue.current() != nil && c.session.ctx.Err() == nil {
+		c.driveTransport()
+		if c.active == nil && c.connected && c.transportCancel == nil && c.queue.current() != nil && c.session.ctx.Err() == nil {
 			c.start()
+			c.dirty = true
+		}
+		if c.dirty {
+			select {
+			case c.session.changed <- struct{}{}:
+			default:
+			}
+			c.dirty = false
 		}
 		select {
 		case <-c.session.ctx.Done():
@@ -223,42 +286,66 @@ func (c *coordinator) run() {
 			c.settleAll(playback.Shutdown)
 			return
 		case result := <-c.results:
+			c.dirty = true
 			c.complete(result)
+		case result := <-c.transportResults:
+			c.dirty = true
+			c.transportComplete(result)
+		case <-c.retry:
+			c.dirty = true
+			c.retry = nil
+			c.startRecovery()
 		case cmd := <-c.session.commands:
-			// Observe already-published completion before applying the next control.
-			select {
-			case result := <-c.results:
-				c.complete(result)
-			default:
-			}
-			if err := cmd.ctx.Err(); err != nil {
-				cmd.reply <- response{err: err}
-				continue
-			}
-			if c.session.ctx.Err() != nil {
-				cmd.reply <- response{err: ErrClosed}
-				continue
-			}
-			if len(cmd.tracks) > 0 {
-				if cmd.generation != nil && *cmd.generation != c.generation {
-					cmd.reply <- response{err: ErrSuperseded}
-				} else if cmd.access != nil && (!c.connected || c.channel == "" || cmd.access.Channel != c.channel) {
-					cmd.reply <- response{err: ErrVoiceAccess}
-				} else {
-					cmd.reply <- c.add(cmd.tracks, cmd.commandID)
-				}
-				continue
-			}
-			if cmd.access != nil {
-				if err := c.authorize(*cmd.access, cmd.operation.Action); err != nil {
-					cmd.reply <- response{err: err}
-					continue
-				}
-			}
-			err := c.apply(cmd.operation)
-			cmd.reply <- response{snapshot: c.snapshot(), err: err}
+			c.handle(cmd)
 		}
 	}
+}
+
+func (c *coordinator) handle(cmd command) {
+	if cmd.operation.Action != Inspect {
+		c.dirty = true
+	}
+	// Observe already-published completion before applying the next control.
+	select {
+	case result := <-c.results:
+		c.dirty = true
+		c.complete(result)
+	default:
+	}
+	if err := cmd.ctx.Err(); err != nil {
+		cmd.reply <- response{err: err}
+		return
+	}
+	if c.session.ctx.Err() != nil {
+		cmd.reply <- response{err: ErrClosed}
+		return
+	}
+	if cmd.joinChannel != "" {
+		c.join(cmd)
+		return
+	}
+	if cmd.reserve != "" || cmd.release != "" {
+		c.resolution(cmd)
+		return
+	}
+	if len(cmd.tracks) > 0 {
+		if cmd.generation != nil && *cmd.generation != c.generation {
+			cmd.reply <- response{err: ErrSuperseded}
+		} else if cmd.access != nil && (!c.connected || c.channel == "" || cmd.access.Channel != c.channel) {
+			cmd.reply <- response{err: ErrVoiceAccess}
+		} else {
+			cmd.reply <- c.add(cmd.tracks, cmd.commandID)
+		}
+		return
+	}
+	if cmd.access != nil {
+		if err := c.authorize(*cmd.access, cmd.operation.Action); err != nil {
+			cmd.reply <- response{err: err}
+			return
+		}
+	}
+	err := c.apply(cmd.operation)
+	cmd.reply <- response{snapshot: c.snapshot(), err: err}
 }
 
 func (c *coordinator) add(tracks []Track, commandID string) response {
@@ -279,6 +366,7 @@ func (c *coordinator) add(tracks []Track, commandID string) response {
 	if c.queue.index < 0 {
 		c.queue.index = 0
 	}
+	c.drained = false
 	return response{tickets: tickets}
 }
 
@@ -308,6 +396,11 @@ func (c *coordinator) start() {
 }
 
 func (c *coordinator) complete(result playback.Result) {
+	defer func() {
+		if c.queue.current() == nil {
+			c.drained = true
+		}
+	}()
 	c.cancel(nil)
 	c.active = nil
 	c.controls = nil
@@ -332,6 +425,7 @@ func (c *coordinator) complete(result playback.Result) {
 	case playback.Disconnected, playback.TransportFailure:
 		if reason == playback.TransportFailure {
 			c.generation++
+			c.scheduleRecovery()
 		}
 		c.connected = false
 		return
@@ -355,6 +449,7 @@ func (c *coordinator) complete(result playback.Result) {
 	}
 	c.settle(e, result)
 	c.queue.advance()
+	c.recoveryAttempts = 0
 	c.paused = false
 }
 
@@ -389,7 +484,7 @@ func (c *coordinator) interrupt(reason playback.Outcome) {
 }
 
 func (c *coordinator) snapshot() Snapshot {
-	s := Snapshot{Generation: c.generation, Channel: c.channel, Current: c.queue.index, Active: c.active != nil, Connected: c.connected, Paused: c.paused,
+	s := Snapshot{Generation: c.generation, Channel: c.channel, Current: c.queue.index, Active: c.active != nil, Connected: c.connected, Connecting: c.transportKind == "connect" || c.transportKind == "recover", Paused: c.paused,
 		Loop: c.loop, Volume: c.volume, Ducking: c.ducking, DuckTarget: c.duckTarget, Last: c.last}
 	s.Last.Request.Controls = nil
 	s.Tracks = make([]Track, len(c.queue.entries))
