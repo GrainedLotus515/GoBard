@@ -33,6 +33,7 @@ const (
 	Ducking     Action = "ducking"
 	DuckTarget  Action = "duck_target"
 	Speaking    Action = "speaking"
+	VoiceLost   Action = "voice_lost"
 )
 
 type Operation struct {

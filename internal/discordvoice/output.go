@@ -36,7 +36,7 @@ type Output struct {
 }
 
 // Output adapts the established SDK voice connection to the v2 playback core.
-// Do not use SendOpusFrame concurrently with this output on the same connection.
+// A connection has exactly one output owner.
 func (c *Connection) Output() (*Output, error) {
 	if c == nil || c.conn == nil {
 		return nil, errors.New("voice connection required")

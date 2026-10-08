@@ -3,7 +3,7 @@
 Isolation rule: imports of discordgo, disgo, godave and snowflake, including their
 Gateway/REST/voice/DAVE types, belong only in Discord adapter packages. Today
 `internal/bot`, `internal/botui`, `internal/discordvoice` are that migration
-boundary; bot currently also contains domain policy that must move to session.
+boundary. Queue/retry/permission mutation policy belongs to session.
 No new core package may import these SDKs.
 
 Core consumes operation values, immutable snapshots and audio delivery, not an
@@ -16,13 +16,13 @@ The implemented `command.AccessSource` returns current `session.Access` values
 (voice channel and Manage Guild capability). `Session.ApplyAs` serializes the
 authorization check with mutations; `AddResolved` also checks the generation
 captured before metadata lookup. Stop/disconnect and voice-move lookup races
-have deterministic tests. This is core contract evidence; mapping real Discord
-interactions and gateway state to these values remains a cutover requirement.
+have deterministic tests. The production runtime now maps Discord interactions
+and Gateway voice state to these values.
 `bot.MapInteraction` now maps every existing slash command and music button to
 core operations. Tests feed fake SDK interactions through the mapper into a real
 session to verify permission enforcement. Wrong types, missing/duplicate options,
 integer overflow/NaN and malformed subcommands are rejected before SDK helpers
-can panic. The production event handler still awaits cutover to this mapper.
+can panic. The production event handler uses this mapper.
 
 Audio delivery is stereo Opus at 48 kHz in 20 ms packets. Caller owns bytes;
 Send may read them only until it returns. Adapter owns pacing, RTP/encryption,
@@ -64,5 +64,32 @@ The capacity workload uses this actual adapter over a discard packet writer.
 Deterministic tests cover pacing, copied packet ownership, stalled writes,
 short writes, deadlines, close joining and repeated close. The connection owner
 must still manage speaking state and close the SDK connection after closing
-Output. Current production wiring still uses the old player-facing interface;
-reconnect, SDK worker shutdown and real DAVE delivery remain cutover gates.
+Output. The production runtime now uses this interface and core-owned recovery.
+Real DAVE delivery remains an external verification gate.
+
+## Runtime ownership and temporary SDK limitations
+
+`internal/app` composes the source, engine, sessions and Discord runtime.
+Interaction callbacks are synchronous admission only: 32 active handlers, a
+separate configurable play cap, and a 16-entry rejection queue with two workers.
+Per-guild UI observers coalesce terminal failure notices. All GoBard work enters
+a shutdown barrier; callbacks cannot create resources after shutdown begins.
+
+The SDK REST rate-limit sleeps ignore context. Four consumed endpoints use a
+small adapter-local HTTP implementation (respond, edit, channel message, command
+overwrite), with 8-second requests, no redirects, 64 KiB response drain and no
+hidden retry. Registration owns a three-attempt budget. SDK automatic Gateway
+reconnect is disabled; GoBard owns three reconnect attempts. Gateway sockets
+close on root cancellation and writes have five-second deadlines.
+
+SDK `VoiceStateUpdate` can dereference a nil connection; the adapter uses its
+synchronized `GatewayWriteStruct` capability. The SDK itself holds its socket
+lock across I/O; the adapter bounds that I/O and holds no GoBard registry lock
+around it. SDK `VoiceState` iterates mutable state without a read lock; GoBard
+copies the required channel under the SDK state lock instead.
+
+The current SDK does not expose a join for its own heartbeat/listener workers.
+GoBard joins its callbacks and closes sockets, but cannot honestly certify a
+strict SDK-worker join from that API. Native DAVE operations also cannot be
+preempted. Both are explicit future-library requirements and live shutdown
+verification gates, not claims established by fake transport tests.

@@ -43,6 +43,8 @@ func (c *coordinator) apply(op Operation) error {
 		c.interrupt(playback.Disconnected)
 	case Connect:
 		return c.connect(op)
+	case VoiceLost:
+		return c.voiceLost(op.Channel)
 	case Clear:
 		c.clearUpcoming()
 	case Shuffle:
@@ -102,7 +104,7 @@ func (c *coordinator) authorize(access Access, action Action) error {
 	switch action {
 	case Inspect:
 		return nil
-	case Connect, Speaking:
+	case Connect, Speaking, VoiceLost:
 		return errors.New("operation requires lifecycle authority")
 	case Ducking, DuckTarget:
 		if !access.ManageGuild {

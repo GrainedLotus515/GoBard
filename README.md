@@ -78,13 +78,18 @@ GoBard validates supplied values at startup and exits on invalid configuration. 
 | `REDUCE_VOL_WHEN_VOICE_TARGET` | `70` | Integer from 0 to 100. |
 | `MAX_PLAYLIST_TRACKS` | `500` | Integer from 1 to 500. |
 | `YTDLP_MAX_CONCURRENCY` | `4` | Shared integer cap from 1 to 16 for every yt-dlp path: metadata, playlist work, cache downloads, and streaming fallback. |
+| `MAX_GUILD_SESSIONS` | `16` | Retained guild-session limit, 1–1024; increase explicitly for larger deployments. |
+| `QUEUE_LIMIT` | `500` | Maximum tracks per guild, 1–500. |
+| `PLAY_COMMAND_CONCURRENCY` | `4` | Concurrent play operations, 1–16; saturation rejects with a retry-later response. |
+| `LOG_FORMAT` | `json` | Charm JSON or `text` with identical safe event semantics. |
 | `HEALTH_LISTEN_ADDR` | `127.0.0.1:8080` | Loopback-only health listener. |
 | `REGISTER_COMMANDS_ON_BOT` | `false` | Use global command registration instead of guild-by-guild reconciliation. |
 | `BOT_STATUS` | `online` | `online`, `idle`, `dnd`, `invisible`, or `offline`. |
 | `BOT_ACTIVITY_TYPE` | `LISTENING` | `PLAYING`, `STREAMING`, `LISTENING`, `WATCHING`, or `COMPETING`. |
 | `BOT_ACTIVITY` | `music` | Non-empty activity text. |
 | `BOT_ACTIVITY_URL` | unset | Optional URL used for streaming activity. |
-| `DEBUG`, `DEBUG_PLAYBACK` | `false` | Enable diagnostic logging only when troubleshooting. |
+| `DEBUG` | `false` | Additional safe diagnostics; ordinary failures are always visible. |
+| `DEBUG_PLAYBACK` | `false` | Deprecated compatibility setting; validated but no independent playback logger. |
 
 Compose hardening defaults can be changed without editing the file:
 
@@ -116,7 +121,7 @@ docker compose -f docker-compose.yml -f docker-compose.large.yml up -d
 
 For a local checkout, use `make docker-run-medium` or `make docker-run-large`. The existing `GOBARD_CPUS`, `GOBARD_MEMORY_LIMIT`, and `GOBARD_PIDS_LIMIT` variables still override a profile. `GOBARD_PROFILE_YTDLP_MAX_CONCURRENCY` and `GOBARD_PROFILE_CACHE_LIMIT` override its media-process and cache defaults.
 
-The target is a minimum tested capacity, not a coded ceiling: additional guilds are admitted while resources remain healthy. Optimization is preferred over increasing these profile resources; a missed target is reported rather than silently raising its CPU or memory allocation.
+Resource profiles are workload targets. V2 additionally enforces `MAX_GUILD_SESSIONS` (default 16); select an explicit budget appropriate to measured capacity. Short offline measurements and their limitations are recorded in [docs/performance.md](docs/performance.md).
 
 ## Commands and access
 

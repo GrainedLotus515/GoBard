@@ -31,3 +31,14 @@ event=playback.terminal stage=read outcome=encode_failure category=zero_frames r
 Readiness distinguishes command acceptance/Discord connection from source
 availability, pipeline status and active delivery. Idle is not a pipeline
 failure; a successful gateway login is not evidence of working source retrieval.
+
+`LOG_FORMAT=json` is the default; `text` changes rendering only. `/live` and
+`/ready` include dimensions for Gateway connectivity, command registration,
+last observed source and pipeline success/failure, and sampled active deliveries.
+Source includes cache acquisition. Unknown is explicit until an audio attempt
+provides evidence; a successful metadata lookup is not audio-source proof.
+Delivery counts observe increasing accepted frames, not human audibility.
+Observers sample at one second, and a slow failure notice can delay a sample by
+up to eight additional seconds. Readiness requires initialized local tools/cache,
+Gateway connection, voice adapter and reconciled commands; it never makes an
+external provider probe a requirement for an idle process.

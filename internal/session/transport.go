@@ -24,6 +24,26 @@ type transportResult struct {
 	err    error
 }
 
+func (c *coordinator) voiceLost(channel string) error {
+	if !c.connected || channel == c.channel {
+		return nil
+	}
+	if len(channel) > 32 {
+		return errors.New("invalid observed voice channel")
+	}
+	if channel != "" {
+		c.channel = channel
+	}
+	c.connected = false
+	if c.active != nil {
+		c.interrupt(playback.TransportFailure)
+	} else {
+		c.generation++
+		c.scheduleRecovery()
+	}
+	return nil
+}
+
 func (c *coordinator) join(cmd command) {
 	if c.voice == nil {
 		cmd.reply <- response{err: errors.New("managed voice unavailable")}

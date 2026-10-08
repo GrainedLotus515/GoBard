@@ -74,19 +74,29 @@ microbenchmark samples and their comparison limits are recorded explicitly.
 
 ## Remaining cutover work
 
-1. Compose the command/session/source components into the Discord runtime;
-   `cmd/gobard` still starts the original implementation. Apply finite interaction
-   and guild limits before SDK callback work can grow.
-2. Finish adapter-owned voice joins, speaking state, intentional disconnect,
-   queue-drain disconnect and bounded transport recovery, including shutdown
-   during connection attempts. Keep SDK types inside the existing boundary.
-3. Wire production Charm JSON/text semantics and distinct health dimensions;
-   map terminal failures to safe Discord responses without claiming audibility.
-4. Remove the original bot/player/YouTube orchestration and obsolete tests only
-   after retained command/UI/cache/lifecycle behavior has cutover coverage.
-5. Verify a separate authorized Discord test guild and permitted provider path;
-   credentials/live connectivity remain unverified. Spotify metadata/official
-   player designs remain proposals; no Spotify audio backend is implemented.
+1. Verify local Discord login, registration, voice/DAVE delivery, user commands
+   and bounded recovery against the real temporary SDK. Credentials/connectivity
+   have not yet been exercised by the new runtime.
+2. Audit remaining SDK limitations: its own heartbeat/listener goroutines have
+   no public join API; native DAVE operations are non-preemptible. The adapter
+   joins GoBard callbacks/work and cancels sockets, but a strict SDK-worker join
+   is not proven. SDK-maintained guild/voice-state storage also needs a measured
+   admission envelope distinct from GoBard's bounded session registry.
+3. Complete the longer soak, review provider evidence and remove stale docs.
+   Spotify metadata/official-player designs remain proposals, not audio support.
+
+Runtime cutover checkpoint: `cmd/gobard` now composes v2 sources, sessions,
+commands, HTTP/Gateway and voice adapters through `internal/app`. Original
+bot/player/YouTube orchestration, obsolete implementation tests, dormant Spotify
+stub, separate logger and global process limiter are removed. Behavior coverage
+now lives in mapper/adapter, command, session, source, sourceurl and cache tests.
+The old runtime remains available in git history, not in the executable.
+
+Verified after cutover: `make docker-test` (race), `make docker-lint` (zero
+issues), and `make docker-smoke` including runtime build passed. New contracts
+cover HTTP cancellation/safe 429 rejection, interaction capacity/control
+reservation, mentions, queue pagination, paused voice loss, callback admission
+and joined runtime shutdown. Live Discord/provider gates remain separate.
 
 The full rewrite is not complete and must not be deployed as v2 yet. No external
 gate prevents continuing the independent cutover work above.

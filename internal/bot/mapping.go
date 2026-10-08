@@ -19,12 +19,28 @@ import (
 // Operation is applied through Session.ApplyAs, not the trusted lifecycle API.
 type MappedInteraction struct {
 	Guild, User string
+	Channel     string
 	Name        string
 	Query       string
 	Operation   session.Operation
 	ManageGuild bool
 	Component   bool
 	Page        int
+}
+
+func requireGuildMemberInteraction(i *discordgo.InteractionCreate) error {
+	if i == nil || i.Interaction == nil || i.GuildID == "" || i.Member == nil || i.Member.User == nil || i.Member.User.ID == "" {
+		return errors.New("this command can only be used in a server")
+	}
+	return nil
+}
+
+func hasManageGuildPermission(member *discordgo.Member) bool {
+	return member != nil && member.Permissions&(discordgo.PermissionAdministrator|discordgo.PermissionManageGuild) != 0
+}
+
+func noAllowedMentions() *discordgo.MessageAllowedMentions {
+	return &discordgo.MessageAllowedMentions{}
 }
 
 // MapInteraction validates the full option grammar before calling any SDK value
@@ -34,10 +50,11 @@ func MapInteraction(i *discordgo.InteractionCreate) (MappedInteraction, error) {
 	if err := requireGuildMemberInteraction(i); err != nil {
 		return out, err
 	}
-	if len(i.GuildID) > 32 || len(i.Member.User.ID) > 32 {
+	if len(i.GuildID) > 32 || len(i.Member.User.ID) > 32 || len(i.ChannelID) > 32 {
 		return out, errors.New("invalid interaction identity")
 	}
 	out.Guild, out.User, out.ManageGuild = i.GuildID, i.Member.User.ID, hasManageGuildPermission(i.Member)
+	out.Channel = strings.Clone(i.ChannelID)
 	out.Operation.Action = session.Inspect
 	switch i.Type {
 	case discordgo.InteractionMessageComponent:

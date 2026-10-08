@@ -44,6 +44,10 @@ type Config struct {
 	ReduceVolumeOnVoiceTarget int
 	MaxPlaylistTracks         int
 	YTDLPMaxConcurrency       int
+	MaxGuildSessions          int
+	QueueLimit                int
+	PlayCommandConcurrency    int
+	LogFormat                 string
 
 	// Health server configuration.
 	HealthListenAddr string
@@ -86,6 +90,22 @@ func Load() (*Config, error) {
 	if err != nil {
 		return nil, err
 	}
+	maxGuilds, err := envInt("MAX_GUILD_SESSIONS", 16, 1, 1024)
+	if err != nil {
+		return nil, err
+	}
+	queueLimit, err := envInt("QUEUE_LIMIT", 500, 1, 500)
+	if err != nil {
+		return nil, err
+	}
+	playConcurrency, err := envInt("PLAY_COMMAND_CONCURRENCY", 4, 1, 16)
+	if err != nil {
+		return nil, err
+	}
+	logFormat := envOrDefault("LOG_FORMAT", "json")
+	if logFormat != "json" && logFormat != "text" {
+		return nil, fmt.Errorf("LOG_FORMAT must be json or text")
+	}
 	registerGlobally, err := envBool("REGISTER_COMMANDS_ON_BOT")
 	if err != nil {
 		return nil, err
@@ -94,9 +114,8 @@ func Load() (*Config, error) {
 	if err != nil {
 		return nil, err
 	}
-	// The player currently reads DEBUG_PLAYBACK directly during its one-time
-	// initialization. Validate it here so a malformed deployment value cannot
-	// silently change runtime behavior even though it is not stored separately.
+	// Retain strict validation for the deprecated deployment variable. V2 has
+	// one Charm logger; DEBUG_PLAYBACK no longer selects a separate log system.
 	if _, err := envBool("DEBUG_PLAYBACK"); err != nil {
 		return nil, err
 	}
@@ -139,6 +158,10 @@ func Load() (*Config, error) {
 		ReduceVolumeOnVoiceTarget: reduceTarget,
 		MaxPlaylistTracks:         maxPlaylistTracks,
 		YTDLPMaxConcurrency:       ytdlpConcurrency,
+		MaxGuildSessions:          maxGuilds,
+		QueueLimit:                queueLimit,
+		PlayCommandConcurrency:    playConcurrency,
+		LogFormat:                 logFormat,
 		HealthListenAddr:          healthListenAddr,
 		Debug:                     debug,
 	}, nil

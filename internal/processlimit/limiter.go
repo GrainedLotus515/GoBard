@@ -134,39 +134,3 @@ func (l *Limiter) NonInteractiveCapacity() int {
 	}
 	return cap(l.nonInteractive)
 }
-
-var global atomic.Pointer[Limiter]
-
-func init() {
-	global.Store(New(defaultYTDLPConcurrency))
-}
-
-// ConfigureGlobal replaces the limiter used by all process launchers. It is
-// intended for one-time process startup configuration; in-flight operations
-// retain their original limiter and release it safely.
-func ConfigureGlobal(maxConcurrency int) {
-	global.Store(New(maxConcurrency))
-}
-
-// Global returns the configured shared limiter.
-func Global() *Limiter {
-	limiter := global.Load()
-	if limiter == nil {
-		return New(defaultYTDLPConcurrency)
-	}
-	return limiter
-}
-
-// AcquireGlobal reserves a slot from the configured shared limiter.
-func AcquireGlobal(ctx context.Context) (func(), error) {
-	return AcquireGlobalClass(ctx, Interactive)
-}
-
-// AcquireGlobalClass reserves a classified slot from the shared limiter.
-func AcquireGlobalClass(ctx context.Context, class WorkClass) (func(), error) {
-	release, err := Global().AcquireClass(ctx, class)
-	if err != nil {
-		return nil, fmt.Errorf("acquire yt-dlp process slot: %w", err)
-	}
-	return release, nil
-}

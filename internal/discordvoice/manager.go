@@ -5,23 +5,21 @@ import (
 	"fmt"
 	"log/slog"
 	"sync"
+	"time"
 
 	"github.com/bwmarrin/discordgo"
+	"github.com/charmbracelet/log"
 	disgodiscord "github.com/disgoorg/disgo/discord"
 	disgogateway "github.com/disgoorg/disgo/gateway"
 	disgovoice "github.com/disgoorg/disgo/voice"
 	"github.com/disgoorg/godave/golibdave"
 	"github.com/disgoorg/snowflake/v2"
-
-	"github.com/GrainedLotus515/gobard/internal/logger"
-	"github.com/GrainedLotus515/gobard/internal/voiceconn"
 )
-
-var _ voiceconn.Connection = (*Connection)(nil)
 
 // Manager bridges discordgo gateway events into disgo's DAVE-capable voice stack.
 type Manager struct {
 	manager disgovoice.Manager
+	logger  *log.Logger
 
 	speakingMu      sync.RWMutex
 	speakingHandler func(guildID, userID string, speaking bool)
@@ -32,8 +30,12 @@ type Connection struct {
 	conn disgovoice.Conn
 }
 
-// NewManager creates a DAVE-capable voice manager for an authenticated discordgo session.
-func NewManager(session *discordgo.Session) (*Manager, error) {
+// NewManager creates a DAVE-capable voice manager for an authenticated session.
+func NewManager(session *discordgo.Session, logger *log.Logger) (*Manager, error) {
+	if logger == nil {
+		return nil, fmt.Errorf("voice logger required")
+	}
+	sdkLogger := slog.New(sdkLog{logger: logger})
 	if session == nil || session.State == nil || session.State.User == nil {
 		return nil, fmt.Errorf("discord session user is not available yet")
 	}
@@ -43,18 +45,36 @@ func NewManager(session *discordgo.Session) (*Manager, error) {
 		return nil, fmt.Errorf("parse bot user id: %w", err)
 	}
 
-	voiceManager := &Manager{}
+	voiceManager := &Manager{logger: logger}
 	manager := disgovoice.NewManager(
 		func(ctx context.Context, guildID snowflake.ID, channelID *snowflake.ID, selfMute, selfDeaf bool) error {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
 			channel := ""
 			if channelID != nil {
 				channel = channelID.String()
 			}
-			return session.VoiceStateUpdate(guildID.String(), channel, selfMute, selfDeaf)
+			// VoiceStateUpdate in this SDK dereferences a nil socket after
+			// disconnect. GatewayWriteStruct guards connection lifetime and
+			// serializes writes; the runtime bounds its underlying socket I/O.
+			var target *string
+			if channel != "" {
+				target = &channel
+			}
+			return session.GatewayWriteStruct(struct {
+				Op   int `json:"op"`
+				Data any `json:"d"`
+			}{4, struct {
+				Guild   string  `json:"guild_id"`
+				Channel *string `json:"channel_id"`
+				Mute    bool    `json:"self_mute"`
+				Deaf    bool    `json:"self_deaf"`
+			}{guildID.String(), target, selfMute, selfDeaf}})
 		},
 		userID,
-		disgovoice.WithLogger(slog.Default()),
-		disgovoice.WithDaveSessionLogger(slog.Default()),
+		disgovoice.WithLogger(sdkLogger),
+		disgovoice.WithDaveSessionLogger(sdkLogger),
 		disgovoice.WithDaveSessionCreateFunc(golibdave.NewSession),
 	)
 
@@ -63,7 +83,7 @@ func NewManager(session *discordgo.Session) (*Manager, error) {
 }
 
 // Join connects to a Discord voice channel using the DAVE-capable voice stack.
-func (m *Manager) Join(ctx context.Context, guildID, channelID string, selfMute, selfDeaf bool) (voiceconn.Connection, error) {
+func (m *Manager) Join(ctx context.Context, guildID, channelID string, selfMute, selfDeaf bool) (*Connection, error) {
 	if m == nil {
 		return nil, fmt.Errorf("voice manager is not initialized")
 	}
@@ -94,6 +114,9 @@ func (m *Manager) Join(ctx context.Context, guildID, channelID string, selfMute,
 		}
 	})
 	if err := conn.Open(ctx, channelSnowflake, selfMute, selfDeaf); err != nil {
+		cleanup, cancel := context.WithTimeout(context.WithoutCancel(ctx), 3*time.Second)
+		conn.Close(cleanup)
+		cancel()
 		return nil, err
 	}
 
@@ -120,7 +143,7 @@ func (m *Manager) HandleVoiceStateUpdate(update *discordgo.VoiceStateUpdate) {
 
 	event, err := toVoiceStateUpdate(update)
 	if err != nil {
-		logger.Warn("Skipping invalid voice state update", "err", err)
+		m.logger.Warn("Invalid voice state update", "event", "voice.event", "kind", "state")
 		return
 	}
 
@@ -135,7 +158,7 @@ func (m *Manager) HandleVoiceServerUpdate(update *discordgo.VoiceServerUpdate) {
 
 	event, err := toVoiceServerUpdate(update)
 	if err != nil {
-		logger.Warn("Skipping invalid voice server update", "err", err)
+		m.logger.Warn("Invalid voice server update", "event", "voice.event", "kind", "server")
 		return
 	}
 
@@ -156,11 +179,6 @@ func (c *Connection) SetSpeaking(ctx context.Context, speaking bool) error {
 		flags = disgovoice.SpeakingFlagMicrophone
 	}
 	return c.conn.SetSpeaking(ctx, flags)
-}
-
-func (c *Connection) SendOpusFrame(frame []byte) error {
-	_, err := c.conn.UDP().Write(frame)
-	return err
 }
 
 func (c *Connection) Disconnect(ctx context.Context) error {

@@ -71,6 +71,39 @@ func TestStopCancelsJoinAndLateSuccessCannotConnect(t *testing.T) {
 	}
 }
 
+func TestObservedVoiceLossRecoversPausedAttempt(t *testing.T) {
+	joined := make(chan string, 4)
+	s, source := voiceTestSession(t, voiceFixture{connect: func(_ context.Context, channel string) (playback.Output, error) {
+		joined <- channel
+		return outputFunc(func(context.Context, []byte) error { return nil }), nil
+	}})
+	if _, err := s.Join(context.Background(), "original"); err != nil {
+		t.Fatal(err)
+	}
+	<-joined
+	if _, err := s.Add(context.Background(), []Track{{Provider: "fixture", MediaID: "audio"}}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-source.opened:
+	case <-time.After(time.Second):
+		t.Fatal("attempt not started")
+	}
+	apply(t, s, Operation{Action: Pause})
+	if _, err := s.ApplyAs(context.Background(), Access{Channel: "original"}, Operation{Action: VoiceLost}); err == nil {
+		t.Fatal("interaction invoked lifecycle action")
+	}
+	apply(t, s, Operation{Action: VoiceLost, Channel: "moved"})
+	select {
+	case channel := <-joined:
+		if channel != "moved" {
+			t.Fatal(channel)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("paused transport did not recover")
+	}
+}
+
 func TestShutdownJoinsConnectingTransport(t *testing.T) {
 	started, joined := make(chan struct{}), make(chan struct{})
 	s, _ := voiceTestSession(t, voiceFixture{connect: func(ctx context.Context, _ string) (playback.Output, error) {

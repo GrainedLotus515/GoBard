@@ -2,93 +2,75 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
 	"os/signal"
-	"runtime"
 	"syscall"
 	"time"
 
+	"github.com/charmbracelet/log"
 	"github.com/joho/godotenv"
 
-	"github.com/GrainedLotus515/gobard/internal/bot"
+	"github.com/GrainedLotus515/gobard/internal/app"
 	"github.com/GrainedLotus515/gobard/internal/config"
 	"github.com/GrainedLotus515/gobard/internal/health"
-	"github.com/GrainedLotus515/gobard/internal/logger"
 )
 
 func main() {
 	if err := run(os.Args[1:]); err != nil {
-		logger.Fatal("GoBard exited", "err", err)
+		log.Error("GoBard exited", "event", "app.terminal", "error", err)
+		os.Exit(1)
 	}
 }
 
 func run(args []string) error {
 	if len(args) > 0 {
 		if args[0] != "healthcheck" {
-			return fmt.Errorf("unknown command %q", args[0])
+			return fmt.Errorf("unknown command")
 		}
 		return runHealthcheck(args[1:])
 	}
-
-	// Load .env file (optional, won't error if not present)
-	if err := godotenv.Load(); err != nil {
-		logger.Debug("No .env file found, using environment variables")
+	// An absent optional dotenv file is normal; malformed configuration fails Load.
+	if err := godotenv.Load(); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return errors.New("could not load optional dotenv configuration")
 	}
-
-	// Load configuration from environment
 	cfg, err := config.Load()
 	if err != nil {
 		return fmt.Errorf("load configuration: %w", err)
 	}
-
-	// Set debug mode based on config
-	logger.SetDebugMode(cfg.Debug)
-
-	// Create bot instance
-	b, err := bot.New(cfg)
-	if err != nil {
-		return fmt.Errorf("create bot: %w", err)
+	logger := log.New(os.Stderr)
+	if cfg.LogFormat == "json" {
+		logger.SetFormatter(log.JSONFormatter)
 	}
-	logger.Info(
-		"Runtime capacity configured",
-		"gomaxprocs", runtime.GOMAXPROCS(0),
-		"ytdlp_processes", cfg.YTDLPMaxConcurrency,
-		"cache_bytes", cfg.CacheLimit,
-		"max_playlist_tracks", cfg.MaxPlaylistTracks,
-	)
-
-	healthServer, err := health.Start(cfg.HealthListenAddr, b)
+	if cfg.Debug {
+		logger.SetLevel(log.DebugLevel)
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+	application, err := app.New(ctx, cfg, logger)
+	if err != nil {
+		return fmt.Errorf("compose application: %w", err)
+	}
+	defer application.Close()
+	server, err := health.Start(cfg.HealthListenAddr, application)
 	if err != nil {
 		return fmt.Errorf("start health server: %w", err)
 	}
 	defer func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		cleanup, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		if err := healthServer.Shutdown(ctx); err != nil {
-			logger.Error("Error stopping health server", "err", err)
+		if err := server.Shutdown(cleanup); err != nil {
+			logger.Error("Health shutdown failed", "event", "health.shutdown", "error", err)
 		}
 	}()
-
-	// Start the bot
-	if err := b.Start(); err != nil {
-		return fmt.Errorf("start bot: %w", err)
+	if err := application.Start(); err != nil {
+		return err
 	}
-
-	// Wait for interrupt signal
-	logger.Info("Bot is running. Press CTRL-C to exit.")
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM, os.Interrupt)
-	defer stop()
+	logger.Info("GoBard v2 running", "event", "app.started", "guild_limit", cfg.MaxGuildSessions, "queue_limit", cfg.QueueLimit, "extraction_limit", cfg.YTDLPMaxConcurrency)
 	<-ctx.Done()
-
-	// Graceful shutdown
-	logger.Info("Shutting down...")
-	if err := b.Stop(); err != nil {
-		logger.Error("Error during shutdown", "err", err)
-	}
-
-	logger.Info("Goodbye! 👋")
+	logger.Info("Shutdown requested", "event", "app.shutdown")
 	return nil
 }
 
