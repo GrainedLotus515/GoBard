@@ -30,6 +30,7 @@ type Runtime struct {
 	logger         *log.Logger
 	discord        *discordgo.Session
 	rest           *discordHTTP
+	state          *gatewayState
 	sessions       *session.Manager
 	player         *command.Player
 	voice          atomic.Pointer[discordvoice.Manager]
@@ -43,6 +44,7 @@ type Runtime struct {
 	slots          chan struct{}
 	playSlots      chan struct{}
 	rejections     chan interactionRef
+	removals       chan string
 	mu             sync.Mutex
 	stopping       bool
 	routes         map[string]string
@@ -64,7 +66,7 @@ func NewRuntime(parent context.Context, cfg *config.Config, sessions *session.Ma
 		cancel()
 		return nil, failure.Wrap("discord_initialize", failure.Transport, err)
 	}
-	r := &Runtime{ctx: ctx, cancel: cancel, cfg: cfg, logger: logger, discord: d, rest: newDiscordHTTP(cfg.DiscordToken), sessions: sessions,
+	r := &Runtime{ctx: ctx, cancel: cancel, cfg: cfg, logger: logger, discord: d, rest: newDiscordHTTP(cfg.DiscordToken), state: newGatewayState(), removals: make(chan string, maxGatewayGuilds), sessions: sessions,
 		register: make(chan struct{}, 1), disconnected: make(chan struct{}, 1), slots: make(chan struct{}, 32), playSlots: make(chan struct{}, cfg.PlayCommandConcurrency), rejections: make(chan interactionRef, 16), routes: make(map[string]string)}
 	r.player, err = command.NewPlayer(ctx, resolver, r, logger, cfg.PlayCommandConcurrency)
 	if err != nil {
@@ -79,6 +81,9 @@ func NewRuntime(parent context.Context, cfg *config.Config, sessions *session.Ma
 func (r *Runtime) configureGateway() {
 	d := r.discord
 	d.SyncEvents = true
+	// The SDK caches whole guild payloads even with member/channel tracking
+	// disabled. Retain only bounded authorization observations in our adapter.
+	d.StateEnabled = false
 	d.ShouldReconnectOnError = false
 	d.ShouldRetryOnRateLimit = false
 	d.MaxRestRetries = 0
@@ -116,7 +121,14 @@ func (r *Runtime) callback(fn func()) {
 }
 
 func (r *Runtime) handlers() {
-	r.discord.AddHandler(func(_ *discordgo.Session, _ *discordgo.Ready) { r.callback(r.readyRuntime) })
+	r.discord.AddHandler(func(_ *discordgo.Session, e *discordgo.Ready) {
+		r.callback(func() {
+			if err := r.state.ready(e.Guilds); err != nil {
+				r.logger.Error("Gateway state admission failed", "event", "discord.state", "error", err)
+			}
+			r.readyRuntime()
+		})
+	})
 	r.discord.AddHandler(func(_ *discordgo.Session, _ *discordgo.Resumed) { r.callback(func() { r.connected.Store(true) }) })
 	r.discord.AddHandler(func(_ *discordgo.Session, _ *discordgo.Disconnect) {
 		r.callback(func() {
@@ -127,7 +139,30 @@ func (r *Runtime) handlers() {
 			}
 		})
 	})
-	r.discord.AddHandler(func(_ *discordgo.Session, _ *discordgo.GuildCreate) { r.callback(r.signalRegistration) })
+	r.discord.AddHandler(func(_ *discordgo.Session, e *discordgo.GuildCreate) {
+		r.callback(func() {
+			if e == nil {
+				return
+			}
+			if err := r.state.updateGuild(e.Guild); err != nil {
+				r.logger.Warn("Guild state admission failed", "event", "discord.state", "error", err)
+			}
+			r.signalRegistration()
+		})
+	})
+	r.discord.AddHandler(func(_ *discordgo.Session, e *discordgo.GuildDelete) {
+		r.callback(func() {
+			if e == nil || e.Guild == nil || e.Unavailable {
+				return
+			}
+			r.state.remove(e.ID)
+			select {
+			case r.removals <- e.ID:
+			default:
+				r.logger.Error("Guild cleanup queue saturated", "event", "discord.state", "recovery", "shutdown_required")
+			}
+		})
+	})
 	r.discord.AddHandler(func(_ *discordgo.Session, e *discordgo.VoiceStateUpdate) { r.callback(func() { r.voiceState(e) }) })
 	r.discord.AddHandler(func(_ *discordgo.Session, e *discordgo.VoiceServerUpdate) {
 		r.callback(func() {
@@ -157,6 +192,9 @@ func (r *Runtime) voiceState(e *discordgo.VoiceStateUpdate) {
 	if e == nil || e.VoiceState == nil {
 		return
 	}
+	if err := r.state.voice(e.VoiceState); err != nil {
+		r.logger.Warn("Voice authorization state unavailable", "event", "discord.state", "error", err)
+	}
 	if v := r.voice.Load(); v != nil {
 		v.HandleVoiceStateUpdate(e)
 	}
@@ -164,6 +202,11 @@ func (r *Runtime) voiceState(e *discordgo.VoiceStateUpdate) {
 	self := r.discord.State.User != nil && r.discord.State.User.ID == e.UserID
 	r.discord.State.RUnlock()
 	if !self {
+		if target, ok := r.sessions.Get(e.GuildID); ok {
+			if _, err := target.Apply(r.ctx, session.Operation{Action: session.VoiceMember, Speaker: e.UserID, Channel: e.ChannelID}); err != nil && r.ctx.Err() == nil {
+				r.logger.Debug("Voice member event dropped", "event", "voice.member", "reason", "session_busy")
+			}
+		}
 		return
 	}
 	if target, ok := r.sessions.Get(e.GuildID); ok {
@@ -175,7 +218,8 @@ func (r *Runtime) voiceState(e *discordgo.VoiceStateUpdate) {
 
 func (r *Runtime) Start() error {
 	// Start and Close are composition-owned, not concurrent public operations.
-	r.work.Add(4)
+	r.work.Add(5)
+	go func() { defer r.work.Done(); r.removalLoop() }()
 	go func() { defer r.work.Done(); r.registrationLoop() }()
 	go func() { defer r.work.Done(); r.gatewayLoop() }()
 	for range 2 {
@@ -240,26 +284,36 @@ func (r *Runtime) Access(ctx context.Context, guild, user string) (session.Acces
 	if err := ctx.Err(); err != nil {
 		return session.Access{}, err
 	}
-	g, err := r.discord.State.Guild(guild)
-	if errors.Is(err, discordgo.ErrStateNotFound) {
-		return session.Access{}, nil
-	}
+	channel, err := r.state.access(guild, user)
 	if err != nil {
 		return session.Access{}, failure.Wrap("voice_state", failure.Transport, err)
 	}
-	// SDK VoiceState iterates a mutable slice after releasing the state lock.
-	// Copy the consumed value while holding that lock instead.
-	r.discord.State.RLock()
-	defer r.discord.State.RUnlock()
-	for _, state := range g.VoiceStates {
-		if state != nil && state.UserID == user {
-			return session.Access{Channel: state.ChannelID}, nil
+	return session.Access{Channel: channel}, nil
+}
+
+func (r *Runtime) removalLoop() {
+	for {
+		select {
+		case <-r.ctx.Done():
+			return
+		case guild := <-r.removals:
+			if err := r.sessions.Remove(guild); err != nil && r.ctx.Err() == nil {
+				r.logger.Warn("Guild cleanup failed", "event", "session.remove", "error", err)
+			}
+			r.mu.Lock()
+			delete(r.routes, guild)
+			r.mu.Unlock()
 		}
 	}
-	return session.Access{}, nil
 }
 
 func (r *Runtime) speaking(guild, user string, speaking bool) {
+	r.discord.State.RLock()
+	self := r.discord.State.User != nil && r.discord.State.User.ID == user
+	r.discord.State.RUnlock()
+	if self {
+		return
+	}
 	if target, ok := r.sessions.Get(guild); ok {
 		_, err := target.Apply(r.ctx, session.Operation{Action: session.Speaking, Speaker: user, Enabled: speaking})
 		if err != nil && r.ctx.Err() == nil {

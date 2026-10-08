@@ -343,4 +343,7 @@ If you encounter issues:
 2. Review this guide's troubleshooting section
 3. Check Gitea instance logs: `journalctl -u gitea`
 4. Ask in Gitea community forums
+> Historical pre-v2 reference. Commands, dependency explanations and deployment
+> advice below may be obsolete. Use [the current README](../README.md),
+> [deployment contract](deployment.md) and [rewrite evidence](rewrite/status.md).
 

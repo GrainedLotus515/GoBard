@@ -174,3 +174,6 @@ This is a temporary roadblock caused by Discord's API changes, not a reflection 
 **Bottom Line:** Your bot is ready. The library just needs to catch up with Discord's changes. ⏳
 
 **Next Step:** Monitor issue #1657 for updates.
+> Historical pre-v2 reference. Commands, dependency explanations and deployment
+> advice below may be obsolete. Use [the current README](../README.md),
+> [deployment contract](deployment.md) and [rewrite evidence](rewrite/status.md).

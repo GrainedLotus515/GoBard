@@ -35,6 +35,24 @@ func TestToggleAndForwardSeekUseOwnedState(t *testing.T) {
 	}
 }
 
+func TestDepartedSpeakerRestoresVolume(t *testing.T) {
+	s, source := newControlsTest(t)
+	apply(t, s, Operation{Action: Connect, Channel: "voice", Output: outputFunc(func(context.Context, []byte) error { return nil })})
+	if _, err := s.Add(context.Background(), tracks("track")); err != nil {
+		t.Fatal(err)
+	}
+	attempt := nextAttempt(t, source)
+	apply(t, s, Operation{Action: Ducking, Enabled: true})
+	apply(t, s, Operation{Action: Speaking, Speaker: "speaker", Enabled: true})
+	if attempt.request.Controls.Volume() != 70 {
+		t.Fatal("speaking did not duck")
+	}
+	apply(t, s, Operation{Action: VoiceMember, Speaker: "speaker", Channel: "elsewhere"})
+	if attempt.request.Controls.Volume() != 100 {
+		t.Fatal("departed speaker kept ducking active")
+	}
+}
+
 type attemptFixture struct {
 	request playback.Request
 	finish  chan struct{}

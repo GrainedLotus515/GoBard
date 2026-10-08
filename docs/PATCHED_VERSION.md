@@ -100,3 +100,6 @@ Thanks to **@ozraru** for the voice connection overhaul in their fork:
 **This is a temporary solution until the official discordgo library incorporates these fixes.**
 
 Good luck! 🎵
+> Historical pre-v2 reference. Commands, dependency explanations and deployment
+> advice below may be obsolete. Use [the current README](../README.md),
+> [deployment contract](deployment.md) and [rewrite evidence](rewrite/status.md).

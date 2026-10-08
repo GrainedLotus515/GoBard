@@ -23,6 +23,8 @@ func (c *coordinator) apply(op Operation) error {
 		} else if e := c.queue.current(); e != nil {
 			c.settle(e, playback.Result{Request: e.ticket.request, Outcome: playback.Skipped})
 			c.queue.advance()
+			c.recoveryAttempts = 0
+			c.drained = c.queue.current() == nil
 		}
 	case Stop:
 		c.disconnectVoice()
@@ -45,6 +47,8 @@ func (c *coordinator) apply(op Operation) error {
 		return c.connect(op)
 	case VoiceLost:
 		return c.voiceLost(op.Channel)
+	case VoiceMember:
+		c.voiceMember(op.Speaker, op.Channel)
 	case Clear:
 		c.clearUpcoming()
 	case Shuffle:
@@ -104,7 +108,7 @@ func (c *coordinator) authorize(access Access, action Action) error {
 	switch action {
 	case Inspect:
 		return nil
-	case Connect, Speaking, VoiceLost:
+	case Connect, Speaking, VoiceLost, VoiceMember:
 		return errors.New("operation requires lifecycle authority")
 	case Ducking, DuckTarget:
 		if !access.ManageGuild {
@@ -153,6 +157,13 @@ func (c *coordinator) configure(op Operation) error {
 	return nil
 }
 
+func (c *coordinator) voiceMember(speaker, channel string) {
+	if channel != c.channel {
+		delete(c.speakers, speaker)
+		c.updateVolume()
+	}
+}
+
 func (c *coordinator) clearUpcoming() {
 	current := c.queue.current()
 	for i := range c.queue.entries {
@@ -184,7 +195,9 @@ func (c *coordinator) remove(position int) error {
 	c.queue.remove(position)
 	if c.queue.index >= len(c.queue.entries) {
 		c.queue.reset()
+		c.drained = true
 	}
+	c.recoveryAttempts = 0
 	return nil
 }
 

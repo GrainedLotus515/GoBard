@@ -78,12 +78,9 @@ func (r *Resolver) Resolve(parent context.Context, query string) ([]media.Track,
 	if err := json.Unmarshal(stdout.buffer.Bytes(), &metadata); err != nil {
 		return nil, failure.Wrap("metadata_decode", failure.Source, err)
 	}
-	entries := metadata.Entries
-	if entries == nil {
-		entries = []*metadataEntry{&metadata}
-	}
-	if len(entries) > r.maxTracks {
-		return nil, failure.Wrap("metadata", failure.Source, errors.New("playlist exceeds track budget"))
+	entries, err := metadata.entries(r.maxTracks)
+	if err != nil {
+		return nil, failure.Wrap("metadata", failure.Source, err)
 	}
 	tracks := make([]media.Track, 0, len(entries))
 	for _, item := range entries {
@@ -118,13 +115,48 @@ func (b *limitedMetadata) Write(p []byte) (int, error) {
 }
 
 type metadataEntry struct {
-	ID        string           `json:"id"`
-	Title     string           `json:"title"`
-	Artist    string           `json:"uploader"`
-	Duration  float64          `json:"duration"`
-	Live      bool             `json:"is_live"`
-	Thumbnail string           `json:"thumbnail"`
-	Entries   []*metadataEntry `json:"entries"`
+	ID        string          `json:"id"`
+	Title     string          `json:"title"`
+	Artist    string          `json:"uploader"`
+	Duration  float64         `json:"duration"`
+	Live      bool            `json:"is_live"`
+	Thumbnail string          `json:"thumbnail"`
+	Entries   json.RawMessage `json:"entries"`
+}
+
+// Decode rows incrementally so an 8 MiB array of tiny objects cannot allocate
+// millions of Go structs before the track-count check. Nested playlists are
+// not an acquisition capability and are rejected without recursive decoding.
+func (m *metadataEntry) entries(limit int) ([]*metadataEntry, error) {
+	if len(m.Entries) == 0 || bytes.Equal(m.Entries, []byte("null")) {
+		return []*metadataEntry{m}, nil
+	}
+	decoder := json.NewDecoder(bytes.NewReader(m.Entries))
+	token, err := decoder.Token()
+	if err != nil {
+		return nil, err
+	}
+	if token != json.Delim('[') {
+		return nil, errors.New("invalid playlist entries")
+	}
+	entries := make([]*metadataEntry, 0, min(limit, 16))
+	for decoder.More() {
+		if len(entries) >= limit {
+			return nil, errors.New("playlist exceeds track budget")
+		}
+		var entry *metadataEntry
+		if err := decoder.Decode(&entry); err != nil {
+			return nil, err
+		}
+		if entry != nil && len(entry.Entries) != 0 && !bytes.Equal(entry.Entries, []byte("null")) {
+			return nil, errors.New("nested playlists unavailable")
+		}
+		entries = append(entries, entry)
+	}
+	if _, err := decoder.Token(); err != nil {
+		return nil, err
+	}
+	return entries, nil
 }
 
 func (m *metadataEntry) track() (media.Track, error) {

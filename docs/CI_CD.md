@@ -376,4 +376,7 @@ docker build -t gobard:test .
 - [GitHub Actions Syntax](https://docs.github.com/en/actions/using-workflows/workflow-syntax-for-github-actions)
 - [Docker Build Action](https://github.com/docker/build-push-action)
 - [Trivy Security Scanner](https://github.com/aquasecurity/trivy-action)
+> Historical pre-v2 reference. Commands, dependency explanations and deployment
+> advice below may be obsolete. Use [the current README](../README.md),
+> [deployment contract](deployment.md) and [rewrite evidence](rewrite/status.md).
 

@@ -88,35 +88,6 @@ func ClassifyYouTubeURL(raw string) (canonicalURL string, kind URLKind, err erro
 	return canonicalVideoURL(videoID), URLKindVideo, nil
 }
 
-// IsPlaylist reports whether raw is a supported YouTube playlist URL.
-func IsPlaylist(raw string) bool {
-	_, kind, err := ClassifyYouTubeURL(raw)
-	return err == nil && kind == URLKindPlaylist
-}
-
-// NormalizeSingleVideoURL extracts a locally resolvable YouTube video ID and
-// canonicalizes it to the standard watch URL without network access.
-func NormalizeSingleVideoURL(raw string) (canonicalURL string, videoID string, ok bool) {
-	canonicalURL, kind, err := ClassifyYouTubeURL(raw)
-	if err != nil || kind != URLKindVideo {
-		return "", "", false
-	}
-
-	parsed, err := url.Parse(canonicalURL)
-	if err != nil {
-		return "", "", false
-	}
-	return canonicalURL, parsed.Query().Get("v"), true
-}
-
-// IsYouTubeURL reports whether raw is one of the supported HTTPS YouTube URL
-// forms. It does not use substring matching, which previously allowed hosts
-// such as 127.0.0.1/youtube.com to reach yt-dlp.
-func IsYouTubeURL(raw string) bool {
-	_, _, err := ClassifyYouTubeURL(raw)
-	return err == nil
-}
-
 func isYouTubeHost(host string) bool {
 	switch host {
 	case "youtube.com", "www.youtube.com", "music.youtube.com", "youtu.be":

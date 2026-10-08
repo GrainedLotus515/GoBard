@@ -9,8 +9,6 @@ import (
 	"sync/atomic"
 )
 
-const defaultYTDLPConcurrency = 4
-
 // Limiter bounds concurrent external processes. A release returned from
 // Acquire is idempotent, making cleanup paths safe under cancellation races.
 type Limiter struct {
@@ -51,10 +49,10 @@ func (r *reservation) release() {
 	}
 }
 
-// New returns a limiter with a positive bounded capacity.
+// New returns a limiter with capacity 1–16, or nil for an invalid budget.
 func New(maxConcurrency int) *Limiter {
 	if maxConcurrency < 1 || maxConcurrency > 16 {
-		maxConcurrency = defaultYTDLPConcurrency
+		return nil
 	}
 	nonInteractiveCapacity := maxConcurrency
 	if maxConcurrency > 1 {
@@ -78,10 +76,10 @@ func (l *Limiter) Acquire(ctx context.Context) (func(), error) {
 // interactive reservation while blocked behind another bulk operation.
 func (l *Limiter) AcquireClass(ctx context.Context, class WorkClass) (func(), error) {
 	if l == nil || l.total == nil {
-		return func() {}, nil
+		return nil, fmt.Errorf("process limiter unavailable")
 	}
 	if ctx == nil {
-		ctx = context.Background()
+		return nil, fmt.Errorf("process context required")
 	}
 
 	acquired := &reservation{}

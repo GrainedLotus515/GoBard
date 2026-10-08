@@ -74,14 +74,13 @@ microbenchmark samples and their comparison limits are recorded explicitly.
 
 ## Remaining cutover work
 
-1. Verify local Discord login, registration, voice/DAVE delivery, user commands
-   and bounded recovery against the real temporary SDK. Credentials/connectivity
-   have not yet been exercised by the new runtime.
+1. Verify voice/DAVE delivery, user commands and bounded recovery against the
+   real temporary SDK. Local login and command registration are now verified.
 2. Audit remaining SDK limitations: its own heartbeat/listener goroutines have
    no public join API; native DAVE operations are non-preemptible. The adapter
    joins GoBard callbacks/work and cancels sockets, but a strict SDK-worker join
-   is not proven. SDK-maintained guild/voice-state storage also needs a measured
-   admission envelope distinct from GoBard's bounded session registry.
+   is not proven. SDK-managed full guild caching is now disabled and replaced by
+   a bounded authorization-only observation store.
 3. Complete the longer soak, review provider evidence and remove stale docs.
    Spotify metadata/official-player designs remain proposals, not audio support.
 
@@ -100,3 +99,19 @@ and joined runtime shutdown. Live Discord/provider gates remain separate.
 
 The full rewrite is not complete and must not be deployed as v2 yet. No external
 gate prevents continuing the independent cutover work above.
+
+Local live checkpoint (2026-10-08): isolated container `gobard-v2-test` started
+from runtime image `sha256:920a5704ed8415b9cfb7309fe7d679618995937daf0f31fc005a9244653d8859`.
+Actual Discord Gateway login and command reconciliation in four guilds succeeded.
+`/ready` returned 200 with Discord/commands true, source/pipeline unknown and
+zero active deliveries. This verifies connectivity and REST registration only.
+The old local `gobard-temp` stays stopped; a new temporary cache is mounted.
+No persisted user cache, VPS service, secrets configuration or publisher changed.
+
+Review checkpoint: bounded Gateway observations replace the SDK's full guild
+cache; incremental metadata rows prevent object-count amplification; cleanup
+reservations survive a full command mailbox; skipping the last request cancels
+recovery; departed speakers restore volume; health shutdown force-closes and
+joins after graceful timeout. Docker race, lint, runtime smoke/build and rendered
+small/medium/large profile checks passed after these fixes. The large profile
+now defaults to 32 retained sessions, allowing its 24-guild workload target.

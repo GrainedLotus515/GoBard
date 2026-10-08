@@ -33,8 +33,8 @@ command, Spotify capture or generic provider-fallback framework. The current
 SDK remains in adapters until its independent replacement exists.
 
 Implementation status and temporary migration boundaries are in
-[rewrite/status.md](rewrite/status.md); this document distinguishes intended
-architecture from the old runtime still being migrated.
+[rewrite/status.md](rewrite/status.md). `internal/app` now composes the v2
+runtime; the original orchestration has been removed.
 
 Current replacement packages are `internal/session` (queue/controls),
 `internal/playback` (attempts and bounded control data), `internal/audio`
@@ -58,8 +58,8 @@ Adapter-owned outputs outlive their sessions and are closed after the manager.
 `source.Resolver` handles metadata; `source.YouTubeOpener` handles bytes;
 `source.Cached` owns one optional cache worker. Cached media leases last until
 decoder cleanup, and the stable cache-key algorithm is retained. The shared URL
-grammar now lives in `sourceurl`; the legacy YouTube client delegates to it while
-production command migration is pending.
+grammar lives in `sourceurl`; every extraction path validates canonical inputs
+before subprocess launch.
 
 Decision (2026-10-08): `command.Player` owns a finite number of concurrent play
 lookups with no waiting queue; excess requests receive a busy result. The

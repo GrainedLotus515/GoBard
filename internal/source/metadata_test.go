@@ -101,3 +101,14 @@ func TestBoundedMetadataText(t *testing.T) {
 		t.Fatal("invalid bounded metadata")
 	}
 }
+
+func TestPlaylistRowBudgetPrecedesObjectExpansion(t *testing.T) {
+	m := metadataEntry{Entries: []byte("[" + strings.Repeat("{},", 5000) + "{}]")}
+	if _, err := m.entries(500); err == nil {
+		t.Fatal("oversized row collection accepted")
+	}
+	m.Entries = []byte(`[{"id":"outer","entries":[{"id":"inner"}]}]`)
+	if _, err := m.entries(500); err == nil {
+		t.Fatal("nested playlist expanded")
+	}
+}

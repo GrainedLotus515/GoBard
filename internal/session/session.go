@@ -119,7 +119,21 @@ func (s *Session) BeginResolution(ctx context.Context, access Access, id string)
 	r := s.submit(command{ctx: ctx, access: &access, reserve: id})
 	return r.snapshot, r.err
 }
-func (s *Session) EndResolution(id string) { s.submit(command{ctx: s.ctx, release: id}) }
+func (s *Session) EndResolution(id string) {
+	// Release is cleanup for already-admitted work and cannot be dropped when
+	// the ordinary command mailbox is saturated. At most 16 resolver owners
+	// can wait here; session cancellation also releases every waiter.
+	cmd := command{ctx: s.ctx, release: id, reply: make(chan response, 1)}
+	select {
+	case s.commands <- cmd:
+	case <-s.ctx.Done():
+		return
+	}
+	select {
+	case <-cmd.reply:
+	case <-s.done:
+	}
+}
 
 // Enqueue is the metadata-free operation used by test-media integrations.
 func (s *Session) Enqueue(ctx context.Context, request playback.Request) (*Ticket, error) {
@@ -437,6 +451,7 @@ func (c *coordinator) complete(result playback.Result) {
 	case playback.Removed:
 		c.settle(e, result)
 		c.queue.remove(c.queue.index)
+		c.recoveryAttempts = 0
 		if c.queue.index >= len(c.queue.entries) {
 			c.queue.reset()
 		}

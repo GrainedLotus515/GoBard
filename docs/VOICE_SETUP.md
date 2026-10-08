@@ -134,3 +134,6 @@ go build ./cmd/gobard
 ```
 
 The error should be resolved after this!
+> Historical pre-v2 reference. Commands, dependency explanations and deployment
+> advice below may be obsolete. Use [the current README](../README.md),
+> [deployment contract](deployment.md) and [rewrite evidence](rewrite/status.md).

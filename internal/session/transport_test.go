@@ -104,6 +104,56 @@ func TestObservedVoiceLossRecoversPausedAttempt(t *testing.T) {
 	}
 }
 
+func TestSkipLastTrackCancelsRecoveryAndDisconnects(t *testing.T) {
+	var connects atomic.Int32
+	recovering, canceled := make(chan struct{}), make(chan struct{})
+	s, source := voiceTestSession(t, voiceFixture{connect: func(ctx context.Context, _ string) (playback.Output, error) {
+		if connects.Add(1) > 1 {
+			close(recovering)
+			<-ctx.Done()
+			close(canceled)
+			return nil, ctx.Err()
+		}
+		return outputFunc(func(context.Context, []byte) error { return nil }), nil
+	}})
+	if _, err := s.Join(context.Background(), "voice"); err != nil {
+		t.Fatal(err)
+	}
+	tickets, err := s.Add(context.Background(), []Track{{MediaID: "audio"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-source.opened:
+	case <-time.After(time.Second):
+		t.Fatal("attempt not started")
+	}
+	apply(t, s, Operation{Action: VoiceLost})
+	select {
+	case <-recovering:
+	case <-time.After(time.Second):
+		t.Fatal("recovery not started")
+	}
+	if _, err := s.ApplyAs(context.Background(), Access{Channel: "voice"}, Operation{Action: Skip}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-canceled:
+	case <-time.After(time.Second):
+		t.Fatal("empty queue kept reconnect alive")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	result, err := tickets[0].Wait(ctx)
+	if err != nil || result.Outcome != playback.Skipped {
+		t.Fatalf("result %+v %v", result, err)
+	}
+	s.Close()
+	if connects.Load() != 2 {
+		t.Fatalf("unexpected retry after empty queue: %d", connects.Load())
+	}
+}
+
 func TestShutdownJoinsConnectingTransport(t *testing.T) {
 	started, joined := make(chan struct{}), make(chan struct{})
 	s, _ := voiceTestSession(t, voiceFixture{connect: func(ctx context.Context, _ string) (playback.Output, error) {

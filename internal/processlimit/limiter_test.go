@@ -31,6 +31,21 @@ func TestLimiterHonorsCapacityAndContext(t *testing.T) {
 	}
 }
 
+func TestInvalidLimiterCannotSilentlyAllowProcesses(t *testing.T) {
+	for _, n := range []int{-1, 0, 17} {
+		limiter := New(n)
+		if limiter != nil {
+			t.Fatalf("invalid budget %d accepted", n)
+		}
+		if _, err := limiter.Acquire(context.Background()); err == nil {
+			t.Fatal("nil limiter bypassed process budget")
+		}
+	}
+	if _, err := New(1).Acquire(nil); err == nil { //nolint:staticcheck // Deliberately exercise invalid lifecycle input.
+		t.Fatal("nil lifecycle context accepted")
+	}
+}
+
 func TestLimiterReservesInteractiveCapacity(t *testing.T) {
 	for _, capacity := range []int{1, 4, 8, 12} {
 		t.Run(fmt.Sprintf("capacity-%d", capacity), func(t *testing.T) {

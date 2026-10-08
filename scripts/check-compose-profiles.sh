@@ -16,14 +16,15 @@ fi
 unset GOBARD_CPUS GOBARD_MEMORY_LIMIT GOBARD_PIDS_LIMIT
 unset GOBARD_PROFILE_CACHE_LIMIT GOBARD_PROFILE_YTDLP_MAX_CONCURRENCY
 unset CACHE_LIMIT YTDLP_MAX_CONCURRENCY
+unset MAX_GUILD_SESSIONS GOBARD_PROFILE_MAX_GUILD_SESSIONS
 GOBARD_IMAGE=ghcr.io/grainedlotus515/gobard@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 export GOBARD_IMAGE
 
 for profile in small medium large; do
 	case "$profile" in
-		small) cpus=2; memory=1073741824; cache=2GB; concurrency=4 ;;
-		medium) cpus=4; memory=2147483648; cache=10GB; concurrency=8 ;;
-		large) cpus=8; memory=4294967296; cache=25GB; concurrency=12 ;;
+		small) cpus=2; memory=1073741824; cache=2GB; concurrency=4; guilds=16 ;;
+		medium) cpus=4; memory=2147483648; cache=10GB; concurrency=8; guilds=16 ;;
+		large) cpus=8; memory=4294967296; cache=25GB; concurrency=12; guilds=32 ;;
 	esac
 	if [ "$profile" = small ]; then
 		"$@" --project-directory "$profile_dir" --env-file "$profile_dir/.env" \
@@ -37,6 +38,7 @@ for profile in small medium large; do
 	grep -Eq "mem_limit: \"?$memory\"?$" "$profile_dir/rendered.yml"
 	grep -Eq "CACHE_LIMIT: $cache$" "$profile_dir/rendered.yml"
 	grep -Eq "YTDLP_MAX_CONCURRENCY: \"$concurrency\"$" "$profile_dir/rendered.yml"
+	grep -Eq "MAX_GUILD_SESSIONS: \"$guilds\"$" "$profile_dir/rendered.yml"
 	grep -Eq 'pids_limit: 256$' "$profile_dir/rendered.yml"
 	test "$(grep -Fc "image: $GOBARD_IMAGE" "$profile_dir/rendered.yml")" -eq 2
 	printf '%s profile passed\n' "$profile"

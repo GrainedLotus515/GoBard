@@ -43,7 +43,7 @@ metadata lookup and paginated playlist lookup (`internal/spotify/spotify.go`).
 Historical Spotify handling searched YouTube for audio; this is evidence of a
 metadata bridge, not an independent Spotify audio backend. No current credential
 or external verification is available. Restoration requires separate capability
-and terms assessment. Current code retains only a Spotify URL detector.
+and terms assessment. The dormant Spotify URL detector was removed at cutover.
 
 SponsorBlock, YouTube API credentials, arbitrary media URLs and DMs are not
 current supported behavior. They are not silently added by this rewrite.
@@ -84,6 +84,13 @@ offline first; a fixture source is not a public local-path command. Add explicit
 admission rejection at finite resource limits. Preserve command names and
 permissions. Keep old runtime until replacement contract tests cover its behavior;
 temporary coexistence is a migration checkpoint, not the final architecture.
+
+The runtime cutover is complete: old implementation files are now referenced
+only through the baseline commit above. Command mapping, permissions, queue,
+source and cache contracts have replacement tests. The speculative URL fast
+path and metadata memoization were implementation details; v2 resolves bounded
+metadata before queue acceptance. UI text now distinguishes accepted, starting,
+delivering and failed states. Metadata lookup latency can therefore differ.
 
 The replacement interaction grammar preserves `1:30`, `90`, `90s` and `1m30s`
 seek forms, while rejecting negative/overflowing values, colon seconds above 59,

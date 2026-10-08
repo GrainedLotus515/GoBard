@@ -122,3 +122,6 @@ The maintainers of discordgo will likely release a fix once they're aware of the
 4. If urgent, consider using Discord.py or Discord.js temporarily
 
 This appears to be a Discord API/infrastructure issue rather than a problem with your setup.
+> Historical pre-v2 reference. Commands, dependency explanations and deployment
+> advice below may be obsolete. Use [the current README](../README.md),
+> [deployment contract](deployment.md) and [rewrite evidence](rewrite/status.md).

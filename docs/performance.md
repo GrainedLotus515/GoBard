@@ -1,8 +1,8 @@
 # Performance and budgets
 
-No performance improvement is claimed before measurements. Existing frame
-capacity is five buffered packets plus a producer packet, each with a 4,000-byte
-buffer. Existing queue/guild admission is unbounded.
+The original runtime had five buffered packets plus a producer packet and
+unbounded queue/guild admission. V2 replaces those paths with the budgets below.
+Measurements are workload evidence, not a general production capacity guarantee.
 
 Reference slice target budgets:
 
@@ -27,8 +27,14 @@ worker/eight hints and drops hints on saturation. Downloads enforce
 min(cache limit, 256 MiB) while writing, with a five-minute deadline; this scratch
 allowance is additional to the committed cache budget. Guild manager construction
 requires explicit session and queue limits; it rejects saturation and retains a
-slot through shutdown. The current production bot has not yet adopted these
-replacement admission budgets.
+slot through shutdown. The v2 runtime now uses these admission budgets.
+
+Gateway authorization state retains at most 1,024 guild IDs, 1,024 voice members
+per guild and 16,384 voice records in total. Oversized guild snapshots fail
+authorization closed until a valid resnapshot; new over-budget voice records
+are rejected. Full SDK guild/member/channel/message caching is disabled.
+Metadata playlist rows are decoded incrementally and rejected at the configured
+track bound before object expansion; nested playlists are unavailable.
 
 Cache storage has a 65,536-entry index cap, 256-entry directory scan batches,
 16 distinct concurrent creators, and one filesystem mutation at a time. The

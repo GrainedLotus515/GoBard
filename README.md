@@ -4,6 +4,11 @@ GoBard is a self-hosted Discord music bot for **YouTube searches, videos, and pl
 
 It does not support Spotify, SponsorBlock, YouTube API keys, arbitrary audio URLs, DMs, or automatic host deployment.
 
+This rewrite branch starts the v2 runtime. Offline playback/race/quality gates
+and local Discord login/registration are verified; real provider audio and DAVE
+delivery remain separate live-test gates. See [rewrite status](docs/rewrite/status.md)
+before considering a rollout. No v2 image has been published or deployed to the VPS.
+
 ## Quick start
 
 Create a private configuration file and start the published image:
@@ -21,7 +26,7 @@ docker compose up -d
 
 ### Cache installation
 
-Cache preparation is built into the installation command above; no host `sudo`, `mkdir`, or `chown` command is required. The base Compose file pulls `ghcr.io/grainedlotus515/gobard:latest`, then runs the one-shot `cache-init` service before starting `gobard`. The initializer creates the `./cache` bind-mount directory when needed, assigns the mount point to container UID/GID `1000:1000`, and exits. Compose starts the bot only after that step succeeds.
+Cache preparation is built into the installation command above; no host `sudo`, `mkdir`, or `chown` command is required. The base Compose file uses the required immutable `GOBARD_IMAGE` digest, then runs the one-shot `cache-init` service before starting `gobard`. The initializer creates the `./cache` bind-mount directory when needed, assigns the mount point to container UID/GID `1000:1000`, and exits. Compose starts the bot only after that step succeeds.
 
 The initializer is safe to run again during later `docker compose up -d` operations. It changes only the cache mount point and deliberately does not recursively change ownership of existing cache contents. To confirm the installation step completed, run:
 
@@ -121,7 +126,7 @@ docker compose -f docker-compose.yml -f docker-compose.large.yml up -d
 
 For a local checkout, use `make docker-run-medium` or `make docker-run-large`. The existing `GOBARD_CPUS`, `GOBARD_MEMORY_LIMIT`, and `GOBARD_PIDS_LIMIT` variables still override a profile. `GOBARD_PROFILE_YTDLP_MAX_CONCURRENCY` and `GOBARD_PROFILE_CACHE_LIMIT` override its media-process and cache defaults.
 
-Resource profiles are workload targets. V2 additionally enforces `MAX_GUILD_SESSIONS` (default 16); select an explicit budget appropriate to measured capacity. Short offline measurements and their limitations are recorded in [docs/performance.md](docs/performance.md).
+Resource profiles are workload targets. V2 additionally enforces `MAX_GUILD_SESSIONS` (default 16; the large Compose profile defaults to 32). `GOBARD_PROFILE_MAX_GUILD_SESSIONS` overrides the profile budget. Offline measurements and their limitations are recorded in [docs/performance.md](docs/performance.md).
 
 ## Commands and access
 

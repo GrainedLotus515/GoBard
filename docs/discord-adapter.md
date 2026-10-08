@@ -86,10 +86,15 @@ SDK `VoiceStateUpdate` can dereference a nil connection; the adapter uses its
 synchronized `GatewayWriteStruct` capability. The SDK itself holds its socket
 lock across I/O; the adapter bounds that I/O and holds no GoBard registry lock
 around it. SDK `VoiceState` iterates mutable state without a read lock; GoBard
-copies the required channel under the SDK state lock instead.
+retains its own bounded channel observations instead.
 
 The current SDK does not expose a join for its own heartbeat/listener workers.
 GoBard joins its callbacks and closes sockets, but cannot honestly certify a
 strict SDK-worker join from that API. Native DAVE operations also cannot be
 preempted. Both are explicit future-library requirements and live shutdown
 verification gates, not claims established by fake transport tests.
+Gateway state caching is disabled in the SDK. The adapter retains only bounded
+guild IDs and user-to-voice-channel observations: 1,024 guilds, 1,024 voices per
+guild, 16,384 voices globally. Oversized snapshots fail authorization closed;
+ordinary leaves release their slots. Guild removal has a bounded cleanup queue.
+Tests cover saturation, external-payload mutation and concurrent membership moves.

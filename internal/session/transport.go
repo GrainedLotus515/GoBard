@@ -94,7 +94,7 @@ func (c *coordinator) driveTransport() {
 		return
 	}
 	if c.drained && len(c.reservations) == 0 && c.queue.current() == nil {
-		c.needDisconnect = true
+		c.disconnectVoice()
 		c.connected = false
 		c.drained = false
 		c.dirty = true
@@ -204,7 +204,7 @@ func (c *coordinator) scheduleRecovery() {
 }
 
 func (c *coordinator) startRecovery() {
-	if c.active != nil || c.needDisconnect || c.session.ctx.Err() != nil {
+	if c.active != nil || c.needDisconnect || c.transportCancel != nil || c.session.ctx.Err() != nil {
 		return
 	}
 	c.recoveryAttempts++

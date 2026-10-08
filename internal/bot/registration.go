@@ -24,18 +24,17 @@ func (r *Runtime) registrationLoop() {
 		if !waitContext(r.ctx, 250*time.Millisecond) {
 			return
 		}
+		select {
+		case <-r.register:
+		default:
+		}
 		r.discord.State.RLock()
 		app := ""
 		if r.discord.State.User != nil {
 			app = r.discord.State.User.ID
 		}
-		guilds := make([]string, 0, len(r.discord.State.Guilds))
-		for _, g := range r.discord.State.Guilds {
-			if g != nil {
-				guilds = append(guilds, g.ID)
-			}
-		}
 		r.discord.State.RUnlock()
+		guilds := r.state.guildIDs()
 		if !validPathPart(app, 32) {
 			continue
 		}

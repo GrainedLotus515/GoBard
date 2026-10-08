@@ -3,7 +3,7 @@
 | Provider/backend | Metadata | Audio acquisition | Official player | Discord delivery | Status |
 | --- | --- | --- | --- | --- | --- |
 | YouTube/yt-dlp | Search/video/playlist | Conditional on provider availability and permitted use | Separate browser embedding | Through decode/Opus pipeline | Existing backend; live verification pending |
-| Local test media | Fixture metadata | Caller-owned bytes | None | Through tested codec/output boundary | Reference slice under construction; not a public path input |
+| Local test media | Fixture metadata | Caller-owned bytes | None | Through tested codec/output boundary | Real FFmpeg/Opus slice verified offline; not a public path input |
 | Spotify | Historical track/playlist bridge | No supported raw full-track backend established | SDK/player-control is a separate capability | Not established | Assessed; not enabled |
 | Self-hosted HTTP | Possible | Requires explicit origin/redirect policy | None required | Technically possible | Proposed only |
 

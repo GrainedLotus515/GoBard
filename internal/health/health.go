@@ -97,7 +97,11 @@ func (s *Server) Shutdown(ctx context.Context) error {
 
 	shutdownErr := s.server.Shutdown(ctx)
 	if shutdownErr != nil {
-		return shutdownErr
+		// Graceful timeout does not transfer ownership back to the caller:
+		// force-close sockets and join Serve before returning the failure.
+		closeErr := s.server.Close()
+		<-s.done
+		return errors.Join(shutdownErr, closeErr)
 	}
 
 	select {

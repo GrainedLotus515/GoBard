@@ -68,8 +68,8 @@ COPY . .
 RUN --mount=type=cache,target=/go/pkg/mod \
 	--mount=type=cache,target=/root/.cache/go-build \
 	go test -run '^$' -bench . -benchmem \
-		./internal/player ./internal/cache ./internal/processlimit ./internal/bot ./internal/youtube \
-		./internal/playback ./internal/session ./internal/audio
+		./internal/cache ./internal/processlimit ./internal/bot ./internal/source \
+		./internal/playback ./internal/session ./internal/audio ./internal/discordvoice
 
 FROM dependencies AS capacity-bench-builder
 
@@ -194,6 +194,7 @@ ENTRYPOINT ["/app/gobard"]
 
 FROM runtime AS capacity-bench
 
+HEALTHCHECK NONE
 COPY --from=capacity-bench-builder --chown=root:root --chmod=0555 /out/gobard-capacity-bench /app/gobard-capacity-bench
 ENTRYPOINT ["/app/gobard-capacity-bench"]
 

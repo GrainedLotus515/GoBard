@@ -44,6 +44,7 @@ func (d *discordHTTP) send(ctx context.Context, method, path string, body any, a
 		return failure.Wrap("discord_request", failure.Transport, err)
 	}
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("User-Agent", "DiscordBot (https://github.com/GrainedLotus515/gobard, 2)")
 	if authenticated {
 		req.Header.Set("Authorization", "Bot "+d.token)
 	}
@@ -73,7 +74,7 @@ func (d *discordHTTP) send(ctx context.Context, method, path string, body any, a
 // Path components are checked independently of the payload grammar. Tokens
 // remain adapter-owned and are never included in diagnostic errors.
 func validPathPart(value string, limit int) bool {
-	if value == "" || len(value) > limit {
+	if value == "" || value == "." || value == ".." || len(value) > limit {
 		return false
 	}
 	return strings.IndexFunc(value, func(r rune) bool {

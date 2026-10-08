@@ -88,3 +88,51 @@ func TestUnavailableEndpoint(t *testing.T) {
 		t.Fatalf("status = %d, want %d", status, http.StatusServiceUnavailable)
 	}
 }
+
+type blockingChecker struct{ entered, done chan struct{} }
+
+func (c blockingChecker) Live() error { return nil }
+func (c blockingChecker) Ready(ctx context.Context) error {
+	close(c.entered)
+	<-ctx.Done()
+	close(c.done)
+	return ctx.Err()
+}
+
+func TestGracefulTimeoutStillClosesAndJoinsServer(t *testing.T) {
+	checker := blockingChecker{make(chan struct{}), make(chan struct{})}
+	server, err := Start("127.0.0.1:0", checker)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := newTestClient(t)
+	requestDone := make(chan struct{})
+	go func() {
+		defer close(requestDone)
+		response, err := client.Get("http://" + server.Addr() + "/ready")
+		if err == nil {
+			response.Body.Close()
+		}
+	}()
+	select {
+	case <-checker.entered:
+	case <-time.After(time.Second):
+		t.Fatal("request never reached checker")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	if err := server.Shutdown(ctx); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("shutdown result %v", err)
+	}
+	select {
+	case <-server.done:
+	default:
+		t.Fatal("Serve worker survived shutdown")
+	}
+	select {
+	case <-checker.done:
+	case <-time.After(time.Second):
+		t.Fatal("request context not canceled")
+	}
+	<-requestDone
+}
