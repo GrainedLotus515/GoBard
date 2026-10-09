@@ -1,8 +1,8 @@
-# V2 implementation report — 2026-10-08
+# V2 implementation report — 2026-10-09
 
 The runtime has been replaced and is available for local Discord testing. It is
-not declared a completed production rewrite: full-track live completion,
-recovery, live controls and active SDK shutdown still require verification.
+not declared a completed production rewrite: listening quality, live controls,
+voice reconnect and active SDK shutdown still require verification.
 
 ## Implemented
 
@@ -17,6 +17,8 @@ recovery, live controls and active SDK shutdown still require verification.
 - Charm JSON/text events with stable command/request/attempt correlation and
   safe extractor classifications; bounded Discord HTTP responses, cancellation,
   mention suppression, Gateway membership observations and callback shutdown.
+- Fixed-size startup/read/send timing summaries on attempt terminal events,
+  to diagnose future live stutter without per-frame logs or a sample buffer.
 - YouTube resolver/acquisition and stable-key media cache, bounded metadata,
   stderr, subprocesses, downloads and warming. No personal-cookie requirement.
 - Existing hardened runtime, strict config, pinned dependencies, GHCR/Gitea and
@@ -36,15 +38,24 @@ recovery, live controls and active SDK shutdown still require verification.
   connection reset, independently reproduced with the same diagnostic fingerprint.
   A separate cache download contains all 5,548 Opus frames (110.961 seconds).
   This is partial live playback evidence, not successful full-track completion.
+- A later live source reset at 203.980 seconds triggered exactly one resume;
+  the next attempt completed. Total accepted audio across both attempts was
+  268.540 seconds. The user's listening report was qualified, so uninterrupted
+  audible playback is not claimed. See [live evidence](live-2026-10-09.md).
 - Deterministic source-resume tests cover offset/identity, one-retry budget,
   auth/unknown/empty/live exclusions, and stop/shutdown during the resumed attempt.
+- Timing fault-injection tests, Docker race/lint/build/smoke gates and a short
+  4/12/24-guild capacity regression passed after adding timing summaries. The
+  synthetic overhead sample is recorded in `../performance.md`; live timing
+  data for the reported stutter is unavailable retroactively.
 - Idle connected-container SIGTERM: exit 0, no OOM, 1.377-second shutdown.
 
 ## External gates and limitations
 
-- Partial provider retrieval and audible Discord delivery are confirmed. Live
-  full-track completion, source recovery, channel controls and reconnect remain
-  unverified. Deterministic fake output does not replace those gates.
+- Provider retrieval, audible Discord delivery, live source recovery and pipeline
+  completion are confirmed for the observed requests. Listening quality, channel
+  controls and voice reconnect remain unverified. Completion does not establish
+  lossless delivery to the listener.
 - YouTube authentication/anti-bot rejection remains possible and is terminal
   when appropriate. A rewrite cannot guarantee provider availability.
 - The current SDK exposes no strict heartbeat/listener join and has internal

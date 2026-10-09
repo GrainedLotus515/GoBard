@@ -10,6 +10,21 @@ requires at least one accepted frame and successful source finalization. ERROR
 means a terminal failure; INFO means completion or intentional cancellation.
 Lower layers return wrapped causes without duplicate terminal logs.
 
+Terminal events also include `first_frame_ms`, `max_read_ms`, `max_send_ms`,
+`slow_reads` and `slow_sends`. First-frame latency includes source opening and
+startup. Read/send maxima and counts measure only subsequent accepted packets:
+read includes source acquisition plus decoding/encoding; send includes pacing
+plus transport/encryption. A slow call exceeds 60 ms (three audio frames).
+Explicit pause gates, failed calls and EOF finalization are excluded. Zero
+first-frame latency with zero frames means no audio was accepted. Small positive
+durations can round to zero milliseconds.
+
+The attempt owner keeps fixed-size maxima/counters, with no packet history,
+background worker or per-frame logs. These measurements can locate local stalls
+but cannot identify their underlying CPU/network cause, measure remote packet
+loss or prove smooth listening. They do not directly measure inter-packet gaps:
+several smaller delays or scheduling outside these calls can still cause jitter.
+
 The command owner separately emits `command.terminal` for accepted/rejected,
 canceled or failed metadata/admission work. Its command ID is generated before
 lookup and carried into every resulting request and attempt. An accepted
@@ -35,8 +50,10 @@ The terminal event describes the finished attempt, whose engine performs no
 retry. A separate session-owned `session.recovery` WARN records the policy
 decision and links the failed request/attempt IDs. It does not replace or turn
 the failed attempt into a success. The resumed attempt gets a new attempt ID.
-This reset example reflects the first live audio test; the recovery event is a
-contract example verified by deterministic tests, not yet a live observation.
+This reset example reflects the first live audio test; the recovery line at that
+offset is illustrative. A subsequent real `session.recovery` event at offset
+203980 ms was followed by a completed attempt; see
+[the live evidence](rewrite/live-2026-10-09.md).
 
 Readiness distinguishes command acceptance/Discord connection from source
 availability, pipeline status and active delivery. Idle is not a pipeline

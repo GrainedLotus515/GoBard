@@ -1,4 +1,4 @@
-# Rewrite status — 2026-10-08
+# Rewrite status — 2026-10-09
 
 The v2 runtime is implemented and running as local `gobard-v2-test`.
 The original local `gobard-temp` remains stopped. No VPS service, persisted user
@@ -13,6 +13,8 @@ cache, secrets configuration or image publisher was changed.
 - `a6b5155`: review fixes for bounded Gateway state, metadata object expansion,
   cleanup under saturation, skip during recovery, departed speakers, forced
   health shutdown and Docker/profile gate compatibility.
+- `6d7070f`: safe source-reset diagnostics and one bounded resume from delivered
+  position; verified with a real source interruption on 2026-10-09.
 
 All inventoried commands and buttons have replacement mapping/core tests.
 Permissions and queue lifecycle policy live in the session owner. Charm events
@@ -37,29 +39,45 @@ separate command acceptance, attempt outcomes, technical categories and recovery
   2,233 accepted frames with a connection reset; an independent paced probe
   reproduced the same fingerprint (`ff00ab2b92eaf6f7`) and errno 104. A separate
   cache download contains 5,548 Opus frames over 110.961 seconds. Partial live
-  delivery is verified; successful full-track live completion is not.
+  delivery was verified in this initial test.
 - Safe connection-reset/timeout diagnostics and one session-owned resume from
   delivered position; deterministic tests cover budget, identity, exclusions,
   stop and shutdown. No authentication bypass or hidden extractor retry.
+- A subsequent live request failed after 10,199 frames (203.980 seconds),
+  resumed once at that offset, then completed another 3,228 frames. This verifies
+  live source recovery and pipeline completion, not uninterrupted listening.
+  The user reported stuttering/gaps while Cyberpunk was open; the cause of gaps
+  beyond the source interruption remains unresolved. See [live evidence](live-2026-10-09.md).
 - Idle connected local-container SIGTERM completed in 1.377 seconds, exit 0,
   no OOM. The stopped checkpoint remains as `gobard-v2-test-e7309a5`.
 
 The first audible test image was
 `sha256:1f22be9ee97caa798e98f4f677b9731be7c85ba1f148f800ebaf1e144a24932c`.
-The local bot now runs the source-recovery
+The successful live recovery used the source-recovery
 image `sha256:25688d4eab4aa33a74fc67bddb632532c0e51c869a1647532887e43b0b8d21a1`,
 with the same separate temporary test cache. Docker race tests and lint passed
 after the recovery change, including real cached decoding at a nonzero offset;
-the hardened runtime build and smoke check passed too. Live recovery remains
-unverified. Refreshing the idle connected bot took 1.264 seconds to stop, exit 0,
+the hardened runtime build and smoke check passed too. Live recovery subsequently
+completed. Refreshing the idle connected bot took 1.264 seconds to stop, exit 0,
 with no OOM; its stopped checkpoint remains `gobard-v2-test-a6b5155`.
+
+The follow-up timing image is
+`sha256:52f3a34e9c165e4e3602348ad72471b207d6782c919c3187da03379b369f46b4`.
+It adds fixed-size first-frame/read/send timing summaries for the next live
+test. Docker race tests, lint, runtime build/smoke, microbenchmarks and 30-second
+4/12/24-guild capacity checks passed; no deadline gaps over 60 ms or worker
+failures occurred. See [performance evidence](../performance.md). This instruments
+future reports; it does not claim to fix the unresolved listening-quality issue.
+The local bot is healthy with reconciled commands after refresh. The preceding
+idle container stopped in 1.298 seconds, exit 0, no OOM, and is retained as
+`gobard-v2-test-6d7070f`; the same temporary test cache is preserved.
 
 ## Remaining gates and risks
 
-1. Full-track live completion, source resume, live controls, reconnect and
-   shutdown during active audio still need user-driven Discord tests. Partial
-   extraction and audible voice delivery passed; the connection-reset failure
-   was recorded truthfully. Offline recovery tests do not verify live recovery.
+1. Listening quality, live controls, voice reconnect and shutdown during active
+   audio still need user-driven Discord tests. Source resume and pipeline
+   completion passed live; complete packets accepted by the transport do not
+   establish uninterrupted human audibility or rule out client/network stutter.
 2. The temporary SDK exposes no strict join for heartbeat/listener/internal
    event goroutines. GoBard joins its own work/callbacks, closes sockets and
    disables automatic SDK retries; native DAVE remains non-preemptible.

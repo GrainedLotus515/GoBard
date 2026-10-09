@@ -2,7 +2,7 @@
 
 | Provider/backend | Metadata | Audio acquisition | Official player | Discord delivery | Status |
 | --- | --- | --- | --- | --- | --- |
-| YouTube/yt-dlp | Search/video/playlist | Conditional on provider availability and permitted use | Separate browser embedding | Through decode/Opus pipeline | Partial live audio verified; full-track completion/recovery pending |
+| YouTube/yt-dlp | Search/video/playlist | Conditional on provider availability and permitted use | Separate browser embedding | Through decode/Opus pipeline | Live audio and source recovery to pipeline completion verified; listening quality unresolved |
 | Local test media | Fixture metadata | Caller-owned bytes | None | Through tested codec/output boundary | Real FFmpeg/Opus slice verified offline; not a public path input |
 | Spotify | Historical track/playlist bridge | No supported raw full-track backend established | SDK/player-control is a separate capability | Not established | Assessed; not enabled |
 | Self-hosted HTTP | Possible | Requires explicit origin/redirect policy | None required | Technically possible | Proposed only |
@@ -18,6 +18,12 @@ The optional cache download contained a complete 110.961-second Opus file
 (5,548 frames checked with ffprobe). That verifies acquisition of this test item,
 not provider-wide reliability or completed live delivery. A finite source-resume
 policy is tested offline; plain search retains the first-result selection behavior.
+
+On 2026-10-09, another live request resumed once after a connection reset at
+203.980 seconds and completed the remaining 64.560 seconds of accepted audio.
+This verifies the recovery path in live use; the user's qualified listening
+report does not establish uninterrupted audibility. See
+[the recorded evidence and resource caveats](rewrite/live-2026-10-09.md).
 
 An independent official-player wrapper would expose device/session selection,
 authorized play/pause/seek, state and errors. It would not imply a PCM reader or

@@ -142,6 +142,25 @@ is now explicitly 128 kbit/s and the runtime-image build overlapped this gate.
 They are not a controlled before/after CPU comparison. The sustained quota
 measurements above ran sequentially without concurrent quality builds.
 
+## Live-diagnostic timing overhead (2026-10-09)
+
+Added four monotonic clock samples per valid audio packet and fixed-size
+per-attempt maxima/counters; no per-frame logging, allocation or additional
+worker. `GOBARD_BENCH_DURATION=30s make docker-bench` passed on the same
+i9-12900K host. Synthetic 1,000-packet attempts measured 117,495 ns, 4,169 B and
+four allocations; real 1,000-frame decoding measured 206,612,358 ns, 118,282 B
+and 90 allocations. The synthetic sample is slower than the previous 8,917 ns
+sample by about 109 ns/frame, with the same allocation count. These were not
+paired isolated runs; the real-media sample does not establish an improvement.
+
+Concurrent 30-second profiles with 4/12/24 guilds used 8.14/11.03/10.44% of their
+2/4/8-CPU quotas. Maximum frame gaps were 21.17/22.57/23.52 ms; all had zero gaps
+over 60 ms, worker failures and retained temporary files. Goroutines returned
+from two to one. [Raw reports](rewrite/capacity-timing-2026-10-09.json) retain the
+image and measurements. Quality builds overlapped parts of this check and a
+local Discord bot remained online. This is a short regression check, not another
+15-minute soak or proof about client-side playback while gaming.
+
 ## Fifteen-minute soak (2026-10-08)
 
 `make docker-bench` passed its microbenchmarks and all three 900-second profiles.

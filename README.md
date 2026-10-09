@@ -5,8 +5,8 @@ GoBard is a self-hosted Discord music bot for **YouTube searches, videos, and pl
 It does not support Spotify, SponsorBlock, YouTube API keys, arbitrary audio URLs, DMs, or automatic host deployment.
 
 This rewrite branch starts the v2 runtime. Offline playback/race/quality gates
-and partial real YouTube/Discord audio are verified. Full-track completion,
-recovery and live controls remain test gates. See [rewrite status](docs/rewrite/status.md)
+and real YouTube/Discord audio with source recovery to pipeline completion are
+verified. Listening quality and live controls remain test gates. See [rewrite status](docs/rewrite/status.md)
 before considering a rollout. No v2 image has been published or deployed to the VPS.
 
 ## Quick start

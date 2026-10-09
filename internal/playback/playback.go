@@ -73,6 +73,7 @@ type Result struct {
 	Frames  uint64
 	Elapsed time.Duration
 	Failure *failure.Error
+	Timing  Timing
 }
 
 // Engine is immutable and safe for concurrent attempts with independent
@@ -139,7 +140,9 @@ func (e *Engine) Run(ctx context.Context, request Request, output Output) (resul
 		if request.Controls.wait(ctx) != nil {
 			return result
 		}
+		readStarted := time.Now()
 		n, err := stream.Next(ctx, packet[:])
+		readElapsed := time.Since(readStarted)
 		if err != nil {
 			if errors.Is(err, io.EOF) && n == 0 && result.Frames > 0 {
 				result.Outcome = Completed
@@ -162,10 +165,17 @@ func (e *Engine) Run(ctx context.Context, request Request, output Output) (resul
 		if request.Controls.wait(ctx) != nil {
 			return result
 		}
+		sendStarted := time.Now()
 		if err := output.Send(ctx, packet[:n]); err != nil {
 			result.Outcome = TransportFailure
 			result.Failure = classify("output", failure.Transport, err)
 			return result
+		}
+		accepted := time.Now()
+		if result.Frames == 0 {
+			result.Timing.FirstFrame = accepted.Sub(started)
+		} else {
+			result.Timing.record(readElapsed, accepted.Sub(sendStarted))
 		}
 		result.Frames++
 		if request.Controls != nil {
@@ -195,7 +205,9 @@ func classify(stage string, category failure.Category, err error) *failure.Error
 
 func (e *Engine) terminal(r Result) {
 	fields := []any{"event", "playback.terminal", "request_id", r.Request.ID, "attempt_id", r.Request.AttemptID,
-		"command_id", r.Request.CommandID, "provider", r.Request.Provider, "outcome", r.Outcome, "recovery", "none", "frames", r.Frames, "elapsed_ms", r.Elapsed.Milliseconds()}
+		"command_id", r.Request.CommandID, "provider", r.Request.Provider, "outcome", r.Outcome, "recovery", "none", "frames", r.Frames, "elapsed_ms", r.Elapsed.Milliseconds(),
+		"first_frame_ms", r.Timing.FirstFrame.Milliseconds(), "max_read_ms", r.Timing.MaxRead.Milliseconds(), "max_send_ms", r.Timing.MaxSend.Milliseconds(),
+		"slow_reads", r.Timing.SlowReads, "slow_sends", r.Timing.SlowSends}
 	if r.Failure != nil {
 		fields = append(fields, "stage", r.Failure.Stage, "category", r.Failure.Category, "reason", r.Failure.Reason, "fingerprint", r.Failure.Fingerprint, "exit_code", r.Failure.ExitCode)
 		e.logger.Error("Playback failed", fields...)

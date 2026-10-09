@@ -76,7 +76,10 @@ WaitDelay. FFmpeg receives a pipe with only the pipe protocol enabled.
 Tests use a fake extractor executable and real FFmpeg. The v2 pipeline is wired
 into production composition. A local live test confirmed partial YouTube audio
 and human audibility, then exposed a source connection reset after 2,233 frames.
-Full-track live completion and real recovery remain separate verification gates.
+A subsequent live request resumed once after a reset at 203.980 seconds and
+completed the remaining audio. Listening quality remains unresolved; the
+[live evidence](rewrite/live-2026-10-09.md) distinguishes accepted packets from
+what the listener heard.
 # Managed voice lifecycle
 
 The guild coordinator serializes Connect/Disconnect after the preceding audio
