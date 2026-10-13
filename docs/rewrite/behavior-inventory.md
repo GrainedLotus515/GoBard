@@ -92,6 +92,14 @@ path and metadata memoization were implementation details; v2 resolves bounded
 metadata before queue acceptance. UI text now distinguishes accepted, starting,
 delivering and failed states. Metadata lookup latency can therefore differ.
 
+User review exposed a UI regression: the v2 `/play` response had only a generic
+admission receipt, omitting the old track card and playback buttons. The player
+card is restored with current-selection metadata, progress, controls and read-only
+Queue/Refresh navigation. Permission-denied button presses now reply privately
+without replacing the shared card. Queue numbering remains stable; remaining
+counts exclude completed entries. Cards currently refresh on interaction rather
+than automatically. See [the interface contract](../discord-interface.md).
+
 The replacement interaction grammar preserves `1:30`, `90`, `90s` and `1m30s`
 seek forms, while rejecting negative/overflowing values, colon seconds above 59,
 and offsets above seven days (the metadata duration bound). This tightens invalid

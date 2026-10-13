@@ -75,6 +75,7 @@ type Snapshot struct {
 	Frames     uint64
 	Last       playback.Result
 	Recovery   string
+	Transition playback.Outcome
 }
 
 type entry struct {

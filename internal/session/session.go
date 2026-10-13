@@ -506,7 +506,10 @@ func (c *coordinator) interrupt(reason playback.Outcome) {
 
 func (c *coordinator) snapshot() Snapshot {
 	s := Snapshot{Generation: c.generation, Channel: c.channel, Current: c.queue.index, Active: c.active != nil, Connected: c.connected, Connecting: c.transportKind == "connect" || c.transportKind == "recover", Paused: c.paused,
-		Loop: c.loop, Volume: c.volume, Ducking: c.ducking, DuckTarget: c.duckTarget, Last: c.last, Recovery: c.recovery}
+		Loop: c.loop, Volume: c.volume, Ducking: c.ducking, DuckTarget: c.duckTarget, Last: c.last, Recovery: c.recovery, Transition: c.pending}
+	if c.stopAfter {
+		s.Transition = playback.Stopped
+	}
 	s.Last.Request.Controls = nil
 	s.Tracks = make([]Track, len(c.queue.entries))
 	for i, e := range c.queue.entries {

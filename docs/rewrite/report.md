@@ -24,6 +24,10 @@ was reported successful; the earlier stutter's cause remains unresolved.
   stderr, subprocesses, downloads and warming. No personal-cookie requirement.
 - Existing hardened runtime, strict config, pinned dependencies, GHCR/Gitea and
   SOPS/age deployment compatibility retained; explicit migration/rollout docs.
+- Restored `/play` track card and playback controls, current progress/next track,
+  Queue/Refresh navigation and private errors that preserve shared player cards.
+  The [interface contract](../discord-interface.md) records snapshot behavior;
+  automatic message updates and final client-side usability review are unfinished.
 
 ## Verified
 

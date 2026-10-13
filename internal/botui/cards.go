@@ -29,6 +29,7 @@ const (
 	ActionPlaybackSkip        ComponentAction = "music:playback:skip"
 	ActionPlaybackToggleLoop  ComponentAction = "music:playback:toggle_loop"
 	ActionPlaybackStop        ComponentAction = "music:playback:stop"
+	ActionPlaybackShow        ComponentAction = "music:playback:show"
 	ActionQueuePage           ComponentAction = "music:queue:page"
 )
 
@@ -49,6 +50,9 @@ type PlaybackCardSpec struct {
 	ShowControls bool
 	Paused       bool
 	LoopEnabled  bool
+	Notice       string
+	NextTitle    string
+	NextURL      string
 }
 
 type QueueEntrySpec struct {
@@ -63,6 +67,7 @@ type QueueCardSpec struct {
 	NowPlayingURL      string
 	NowPlayingArtist   string
 	NowPlayingProgress string
+	NowPlayingStatus   string
 	Upcoming           []QueueEntrySpec
 	Page               int
 	TotalPages         int
@@ -79,14 +84,15 @@ type StatusCardSpec struct {
 
 func BuildPlaybackCard(spec PlaybackCardSpec) (*discordgo.MessageEmbed, []discordgo.MessageComponent) {
 	embed := &discordgo.MessageEmbed{
+		Author:      &discordgo.MessageEmbedAuthor{Name: fallback(spec.ContextLabel, "Now playing")},
 		Title:       truncate(spec.Title, maxTrackTitleLen),
 		URL:         spec.URL,
-		Description: truncate(spec.Artist, maxArtistLen),
+		Description: escapeMarkdownLabel(truncate(spec.Artist, maxArtistLen)),
 		Color:       ColorInfo,
 		Fields: []*discordgo.MessageEmbedField{
 			{
-				Name:   "Length",
-				Value:  fallback(spec.Length, "Unknown"),
+				Name:   "Progress",
+				Value:  fallback(spec.ContextValue, "0:00") + " / " + fallback(spec.Length, "Unknown"),
 				Inline: true,
 			},
 			{
@@ -94,12 +100,13 @@ func BuildPlaybackCard(spec PlaybackCardSpec) (*discordgo.MessageEmbed, []discor
 				Value:  mentionUser(spec.RequestedBy),
 				Inline: true,
 			},
-			{
-				Name:   fallback(spec.ContextLabel, "Status"),
-				Value:  fallback(spec.ContextValue, "Ready"),
-				Inline: true,
-			},
 		},
+	}
+	if spec.Notice != "" {
+		embed.Description = spec.Notice + "\n" + embed.Description
+	}
+	if spec.NextTitle != "" {
+		embed.Fields = append(embed.Fields, &discordgo.MessageEmbedField{Name: "Up next", Value: linkedTitle(spec.NextTitle, spec.NextURL, maxTrackTitleLen)})
 	}
 
 	if spec.ThumbnailURL != "" {
@@ -110,19 +117,20 @@ func BuildPlaybackCard(spec PlaybackCardSpec) (*discordgo.MessageEmbed, []discor
 	}
 
 	if !spec.ShowControls {
-		return embed, nil
+		return embed, []discordgo.MessageComponent{playbackNavigation()}
 	}
 
 	pauseLabel := "Pause"
-	pauseStyle := discordgo.SecondaryButton
+	pauseStyle := discordgo.PrimaryButton
 	if spec.Paused {
 		pauseLabel = "Resume"
-		pauseStyle = discordgo.PrimaryButton
 	}
 
 	loopStyle := discordgo.SecondaryButton
+	loopLabel := "Repeat off"
 	if spec.LoopEnabled {
 		loopStyle = discordgo.SuccessButton
+		loopLabel = "Repeat on"
 	}
 
 	components := []discordgo.MessageComponent{
@@ -135,11 +143,11 @@ func BuildPlaybackCard(spec PlaybackCardSpec) (*discordgo.MessageEmbed, []discor
 				},
 				discordgo.Button{
 					Label:    "Skip",
-					Style:    discordgo.PrimaryButton,
+					Style:    discordgo.SecondaryButton,
 					CustomID: BuildCustomID(ActionPlaybackSkip, ComponentMetadata{}),
 				},
 				discordgo.Button{
-					Label:    "Loop",
+					Label:    loopLabel,
 					Style:    loopStyle,
 					CustomID: BuildCustomID(ActionPlaybackToggleLoop, ComponentMetadata{}),
 				},
@@ -150,9 +158,17 @@ func BuildPlaybackCard(spec PlaybackCardSpec) (*discordgo.MessageEmbed, []discor
 				},
 			},
 		},
+		playbackNavigation(),
 	}
 
 	return embed, components
+}
+
+func playbackNavigation() discordgo.ActionsRow {
+	return discordgo.ActionsRow{Components: []discordgo.MessageComponent{
+		discordgo.Button{Label: "Queue", Style: discordgo.SecondaryButton, CustomID: BuildCustomID(ActionQueuePage, ComponentMetadata{Page: 1})},
+		discordgo.Button{Label: "Refresh player", Style: discordgo.SecondaryButton, CustomID: string(ActionPlaybackShow)},
+	}}
 }
 
 func BuildQueueCard(spec QueueCardSpec) (*discordgo.MessageEmbed, []discordgo.MessageComponent) {
@@ -161,7 +177,7 @@ func BuildQueueCard(spec QueueCardSpec) (*discordgo.MessageEmbed, []discordgo.Me
 		Color: ColorInfo,
 		Fields: []*discordgo.MessageEmbedField{
 			{
-				Name: "Now Playing",
+				Name: fallback(spec.NowPlayingStatus, "Now playing"),
 				Value: formatNowPlayingValue(
 					spec.NowPlayingTitle,
 					spec.NowPlayingURL,
@@ -169,17 +185,25 @@ func BuildQueueCard(spec QueueCardSpec) (*discordgo.MessageEmbed, []discordgo.Me
 					spec.NowPlayingProgress,
 				),
 			},
-			{
-				Name:  "Up Next",
-				Value: formatUpcoming(spec.Upcoming),
-			},
 		},
 		Footer: &discordgo.MessageEmbedFooter{
 			Text: queueFooter(spec),
 		},
 	}
+	// One field per item keeps long titles/artists within Discord's 1,024
+	// character field limit without silently dropping entries from a page.
+	for _, entry := range spec.Upcoming[:min(len(spec.Upcoming), queuePageSize)] {
+		value := linkedTitle(entry.Title, entry.URL, maxQueueEntryLen)
+		if entry.Artist != "" {
+			value += "\n" + escapeMarkdownLabel(truncate(entry.Artist, maxArtistLen))
+		}
+		embed.Fields = append(embed.Fields, &discordgo.MessageEmbedField{Name: fmt.Sprintf("%d. Up next", entry.Position), Value: value})
+	}
+	if len(spec.Upcoming) == 0 {
+		embed.Fields = append(embed.Fields, &discordgo.MessageEmbedField{Name: "Up next", Value: "Nothing queued. Add a song with `/play`."})
+	}
 
-	var components []discordgo.MessageComponent
+	buttons := make([]discordgo.MessageComponent, 0, 3)
 	if spec.TotalPages > 1 {
 		prevPage := spec.Page - 1
 		if prevPage < 1 {
@@ -190,27 +214,24 @@ func BuildQueueCard(spec QueueCardSpec) (*discordgo.MessageEmbed, []discordgo.Me
 			nextPage = spec.TotalPages
 		}
 
-		components = []discordgo.MessageComponent{
-			discordgo.ActionsRow{
-				Components: []discordgo.MessageComponent{
-					discordgo.Button{
-						Label:    "Prev",
-						Style:    discordgo.SecondaryButton,
-						CustomID: BuildCustomID(ActionQueuePage, ComponentMetadata{Page: prevPage}),
-						Disabled: spec.Page <= 1,
-					},
-					discordgo.Button{
-						Label:    "Next",
-						Style:    discordgo.SecondaryButton,
-						CustomID: BuildCustomID(ActionQueuePage, ComponentMetadata{Page: nextPage}),
-						Disabled: spec.Page >= spec.TotalPages,
-					},
-				},
+		buttons = append(buttons,
+			discordgo.Button{
+				Label:    "Prev",
+				Style:    discordgo.SecondaryButton,
+				CustomID: BuildCustomID(ActionQueuePage, ComponentMetadata{Page: prevPage}),
+				Disabled: spec.Page <= 1,
 			},
-		}
+			discordgo.Button{
+				Label:    "Next",
+				Style:    discordgo.SecondaryButton,
+				CustomID: BuildCustomID(ActionQueuePage, ComponentMetadata{Page: nextPage}),
+				Disabled: spec.Page >= spec.TotalPages,
+			},
+		)
 	}
 
-	return embed, components
+	buttons = append(buttons, discordgo.Button{Label: "Player", Style: discordgo.SecondaryButton, CustomID: string(ActionPlaybackShow)})
+	return embed, []discordgo.MessageComponent{discordgo.ActionsRow{Components: buttons}}
 }
 
 func BuildStatusCard(spec StatusCardSpec) *discordgo.MessageEmbed {
@@ -245,6 +266,8 @@ func ParseCustomID(id string) (ComponentAction, ComponentMetadata, error) {
 		return ActionPlaybackToggleLoop, ComponentMetadata{}, nil
 	case string(ActionPlaybackStop):
 		return ActionPlaybackStop, ComponentMetadata{}, nil
+	case string(ActionPlaybackShow):
+		return ActionPlaybackShow, ComponentMetadata{}, nil
 	}
 
 	if !strings.HasPrefix(id, string(ActionQueuePage)+":") {
@@ -274,30 +297,12 @@ func formatNowPlayingValue(title, url, artist, progress string) string {
 
 	line := linkedTitle(title, url, maxQueueEntryLen)
 	if artist != "" {
-		line += "\n" + truncate(artist, maxArtistLen)
+		line += "\n" + escapeMarkdownLabel(truncate(artist, maxArtistLen))
 	}
 	if progress != "" {
 		line += "\n" + progress
 	}
 	return line
-}
-
-func formatUpcoming(entries []QueueEntrySpec) string {
-	if len(entries) == 0 {
-		return "No upcoming tracks."
-	}
-
-	lines := make([]string, 0, len(entries))
-	for _, entry := range entries {
-		title := linkedTitle(entry.Title, entry.URL, maxQueueEntryLen)
-		line := fmt.Sprintf("%d. %s", entry.Position, title)
-		if entry.Artist != "" {
-			line += " - " + truncate(entry.Artist, maxArtistLen)
-		}
-		lines = append(lines, line)
-	}
-
-	return strings.Join(lines, "\n")
 }
 
 func queueFooter(spec QueueCardSpec) string {
@@ -310,7 +315,7 @@ func queueFooter(spec QueueCardSpec) string {
 		totalPages = 1
 	}
 
-	text := fmt.Sprintf("Page %d/%d • %d tracks total", page, totalPages, spec.TotalTracks)
+	text := fmt.Sprintf("Page %d/%d • %d tracks remaining", page, totalPages, spec.TotalTracks)
 	if spec.LoopEnabled {
 		text += " • Loop on"
 	}
@@ -318,7 +323,7 @@ func queueFooter(spec QueueCardSpec) string {
 }
 
 func mentionUser(userID string) string {
-	if userID == "" {
+	if userID == "" || len(userID) > 32 || strings.IndexFunc(userID, func(r rune) bool { return r < '0' || r > '9' }) >= 0 {
 		return "Unknown"
 	}
 	return "<@" + userID + ">"
@@ -350,6 +355,9 @@ func escapeMarkdownLabel(value string) string {
 		"`", "\\`",
 		"~", "\\~",
 		"|", "\\|",
+		"@", "@\u200b",
+		"<", "\\<",
+		">", "\\>",
 	)
 	return replacer.Replace(value)
 }

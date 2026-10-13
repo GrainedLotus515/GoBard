@@ -1,7 +1,9 @@
 package botui
 
 import (
+	"strings"
 	"testing"
+	"unicode/utf16"
 
 	"github.com/bwmarrin/discordgo"
 )
@@ -32,14 +34,14 @@ func TestBuildPlaybackCardIncludesControlsAndMetadata(t *testing.T) {
 	if embed.Thumbnail == nil || embed.Thumbnail.URL != "https://example.com/thumb.jpg" {
 		t.Fatalf("embed.Thumbnail = %#v", embed.Thumbnail)
 	}
-	if len(embed.Fields) != 3 {
-		t.Fatalf("len(embed.Fields) = %d, want 3", len(embed.Fields))
+	if len(embed.Fields) != 2 {
+		t.Fatalf("len(embed.Fields) = %d, want 2", len(embed.Fields))
 	}
 	if embed.Fields[1].Value != "<@1234>" {
 		t.Fatalf("requested by field = %q", embed.Fields[1].Value)
 	}
-	if len(components) != 1 {
-		t.Fatalf("len(components) = %d, want 1", len(components))
+	if len(components) != 2 {
+		t.Fatalf("len(components) = %d, want 2", len(components))
 	}
 
 	row, ok := components[0].(discordgo.ActionsRow)
@@ -83,7 +85,7 @@ func TestBuildQueueCardPaginatesAndDisablesButtons(t *testing.T) {
 	if got := embed.Fields[0].Value; got == "" || got == "Nothing is currently playing." {
 		t.Fatalf("now playing field = %q", got)
 	}
-	if got := embed.Footer.Text; got != "Page 1/2 • 9 tracks total • Loop on" {
+	if got := embed.Footer.Text; got != "Page 1/2 • 9 tracks remaining • Loop on" {
 		t.Fatalf("embed.Footer.Text = %q", got)
 	}
 
@@ -165,5 +167,27 @@ func TestParseCustomIDRoundTrip(t *testing.T) {
 func TestQueuePageSize(t *testing.T) {
 	if got := QueuePageSize(); got != 8 {
 		t.Fatalf("QueuePageSize() = %d, want 8", got)
+	}
+}
+
+func TestQueueCardKeepsLongMetadataWithinDiscordLimits(t *testing.T) {
+	entries := make([]QueueEntrySpec, 8)
+	for i := range entries {
+		entries[i] = QueueEntrySpec{Position: i + 2, Title: strings.Repeat("[🎵", 100), Artist: strings.Repeat("@everyone*", 20), URL: "https://www.youtube.com/watch?v=fixture"}
+	}
+	card, _ := BuildQueueCard(QueueCardSpec{NowPlayingTitle: "Current", Upcoming: entries, Page: 1, TotalPages: 1, TotalTracks: 9})
+	if len(card.Fields) != 9 {
+		t.Fatal("queue page lost tracks")
+	}
+	total := len(utf16.Encode([]rune(card.Title + card.Footer.Text)))
+	for _, field := range card.Fields {
+		units := len(utf16.Encode([]rune(field.Value)))
+		if units > 1024 || strings.Contains(field.Value, "@everyone") {
+			t.Fatal("oversized field or untrusted mention")
+		}
+		total += units + len(utf16.Encode([]rune(field.Name)))
+	}
+	if total > 6000 {
+		t.Fatal("oversized embed")
 	}
 }

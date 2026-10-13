@@ -83,6 +83,8 @@ func MapInteraction(i *discordgo.InteractionCreate) (MappedInteraction, error) {
 		case botui.ActionQueuePage:
 			out.Name = "queue"
 			out.Page = meta.Page
+		case botui.ActionPlaybackShow:
+			out.Name = "now-playing"
 		default:
 			return out, errors.New("unrecognized control")
 		}

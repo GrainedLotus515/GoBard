@@ -254,7 +254,7 @@ func TestRuntimeQueuePaginationPreservesOneBasedPositions(t *testing.T) {
 		s.Tracks[i].Title = "track"
 	}
 	card, components := runtimeQueueCard(s, 2)
-	if !strings.Contains(card.Footer.Text, "Page 2/3") || !strings.Contains(card.Fields[1].Value, "10.") {
+	if !strings.Contains(card.Footer.Text, "Page 2/3") || !strings.HasPrefix(card.Fields[1].Name, "10.") {
 		t.Fatalf("wrong second page: %+v", card)
 	}
 	row, ok := components[0].(discordgo.ActionsRow)

@@ -2,7 +2,6 @@ package bot
 
 import (
 	"context"
-	"fmt"
 	"net/http"
 	"time"
 
@@ -74,9 +73,9 @@ func (r *Runtime) observe(guild string, target *session.Session) {
 			continue
 		}
 		ctx, cancel := context.WithTimeout(r.ctx, 8*time.Second)
-		message := fmt.Sprintf("Playback attempt failed after %d delivered frames. %s", result.Frames, commandMessage(result.Failure))
+		message := "Playback interrupted. " + commandMessage(result.Failure)
 		if snapshot.Recovery == "source_resume" {
-			message += " Resuming once from the last delivered position."
+			message = "The music connection dropped. Resuming from where it stopped…"
 		}
 		err = r.rest.send(ctx, http.MethodPost, "channels/"+channel+"/messages", &discordgo.MessageSend{Content: message, AllowedMentions: noAllowedMentions()}, true)
 		cancel()

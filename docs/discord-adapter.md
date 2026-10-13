@@ -75,12 +75,19 @@ separate configurable play cap, and a 16-entry rejection queue with two workers.
 Per-guild UI observers coalesce terminal failure notices. All GoBard work enters
 a shutdown barrier; callbacks cannot create resources after shutdown begins.
 
-The SDK REST rate-limit sleeps ignore context. Four consumed endpoints use a
-small adapter-local HTTP implementation (respond, edit, channel message, command
+The SDK REST rate-limit sleeps ignore context. Consumed endpoints use a
+small adapter-local HTTP implementation (respond, edit, ephemeral follow-up,
+channel message, command
 overwrite), with 8-second requests, no redirects, 64 KiB response drain and no
 hidden retry. Registration owns a three-attempt budget. SDK automatic Gateway
 reconnect is disabled; GoBard owns three reconnect attempts. Gateway sockets
 close on root cancellation and writes have five-second deadlines.
+
+Rejected component mutations use ephemeral follow-ups after acknowledging the
+button, leaving the shared player message intact. Queue/Player/Refresh buttons
+map to read-only inspection. The session snapshot's pending transition supports
+truthful UI labels without moving queue policy into the adapter. See
+[the interface contract](discord-interface.md) for rendering and refresh behavior.
 
 SDK `VoiceStateUpdate` can dereference a nil connection; the adapter uses its
 synchronized `GatewayWriteStruct` capability. The SDK itself holds its socket

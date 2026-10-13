@@ -119,6 +119,14 @@ func (r *Runtime) executeInteraction(ref interactionRef, m MappedInteraction) {
 		return
 	}
 	snapshot, accepted, err := r.execute(ctx, m)
+	if err != nil && m.Component {
+		// A rejected control must not replace the shared player or its buttons.
+		err = r.rest.send(ctx, http.MethodPost, "webhooks/"+ref.app+"/"+ref.token, &discordgo.WebhookParams{Content: commandMessage(err), Flags: discordgo.MessageFlagsEphemeral, AllowedMentions: noAllowedMentions()}, false)
+		if err != nil && r.ctx.Err() == nil {
+			r.logger.Warn("Control response could not be delivered", "event", "discord.response", "error", err)
+		}
+		return
+	}
 	var embed *discordgo.MessageEmbed
 	var components []discordgo.MessageComponent
 	if err != nil {
@@ -205,13 +213,13 @@ func commandMessage(err error) string {
 		}
 		switch classified.Category {
 		case failure.Authentication:
-			return "The provider or Discord rejected authentication. No automatic authentication bypass is attempted."
+			return "This track or connection is currently unavailable. Try another track or reconnect the bot."
 		case failure.Throttled:
 			return "The external service is rate limiting requests. Try again later."
 		case failure.Unavailable:
 			return "The requested media is unavailable."
 		}
-		return "The operation failed at " + classified.Stage + ". The production log records its classified result."
+		return "Something interrupted playback. Try again, or choose another track."
 	}
 	return "The operation could not be applied. Check the queue, voice channel, and command values."
 }
@@ -221,46 +229,54 @@ func runtimeCard(m MappedInteraction, s session.Snapshot, accepted int) (*discor
 		return runtimeQueueCard(s, m.Page)
 	}
 	if m.Name == "config" {
-		return botui.BuildStatusCard(botui.StatusCardSpec{Title: "Configuration", Description: fmt.Sprintf("Volume: %d%%\nReduce volume when speaking: %t\nSpeaking volume target: %d%%", s.Volume, s.Ducking, s.DuckTarget), Color: botui.ColorInfo}), nil
+		ducking := "Off"
+		if s.Ducking {
+			ducking = "On"
+		}
+		return botui.BuildStatusCard(botui.StatusCardSpec{Title: "Server playback settings", Description: fmt.Sprintf("Volume: **%d%%**\nLower music while people speak: **%s**\nSpeaking volume: **%d%%**", s.Volume, ducking, s.DuckTarget), Color: botui.ColorInfo, Footer: "Settings apply until the bot restarts."}), nil
 	}
-	if m.Name == "play" {
-		return botui.BuildStatusCard(botui.StatusCardSpec{Title: "Added to queue", Description: fmt.Sprintf("Accepted %d track(s). Playback and provider failures are reported separately.", accepted), Color: botui.ColorSuccess}), nil
+	if m.Name == "stop" {
+		return botui.BuildStatusCard(botui.StatusCardSpec{Title: "Stopping playback", Description: "Clearing the queue and leaving voice. Use `/play` to start again.", Color: botui.ColorInfo}), nil
+	}
+	if m.Name == "disconnect" {
+		return botui.BuildStatusCard(botui.StatusCardSpec{Title: "Leaving voice", Description: "Your queue is saved for this session. Use `/play` to reconnect.", Color: botui.ColorInfo}), nil
 	}
 	if s.Current >= 0 && s.Current < len(s.Tracks) {
 		t := s.Tracks[s.Current]
-		status := "Queued"
-		if s.Active {
-			status = "Starting playback"
+		spec := botui.PlaybackCardSpec{Title: t.Title, URL: t.URL, Artist: t.Artist, ThumbnailURL: t.Thumbnail, Length: trackLength(t), RequestedBy: t.RequestedBy, ContextLabel: playbackLabel(s), ContextValue: runtimeProgress(s.Position, t.Duration), Footer: fmt.Sprintf("Volume %d%% • %d up next • Refresh to update", s.Volume, len(s.Tracks)-s.Current-1), ShowControls: s.Connected, Paused: s.Paused, LoopEnabled: s.Loop, Notice: actionNotice(m.Name, accepted)}
+		if t.Live {
+			spec.ContextValue = runtimeDuration(s.Position)
 		}
-		if s.Frames > 0 {
-			status = "Delivering audio"
+		if s.Current+1 < len(s.Tracks) {
+			next := s.Tracks[s.Current+1]
+			spec.NextTitle, spec.NextURL = next.Title, next.URL
 		}
-		if s.Paused {
-			status = "Paused"
-		}
-		if !s.Connected {
-			status = "Disconnected; selection retained"
-		}
-		return botui.BuildPlaybackCard(botui.PlaybackCardSpec{Title: t.Title, URL: t.URL, Artist: t.Artist, ThumbnailURL: t.Thumbnail, Length: runtimeDuration(t.Duration), RequestedBy: t.RequestedBy, ContextLabel: status, ContextValue: runtimeDuration(s.Position), Footer: fmt.Sprintf("Volume %d%% • %d tracks", s.Volume, len(s.Tracks)), ShowControls: s.Connected, Paused: s.Paused, LoopEnabled: s.Loop})
+		return botui.BuildPlaybackCard(spec)
 	}
-	return botui.BuildStatusCard(botui.StatusCardSpec{Title: "Playback idle", Description: "No track is selected.", Color: botui.ColorInfo}), nil
+	return botui.BuildStatusCard(botui.StatusCardSpec{Title: "Nothing playing", Description: "Join a voice channel and use `/play` with a song name or YouTube link.", Color: botui.ColorInfo}), nil
 }
 
 func runtimeDuration(d time.Duration) string {
-	return fmt.Sprintf("%02d:%02d", int(d/time.Minute), int(d/time.Second)%60)
+	d = max(d, 0)
+	if d >= time.Hour {
+		return fmt.Sprintf("%d:%02d:%02d", int(d/time.Hour), int(d/time.Minute)%60, int(d/time.Second)%60)
+	}
+	return fmt.Sprintf("%d:%02d", int(d/time.Minute), int(d/time.Second)%60)
 }
 func runtimeQueueCard(s session.Snapshot, page int) (*discordgo.MessageEmbed, []discordgo.MessageComponent) {
 	start := max(0, s.Current+1)
 	count := len(s.Tracks) - start
 	pages := max(1, (count+7)/8)
 	page = min(max(page, 1), pages)
-	spec := botui.QueueCardSpec{Page: page, TotalPages: pages, TotalTracks: len(s.Tracks), LoopEnabled: s.Loop}
+	spec := botui.QueueCardSpec{Page: page, TotalPages: pages, TotalTracks: count, LoopEnabled: s.Loop}
 	if s.Current >= 0 && s.Current < len(s.Tracks) {
 		t := s.Tracks[s.Current]
+		spec.NowPlayingStatus = playbackLabel(s)
 		spec.NowPlayingTitle = t.Title
 		spec.NowPlayingURL = t.URL
 		spec.NowPlayingArtist = t.Artist
-		spec.NowPlayingProgress = runtimeDuration(s.Position)
+		spec.NowPlayingProgress = runtimeDuration(s.Position) + " / " + trackLength(t)
+		spec.TotalTracks++
 	}
 	for i := start + (page-1)*8; i < min(start+page*8, len(s.Tracks)); i++ {
 		t := s.Tracks[i]

@@ -82,6 +82,16 @@ idle container stopped in 1.298 seconds, exit 0, no OOM, and is retained as
 
 ## Remaining gates and risks
 
+The player interface received a user-requested usability pass after the successful
+audio rerun. `/play` again exposes track details and controls; Queue/Refresh
+navigation, visible repeat state and private button errors are implemented.
+Docker race/lint/build/smoke passed for this pass. The Discord client rendering
+still needs review; automatic player-message updates and final interaction polish
+remain unfinished. See [the interface contract](../discord-interface.md).
+The local test bot now runs interface image
+`sha256:3d724397e82a6d7b8a29f623cc633120c847b57527f12db5605ba096dc07acb5`.
+The preceding timing image is retained as stopped `gobard-v2-test-074ce6c`.
+
 1. Live controls, voice reconnect and shutdown during active audio still need
    user-driven Discord tests. The latest listening rerun, source resume and
    pipeline completion passed live. Earlier stuttering has not been attributed
