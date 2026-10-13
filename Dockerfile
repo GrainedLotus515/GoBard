@@ -198,6 +198,11 @@ HEALTHCHECK NONE
 COPY --from=capacity-bench-builder --chown=root:root --chmod=0555 /out/gobard-capacity-bench /app/gobard-capacity-bench
 ENTRYPOINT ["/app/gobard-capacity-bench"]
 
+# Exercise the operator helper with an isolated fake Docker state machine.
+FROM runtime AS local-test-check
+COPY --chown=root:root scripts/local-test.py scripts/test_local_test.py /checks/
+RUN python3 -B -m unittest discover -s /checks -p 'test_*.py'
+
 # Keep the hardened bot runtime as the default Dockerfile result. The capacity
 # runner is build-only and selected explicitly by docker-compose.bench.yml.
 FROM runtime AS final

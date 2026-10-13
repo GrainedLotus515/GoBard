@@ -1,4 +1,4 @@
-.PHONY: help docker-test docker-lint docker-build docker-bench docker-profile-check docker-run docker-run-medium docker-run-large docker-run-secrets docker-prod-run docker-prod-run-secrets docker-stop docker-logs docker-smoke clean
+.PHONY: help docker-test docker-lint docker-build docker-bench docker-profile-check docker-run docker-run-medium docker-run-large docker-run-secrets docker-prod-run docker-prod-run-secrets docker-stop docker-logs docker-smoke clean local-test-start local-test-update local-test-status local-test-stop
 
 DOCKER ?= docker
 COMPOSE ?= $(DOCKER) compose
@@ -16,6 +16,19 @@ help: ## Show this help message
 
 docker-test: ## Run the race-enabled Go test stage in Docker
 	$(DOCKER) build --target test --progress=plain .
+	$(DOCKER) build --target local-test-check --progress=plain .
+
+local-test-start: ## Start the isolated local test bot (first start needs a private env file)
+	python3 scripts/local-test.py start
+
+local-test-update: docker-build ## Update only the isolated local test bot, preserving its cache
+	python3 scripts/local-test.py update
+
+local-test-status: ## Read local test bot health without printing secrets
+	python3 scripts/local-test.py status
+
+local-test-stop: ## Stop only the local test bot, retaining its named cache volume
+	python3 scripts/local-test.py stop
 
 docker-lint: ## Run read-only formatting and vet checks in Docker
 	$(DOCKER) build --target lint --progress=plain .
