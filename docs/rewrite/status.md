@@ -1,4 +1,4 @@
-# Rewrite status — 2026-10-12
+# Rewrite status — 2026-10-13
 
 The v2 runtime is implemented and running as local `gobard-v2-test`.
 The original local `gobard-temp` remains stopped. No VPS service, persisted user
@@ -17,6 +17,10 @@ cache, secrets configuration or image publisher was changed.
   position; verified with a real source interruption on 2026-10-09.
 - `074ce6c`: bounded startup/read/send timing summaries with Docker quality
   gates and measured short capacity regression checks.
+- `8772466`: restored player cards, playback controls and private errors.
+- `947f542`: automatic player/queue updates, concurrent interaction tests and
+  explicit containment/review of temporary SDK lifecycle limits.
+- `779cba2`: durable isolated local test helper, cache preservation and rollback.
 
 All inventoried commands and buttons have replacement mapping/core tests.
 Permissions and queue lifecycle policy live in the session owner. Charm events
@@ -80,33 +84,44 @@ The local bot is healthy with reconciled commands after refresh. The preceding
 idle container stopped in 1.298 seconds, exit 0, no OOM, and is retained as
 `gobard-v2-test-6d7070f`; the same temporary test cache is preserved.
 
-## Remaining gates and risks
+## Acceptance candidate
 
-The player interface received a user-requested usability pass after the successful
-audio rerun. `/play` again exposes track details and controls; Queue/Refresh
-navigation, visible repeat state and private button errors are implemented.
-Docker race/lint/build/smoke passed for this pass. The Discord client rendering
-still needs review; automatic player-message updates and final interaction polish
-remain unfinished. See [the interface contract](../discord-interface.md).
-The local test bot now runs interface image
-`sha256:3d724397e82a6d7b8a29f623cc633120c847b57527f12db5605ba096dc07acb5`.
-The preceding timing image is retained as stopped `gobard-v2-test-074ce6c`.
+Automatic player/queue updates are implemented and tested: state changes, sampled
+progress, stale buttons, private failures, concurrent controls, deleted messages,
+cancellation and bounded rate-limit recovery. Docker race tests, five local-helper
+safety tests, lint (zero issues), hardened build/smoke and Compose profiles passed.
+A final 30-second 4/12/24-guild regression passed with no gaps over 60 ms, worker
+failures or retained files; the earlier fifteen-minute soak remains the sustained
+measurement. See [performance](../performance.md) and [interface](../discord-interface.md).
+
+The local bot runs `sha256:9186c751a4677255212a658f7d497ad3edf570912fb0e17c3f58bf513377c076`,
+with Gateway and commands ready. Its completed test media was copied to
+`gobard-v2-test-cache` and verified by SHA-256; the original test copy remains.
+The preceding image is retained as stopped `gobard-v2-test-previous` (exit zero,
+no OOM). Start/status/stop/update commands and safety boundaries are documented
+in [deployment](../deployment.md#durable-local-acceptance-instance).
+An additional idle stop/start passed, with the same cache checksum and healthy
+Gateway/command readiness. The original `gobard-temp` remains stopped.
+
+## Remaining gates and risks
 
 1. Live controls, voice reconnect and shutdown during active audio still need
    user-driven Discord tests. The latest listening rerun, source resume and
    pipeline completion passed live. Earlier stuttering has not been attributed
    to a cause; one successful run does not establish provider-wide reliability.
-2. The temporary SDK exposes no strict join for heartbeat/listener/internal
-   event goroutines. GoBard joins its own work/callbacks, closes sockets and
-   disables automatic SDK retries; native DAVE remains non-preemptible.
-   These limitations are documented in [the adapter contract](../discord-adapter.md).
+2. The temporary SDK exposes no strict join for private workers, and some voice
+   heartbeat reconnects ignore its disabled AutoReconnect setting. Containment
+   is implemented, but strict completion needs an explicit temporary exception
+   or upstream/separate-library fix. See [the source review](sdk-lifecycle-review.md).
+   No exception is implicitly approved by a successful user test.
 3. YouTube may reject authentication/automation externally. No personal cookies,
    auth bypass or unsupported fallback is required or implemented.
 4. Spotify metadata/player control and public self-hosted sources remain
    assessed proposals; there is no independent Spotify audio backend.
 
-The full production rewrite is **not declared complete** until live playback
-gates are resolved and SDK limitations are accepted or addressed. No automatic
+The [acceptance checklist](acceptance-checklist.md) consolidates the remaining
+client tests. The full rewrite is **not declared complete** until those gates
+are resolved and SDK limitations are accepted or addressed. No automatic
 VPS rollout or image publication is authorized.
 
 User changes to `AGENTS.md`, removal of `CLAUDE.md`, and the pre-existing

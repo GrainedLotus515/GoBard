@@ -7,7 +7,9 @@ It does not support Spotify, SponsorBlock, YouTube API keys, arbitrary audio URL
 This rewrite branch starts the v2 runtime. Offline playback/race/quality gates
 and real YouTube/Discord audio with source recovery to pipeline completion are
 verified, with a successful listening rerun. Live controls and voice reconnect
-remain test gates. See [rewrite status](docs/rewrite/status.md)
+remain test gates. Private SDK lifecycle limitations also need an explicit
+exception or library fix; listening tests cannot establish strict worker joins.
+See [rewrite status](docs/rewrite/status.md)
 before considering a rollout. No v2 image has been published or deployed to the VPS.
 
 ## Quick start
@@ -137,9 +139,19 @@ Commands are guild-only. `/play` accepts a search query or an exact HTTPS YouTub
 
 Available controls include `/play`, `/pause`, `/resume`, `/skip`, `/stop`, `/disconnect`, `/queue`, `/now-playing`, `/clear`, `/shuffle`, `/loop`, `/volume`, `/seek`, `/fseek`, `/move`, `/remove`, and `/config`.
 
+The active player shows track details and Pause/Resume, Skip, Repeat, Stop and
+Queue controls. It follows track/state changes automatically, with progress in
+15-second steps. Older messages can be refreshed; outdated mutation buttons
+return a private explanation. See [the interface contract](docs/discord-interface.md).
+
 ## Development
 
 Docker is the supported development environment because it supplies libdave. Do not rely on a native build unless libdave is intentionally installed and configured.
+
+The isolated acceptance bot has `make local-test-start`, `local-test-status`,
+`local-test-stop` and `local-test-update` commands. Its dedicated cache survives
+container replacement. [Setup and safety boundaries](docs/deployment.md#durable-local-acceptance-instance)
+are separate from production Compose.
 
 ```bash
 make docker-test    # Go tests with -race

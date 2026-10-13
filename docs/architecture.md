@@ -78,3 +78,12 @@ holds an explicit session reservation so queue-drain cleanup cannot race a new
 play lookup. Stop invalidates reservations and cancels joins. Discord callbacks
 perform bounded admission; accepted handler goroutines are canceled and joined
 by the adapter before its dependencies close.
+
+Acceptance preparation decision (2026-10-13): the existing joined guild observer
+owns automatic message updates. One active panel per admitted guild stores only
+bounded IDs and view state. A cancellable capacity-one gate serializes edits;
+no registry lock spans HTTP and no interaction token is retained. Observations
+predating a newly rendered command cannot overwrite it. A shared `netguard`
+socket helper bounds context-free SDK WebSocket writes and joins its own
+cancellation callback. It does not promise joins for private SDK workers; see
+[the specific lifecycle exception](rewrite/sdk-lifecycle-review.md).

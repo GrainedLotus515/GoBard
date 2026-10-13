@@ -1,9 +1,10 @@
-# V2 implementation report — 2026-10-12
+# V2 implementation report — 2026-10-13
 
 The runtime has been replaced and is available for local Discord testing. It is
-not declared a completed production rewrite: live controls, voice reconnect
-and active SDK shutdown still require verification. The latest listening rerun
-was reported successful; the earlier stutter's cause remains unresolved.
+not declared a completed production rewrite: the client acceptance pass remains,
+and the pinned SDK lifecycle exception requires an explicit decision or library
+fix. The latest listening rerun was reported successful; the earlier stutter's
+cause remains unresolved.
 
 ## Implemented
 
@@ -26,8 +27,13 @@ was reported successful; the earlier stutter's cause remains unresolved.
   SOPS/age deployment compatibility retained; explicit migration/rollout docs.
 - Restored `/play` track card and playback controls, current progress/next track,
   Queue/Refresh navigation and private errors that preserve shared player cards.
-  The [interface contract](../discord-interface.md) records snapshot behavior;
-  automatic message updates and final client-side usability review are unfinished.
+  One active player/queue message follows state and sampled progress automatically;
+  stale mutation buttons are rejected privately. Deleted messages, cancellation
+  and rate limits have finite update policies. See [the interface contract](../discord-interface.md).
+- Durable local test start/status/stop/update helper, labeled named cache volume,
+  readiness rollback and private configuration transfer. Production cache is untouched.
+- Shared cancellable WebSocket guard, disabled public voice AutoReconnect,
+  locked connection snapshots for manager shutdown and exact SDK source review.
 
 ## Verified
 
@@ -57,6 +63,19 @@ was reported successful; the earlier stutter's cause remains unresolved.
 - User-confirmed successful October 12 rerun: one source reset at 180.540
   seconds, then a completed 88.000-second resume. No measured read/send call
   exceeded 60 ms; see [the live timing evidence](live-2026-10-12.md).
+- October 13 Docker race tests, five helper safety tests, lint (zero issues),
+  hardened build/smoke and all three Compose profile checks passed. New fake
+  interaction tests exercise play, concurrent controls, changed permissions and
+  stop; panel tests cover transitions, coalescing, deleted messages and rate limits.
+- Final 30-second 4/12/24-guild regression: no gaps over 60 ms, worker failures
+  or retained temporary files. This does not replace the earlier fifteen-minute
+  soak or verify real Discord UI/DAVE. See [performance](../performance.md).
+- The updated local bot logged in with commands ready. Its one completed test
+  cache file was copied to the named volume and verified by SHA-256; the previous
+  container exited zero without OOM. No production cache was mounted.
+- The helper's subsequent idle stop/start returned the bot to healthy readiness;
+  the completed media checksum still matched and the original `gobard-temp`
+  remained stopped. This verifies idle lifecycle and cache persistence only.
 
 ## External gates and limitations
 
@@ -67,12 +86,18 @@ was reported successful; the earlier stutter's cause remains unresolved.
   and the earlier stutter's cause remains unresolved.
 - YouTube authentication/anti-bot rejection remains possible and is terminal
   when appropriate. A rewrite cannot guarantee provider availability.
-- The current SDK exposes no strict heartbeat/listener join and has internal
-  asynchronous event work. GoBard joins its own work and callbacks, cancels
-  sockets and disables SDK automatic retries; native DAVE is non-preemptible.
-  The future independent Discord library must close these contract gaps.
+- The current SDK exposes no strict heartbeat/listener join. Some voice heartbeat
+  reconnect paths ignore the disabled AutoReconnect flag. GoBard cancels its
+  sockets and joins its own work; native DAVE is non-preemptible. The exact
+  [SDK lifecycle review](sdk-lifecycle-review.md) records containment and the
+  unresolved exception. User listening tests cannot waive it.
 - No VPS rollout, production-cache migration, credential rotation, image push
-  or publisher change occurred. Local testing uses a separate temporary cache.
+  or publisher change occurred. Local testing uses its separate labeled volume.
+
+The remaining user-facing pass is [the acceptance checklist](acceptance-checklist.md).
+Live client rendering/controls, voice reconnect, active shutdown and multiguild
+listening are still unverified for this candidate. Provider availability remains
+external; the SDK exception is an engineering decision rather than a listening test.
 
 ## Proposed only
 

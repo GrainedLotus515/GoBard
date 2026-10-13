@@ -38,12 +38,14 @@ func (p *playerPanel) acquire(ctx context.Context) error {
 func (p *playerPanel) release() { <-p.gate }
 
 func (r *Runtime) panel(guild string) *playerPanel {
-	if _, ok := r.sessions.Get(guild); !ok {
-		return nil
-	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.stopping {
+		return nil
+	}
+	// Check membership while holding the same brief lock as panel removal;
+	// an older lookup must not recreate a panel after guild cleanup.
+	if _, ok := r.sessions.Get(guild); !ok {
 		return nil
 	}
 	if p := r.panels[guild]; p != nil {
@@ -184,6 +186,6 @@ func (r *Runtime) updatePanel(guild string, s session.Snapshot, now time.Time) {
 		if status != nil {
 			code = status.code
 		}
-		r.logger.Warn("Player update unavailable", "event", "discord.panel", "failures", p.failures, "automatic_updates", p.message != "", "http_status", code, "retry_after_seconds", p.next.Sub(now).Seconds(), "error", err)
+		r.logger.Warn("Player update unavailable", "event", "discord.panel", "guild_id", guild, "failures", p.failures, "automatic_updates", p.message != "", "http_status", code, "retry_after_seconds", p.next.Sub(now).Seconds(), "error", err)
 	}
 }

@@ -187,3 +187,29 @@ Separately, an idle real Discord-connected local v2 container handled SIGTERM
 and exited code 0 without OOM in 1.377 seconds. That includes container/SDK
 shutdown overhead but does not prove active DAVE shutdown or a strict join of
 unexposed SDK workers.
+
+## Acceptance preparation regression (2026-10-13)
+
+`GOBARD_BENCH_DURATION=30s make docker-bench` passed on the same i9-12900K.
+The 4/12/24-guild profiles ran concurrently, overlapped quality builds, and used
+7.76/10.72/10.23% of their CPU quotas. Maximum frame gaps were 21.96/21.82/22.91 ms;
+all had zero gaps over 60 ms, worker failures or leftover temporary files.
+Goroutines returned from two to one. Maximum session shutdowns were
+11.11/29.40/27.20 ms. [Raw results](rewrite/capacity-acceptance-2026-10-13.json)
+retain the image and resource measurements. This is a short regression run;
+the earlier fifteen-minute soak remains the sustained evidence.
+
+Microbenchmark samples: synthetic 1,000-frame attempt 109,676 ns, 4,168 B/four
+allocations; real 1,000-frame decoding 207,591,867 ns, 118,480 Go B/91 allocations.
+Cache acquire measured 873.8 ns, 352 B/three allocations; interactive limiter
+95.85 ns, 64 B/two allocations. No controlled speedup is claimed. The workload
+does not exercise Discord UI HTTP, real DAVE or provider networking.
+
+Automatic player state adds one bounded panel per admitted guild, two IDs of at
+most 32 bytes, one view value, a 32-byte digest and a capacity-one ownership gate.
+There is no message history or new worker. Updates use the existing observer,
+at most one automatic HTTP edit per guild per three seconds and fifteen-second
+progress steps. Render payloads have bounded fields/pages; HTTP projects at
+most 64 KiB of response data (plus ReadAll allocation growth), with eight-second
+I/O deadlines. Failed edits stop after three attempts; deleted/forbidden messages
+stop immediately. Interaction concurrency retains the existing 32-handler cap.
