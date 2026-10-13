@@ -6,7 +6,8 @@ It does not support Spotify, SponsorBlock, YouTube API keys, arbitrary audio URL
 
 This rewrite branch starts the v2 runtime. Offline playback/race/quality gates
 and real YouTube/Discord audio with source recovery to pipeline completion are
-verified. Listening quality and live controls remain test gates. See [rewrite status](docs/rewrite/status.md)
+verified, with a successful listening rerun. Live controls and voice reconnect
+remain test gates. See [rewrite status](docs/rewrite/status.md)
 before considering a rollout. No v2 image has been published or deployed to the VPS.
 
 ## Quick start

@@ -2,7 +2,7 @@
 
 | Provider/backend | Metadata | Audio acquisition | Official player | Discord delivery | Status |
 | --- | --- | --- | --- | --- | --- |
-| YouTube/yt-dlp | Search/video/playlist | Conditional on provider availability and permitted use | Separate browser embedding | Through decode/Opus pipeline | Live audio and source recovery to pipeline completion verified; listening quality unresolved |
+| YouTube/yt-dlp | Search/video/playlist | Conditional on provider availability and permitted use | Separate browser embedding | Through decode/Opus pipeline | Live audio/recovery and successful listening rerun verified; source resets remain possible |
 | Local test media | Fixture metadata | Caller-owned bytes | None | Through tested codec/output boundary | Real FFmpeg/Opus slice verified offline; not a public path input |
 | Spotify | Historical track/playlist bridge | No supported raw full-track backend established | SDK/player-control is a separate capability | Not established | Assessed; not enabled |
 | Self-hosted HTTP | Possible | Requires explicit origin/redirect policy | None required | Technically possible | Proposed only |
@@ -24,6 +24,11 @@ On 2026-10-09, another live request resumed once after a connection reset at
 This verifies the recovery path in live use; the user's qualified listening
 report does not establish uninterrupted audibility. See
 [the recorded evidence and resource caveats](rewrite/live-2026-10-09.md).
+
+The October 12 rerun was reported successful by the user. It still required one
+resume after a source reset at 180.540 seconds, then completed; no measured
+read/send calls exceeded 60 ms. [The rerun evidence](rewrite/live-2026-10-12.md)
+records exact timing semantics and does not attribute earlier stutter to gaming.
 
 An independent official-player wrapper would expose device/session selection,
 authorized play/pause/seek, state and errors. It would not imply a PCM reader or

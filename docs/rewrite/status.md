@@ -1,4 +1,4 @@
-# Rewrite status — 2026-10-09
+# Rewrite status — 2026-10-12
 
 The v2 runtime is implemented and running as local `gobard-v2-test`.
 The original local `gobard-temp` remains stopped. No VPS service, persisted user
@@ -15,6 +15,8 @@ cache, secrets configuration or image publisher was changed.
   health shutdown and Docker/profile gate compatibility.
 - `6d7070f`: safe source-reset diagnostics and one bounded resume from delivered
   position; verified with a real source interruption on 2026-10-09.
+- `074ce6c`: bounded startup/read/send timing summaries with Docker quality
+  gates and measured short capacity regression checks.
 
 All inventoried commands and buttons have replacement mapping/core tests.
 Permissions and queue lifecycle policy live in the session owner. Charm events
@@ -50,6 +52,12 @@ separate command acceptance, attempt outcomes, technical categories and recovery
   beyond the source interruption remains unresolved. See [live evidence](live-2026-10-09.md).
 - Idle connected local-container SIGTERM completed in 1.377 seconds, exit 0,
   no OOM. The stopped checkpoint remains as `gobard-v2-test-e7309a5`.
+- On October 12 locally, the user confirmed the rerun worked. A source reset
+  after 9,027 frames triggered one resume; another 4,400 frames completed.
+  Neither attempt recorded read/send calls over 60 ms (read maxima 3 ms;
+  send maxima 22/21 ms). This is a successful listening report plus measured
+  recovery, not proof of gapless delivery or the earlier stutter's cause.
+  See [rerun evidence](live-2026-10-12.md).
 
 The first audible test image was
 `sha256:1f22be9ee97caa798e98f4f677b9731be7c85ba1f148f800ebaf1e144a24932c`.
@@ -74,10 +82,10 @@ idle container stopped in 1.298 seconds, exit 0, no OOM, and is retained as
 
 ## Remaining gates and risks
 
-1. Listening quality, live controls, voice reconnect and shutdown during active
-   audio still need user-driven Discord tests. Source resume and pipeline
-   completion passed live; complete packets accepted by the transport do not
-   establish uninterrupted human audibility or rule out client/network stutter.
+1. Live controls, voice reconnect and shutdown during active audio still need
+   user-driven Discord tests. The latest listening rerun, source resume and
+   pipeline completion passed live. Earlier stuttering has not been attributed
+   to a cause; one successful run does not establish provider-wide reliability.
 2. The temporary SDK exposes no strict join for heartbeat/listener/internal
    event goroutines. GoBard joins its own work/callbacks, closes sockets and
    disables automatic SDK retries; native DAVE remains non-preemptible.

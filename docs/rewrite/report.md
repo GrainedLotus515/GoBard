@@ -1,8 +1,9 @@
-# V2 implementation report — 2026-10-09
+# V2 implementation report — 2026-10-12
 
 The runtime has been replaced and is available for local Discord testing. It is
-not declared a completed production rewrite: listening quality, live controls,
-voice reconnect and active SDK shutdown still require verification.
+not declared a completed production rewrite: live controls, voice reconnect
+and active SDK shutdown still require verification. The latest listening rerun
+was reported successful; the earlier stutter's cause remains unresolved.
 
 ## Implemented
 
@@ -49,13 +50,17 @@ voice reconnect and active SDK shutdown still require verification.
   synthetic overhead sample is recorded in `../performance.md`; live timing
   data for the reported stutter is unavailable retroactively.
 - Idle connected-container SIGTERM: exit 0, no OOM, 1.377-second shutdown.
+- User-confirmed successful October 12 rerun: one source reset at 180.540
+  seconds, then a completed 88.000-second resume. No measured read/send call
+  exceeded 60 ms; see [the live timing evidence](live-2026-10-12.md).
 
 ## External gates and limitations
 
 - Provider retrieval, audible Discord delivery, live source recovery and pipeline
-  completion are confirmed for the observed requests. Listening quality, channel
-  controls and voice reconnect remain unverified. Completion does not establish
-  lossless delivery to the listener.
+  completion are confirmed for the observed requests, with a successful user
+  report on the latest rerun. Channel controls and voice reconnect remain
+  unverified. Completion does not establish lossless delivery to the listener,
+  and the earlier stutter's cause remains unresolved.
 - YouTube authentication/anti-bot rejection remains possible and is terminal
   when appropriate. A rewrite cannot guarantee provider availability.
 - The current SDK exposes no strict heartbeat/listener join and has internal

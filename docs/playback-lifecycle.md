@@ -77,9 +77,10 @@ Tests use a fake extractor executable and real FFmpeg. The v2 pipeline is wired
 into production composition. A local live test confirmed partial YouTube audio
 and human audibility, then exposed a source connection reset after 2,233 frames.
 A subsequent live request resumed once after a reset at 203.980 seconds and
-completed the remaining audio. Listening quality remains unresolved; the
-[live evidence](rewrite/live-2026-10-09.md) distinguishes accepted packets from
-what the listener heard.
+completed the remaining audio. The [October 12 rerun](rewrite/live-2026-10-12.md)
+was reported successful and again exercised source recovery. Earlier stuttering
+remains unexplained; accepted packets and local timings do not prove gapless
+reception at the listener.
 # Managed voice lifecycle
 
 The guild coordinator serializes Connect/Disconnect after the preceding audio
