@@ -34,6 +34,10 @@ reported successful; the earlier stutter's cause remains unresolved.
   readiness rollback and private configuration transfer. Production cache is untouched.
 - Shared cancellable WebSocket guard, disabled public voice AutoReconnect,
   locked connection snapshots for manager shutdown and exact SDK source review.
+- Discord feedback overhaul (`6faf849`): all slash receipts private, one shared
+  card reused for play/queue/player requests, and recovery/failure/queue completion
+  inside that card. Automatic standalone failure posts and their route map were
+  removed. Specific safe guidance replaces generic raw domain-error wording.
 
 ## Verified
 
@@ -76,6 +80,9 @@ reported successful; the earlier stutter's cause remains unresolved.
 - The helper's subsequent idle stop/start returned the bot to healthy readiness;
   the completed media checksum still matched and the original `gobard-temp`
   remained stopped. This verifies idle lifecycle and cache persistence only.
+- The feedback overhaul passed Docker race/lint/build/smoke. New tests cover
+  shared-card reuse, private acknowledgements, error sanitization, recovery
+  versus next-track state, deleted-card recreation and UI rate-limit handling.
 
 ## External gates and limitations
 

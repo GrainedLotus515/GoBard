@@ -144,6 +144,9 @@ The active player shows track details and Pause/Resume, Skip, Repeat, Stop and
 Queue controls. It follows track/state changes automatically, with progress in
 15-second steps. Older messages can be refreshed; outdated mutation buttons
 return a private explanation. See [the interface contract](docs/discord-interface.md).
+Slash commands receive private confirmations. Repeated play and queue requests
+reuse the shared card; interruption, recovery and queue completion update that
+card instead of producing separate channel messages.
 
 ## Development
 

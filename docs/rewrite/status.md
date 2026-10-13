@@ -21,6 +21,8 @@ cache, secrets configuration or image publisher was changed.
 - `947f542`: automatic player/queue updates, concurrent interaction tests and
   explicit containment/review of temporary SDK lifecycle limits.
 - `779cba2`: durable isolated local test helper, cache preservation and rollback.
+- `6faf849`: one evolving shared player/queue card, private slash receipts,
+  inline recovery/failure guidance and no automatic channel notice stream.
 
 All inventoried commands and buttons have replacement mapping/core tests.
 Permissions and queue lifecycle policy live in the session owner. Charm events
@@ -94,7 +96,7 @@ A final 30-second 4/12/24-guild regression passed with no gaps over 60 ms, worke
 failures or retained files; the earlier fifteen-minute soak remains the sustained
 measurement. See [performance](../performance.md) and [interface](../discord-interface.md).
 
-The local bot runs `sha256:9186c751a4677255212a658f7d497ad3edf570912fb0e17c3f58bf513377c076`,
+The prior acceptance bot ran `sha256:9186c751a4677255212a658f7d497ad3edf570912fb0e17c3f58bf513377c076`,
 with Gateway and commands ready. Its completed test media was copied to
 `gobard-v2-test-cache` and verified by SHA-256; the original test copy remains.
 The preceding image is retained as stopped `gobard-v2-test-previous` (exit zero,
@@ -102,6 +104,19 @@ no OOM). Start/status/stop/update commands and safety boundaries are documented
 in [deployment](../deployment.md#durable-local-acceptance-instance).
 An additional idle stop/start passed, with the same cache checksum and healthy
 Gateway/command readiness. The original `gobard-temp` remains stopped.
+
+The Discord feedback overhaul at `6faf849` passed Docker race tests, lint
+(zero issues), runtime build and hardened-image smoke checks. Repeated play,
+queue and player requests create one shared message in deterministic interaction
+tests. Tests also cover safe failure guidance, private acknowledgement, truthful
+recovery/next-track states, explicit deleted-card replacement, and accepted
+commands whose UI update fails. Snapshot request identity and voice recovery
+state support presentation only; playback policy is unchanged. No performance
+improvement is claimed, and this UI work does not establish real client rendering.
+The local bot now runs feedback image
+`sha256:6f5bb7484e1b6d7135db84e03bd07bfeb6002b0f07a3e6d30efa2bd57552d711`;
+Gateway and commands are ready after the idle update. Client appearance and the
+new message flow remain user acceptance checks. The SDK completion blocker stands.
 
 ## Remaining gates and risks
 
