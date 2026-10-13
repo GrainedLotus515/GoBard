@@ -60,6 +60,7 @@ type Access struct {
 // stable across completion until the queue drains, matching existing commands.
 type Snapshot struct {
 	Generation uint64
+	RequestID  string // Current logical request; distinguishes recovery from the next track.
 	Channel    string
 	Tracks     []Track
 	Current    int

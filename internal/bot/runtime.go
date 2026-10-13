@@ -48,7 +48,6 @@ type Runtime struct {
 	removals       chan string
 	mu             sync.Mutex
 	stopping       bool
-	routes         map[string]string
 	panels         map[string]*playerPanel
 	work           sync.WaitGroup
 	once           sync.Once
@@ -69,7 +68,7 @@ func NewRuntime(parent context.Context, cfg *config.Config, sessions *session.Ma
 		return nil, failure.Wrap("discord_initialize", failure.Transport, err)
 	}
 	r := &Runtime{ctx: ctx, cancel: cancel, cfg: cfg, logger: logger, discord: d, rest: newDiscordHTTP(cfg.DiscordToken), state: newGatewayState(), removals: make(chan string, maxGatewayGuilds), sessions: sessions,
-		register: make(chan struct{}, 1), disconnected: make(chan struct{}, 1), slots: make(chan struct{}, 32), playSlots: make(chan struct{}, cfg.PlayCommandConcurrency), rejections: make(chan interactionRef, 16), routes: make(map[string]string)}
+		register: make(chan struct{}, 1), disconnected: make(chan struct{}, 1), slots: make(chan struct{}, 32), playSlots: make(chan struct{}, cfg.PlayCommandConcurrency), rejections: make(chan interactionRef, 16)}
 	r.player, err = command.NewPlayer(ctx, resolver, r, logger, cfg.PlayCommandConcurrency)
 	r.panels = make(map[string]*playerPanel)
 	if err != nil {
@@ -304,7 +303,6 @@ func (r *Runtime) removalLoop() {
 				r.logger.Warn("Guild cleanup failed", "event", "session.remove", "error", err)
 			}
 			r.mu.Lock()
-			delete(r.routes, guild)
 			delete(r.panels, guild)
 			r.mu.Unlock()
 		}

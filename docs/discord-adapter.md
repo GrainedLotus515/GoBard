@@ -73,7 +73,7 @@ voice reconnect and shutdown during active audio remain external test gates.
 `internal/app` composes the source, engine, sessions and Discord runtime.
 Interaction callbacks are synchronous admission only: 32 active handlers, a
 separate configurable play cap, and a 16-entry rejection queue with two workers.
-Per-guild UI observers coalesce terminal failure notices. All GoBard work enters
+Per-guild UI observers coalesce shared-card state and failure updates. All GoBard work enters
 a shutdown barrier; callbacks cannot create resources after shutdown begins.
 
 The SDK REST rate-limit sleeps ignore context. Consumed endpoints use a
@@ -84,8 +84,10 @@ hidden retry. Registration owns a three-attempt budget. SDK automatic Gateway
 reconnect is disabled; GoBard owns three reconnect attempts. Gateway sockets
 close on root cancellation and writes have five-second deadlines.
 
-Rejected component mutations use ephemeral follow-ups after acknowledging the
-button, leaving the shared player message intact. Queue/Player/Refresh buttons
+All slash commands defer privately. The bot creates or edits one shared card,
+then returns a compact receipt with a message link. Rejected component mutations
+use ephemeral follow-ups after acknowledging the button, leaving the shared
+player message intact. Queue/Player/Refresh buttons
 map to read-only inspection. The session snapshot's pending transition supports
 truthful UI labels without moving queue policy into the adapter. See
 [the interface contract](discord-interface.md) for rendering and refresh behavior.

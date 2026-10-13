@@ -507,6 +507,14 @@ func (c *coordinator) interrupt(reason playback.Outcome) {
 func (c *coordinator) snapshot() Snapshot {
 	s := Snapshot{Generation: c.generation, Channel: c.channel, Current: c.queue.index, Active: c.active != nil, Connected: c.connected, Connecting: c.transportKind == "connect" || c.transportKind == "recover", Paused: c.paused,
 		Loop: c.loop, Volume: c.volume, Ducking: c.ducking, DuckTarget: c.duckTarget, Last: c.last, Recovery: c.recovery, Transition: c.pending}
+	if current := c.queue.current(); current != nil {
+		s.RequestID = current.ticket.request.ID
+	}
+	if c.retry != nil || c.transportKind == "recover" {
+		s.Recovery = "voice_reconnect"
+	} else if c.recoveryAttempts >= 3 && !c.connected {
+		s.Recovery = "voice_exhausted"
+	}
 	if c.stopAfter {
 		s.Transition = playback.Stopped
 	}

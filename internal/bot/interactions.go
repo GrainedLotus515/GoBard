@@ -2,7 +2,6 @@ package bot
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -11,7 +10,7 @@ import (
 	"github.com/bwmarrin/discordgo"
 
 	"github.com/GrainedLotus515/gobard/internal/botui"
-	"github.com/GrainedLotus515/gobard/internal/failure"
+	"github.com/GrainedLotus515/gobard/internal/playback"
 	"github.com/GrainedLotus515/gobard/internal/session"
 )
 
@@ -91,7 +90,8 @@ func (r *Runtime) rejectionLoop() {
 			return
 		case ref := <-r.rejections:
 			ctx, cancel := context.WithTimeout(r.ctx, 2*time.Second)
-			err := r.respond(ctx, ref, &discordgo.InteractionResponse{Type: discordgo.InteractionResponseChannelMessageWithSource, Data: &discordgo.InteractionResponseData{Content: "Command unavailable or busy. Please try again shortly.", Flags: discordgo.MessageFlagsEphemeral, AllowedMentions: noAllowedMentions()}})
+			card := botui.BuildStatusCard(botui.StatusCardSpec{Title: "Request not accepted", Description: "Check the command and try again in a moment.", Color: botui.ColorWarning})
+			err := r.respond(ctx, ref, &discordgo.InteractionResponse{Type: discordgo.InteractionResponseChannelMessageWithSource, Data: &discordgo.InteractionResponseData{Embeds: []*discordgo.MessageEmbed{card}, Flags: discordgo.MessageFlagsEphemeral, AllowedMentions: noAllowedMentions()}})
 			cancel()
 			if err != nil && r.ctx.Err() == nil {
 				r.logger.Warn("Interaction rejection could not be delivered", "event", "discord.response", "error", err)
@@ -108,11 +108,13 @@ func (r *Runtime) executeInteraction(ref interactionRef, m MappedInteraction) {
 	ctx, cancel := context.WithTimeout(r.ctx, 50*time.Second)
 	defer cancel()
 	kind := discordgo.InteractionResponseDeferredChannelMessageWithSource
+	flags := discordgo.MessageFlagsEphemeral
 	if m.Component {
 		kind = discordgo.InteractionResponseDeferredMessageUpdate
+		flags = 0
 	}
 	ack, ackCancel := context.WithTimeout(ctx, 2*time.Second)
-	err := r.respond(ack, ref, &discordgo.InteractionResponse{Type: kind, Data: &discordgo.InteractionResponseData{AllowedMentions: noAllowedMentions()}})
+	err := r.respond(ack, ref, &discordgo.InteractionResponse{Type: kind, Data: &discordgo.InteractionResponseData{Flags: flags, AllowedMentions: noAllowedMentions()}})
 	ackCancel()
 	if err != nil {
 		r.logger.Warn("Interaction acknowledgement failed", "event", "discord.response", "error", err)
@@ -126,7 +128,7 @@ func (r *Runtime) executeInteraction(ref interactionRef, m MappedInteraction) {
 	}
 	if err != nil && m.Component {
 		// A rejected control must not replace the shared player or its buttons.
-		err = r.rest.send(ctx, http.MethodPost, "webhooks/"+ref.app+"/"+ref.token, &discordgo.WebhookParams{Content: commandMessage(err), Flags: discordgo.MessageFlagsEphemeral, AllowedMentions: noAllowedMentions()}, false)
+		err = r.rest.send(ctx, http.MethodPost, "webhooks/"+ref.app+"/"+ref.token, &discordgo.WebhookParams{Embeds: []*discordgo.MessageEmbed{commandFailure(err)}, Flags: discordgo.MessageFlagsEphemeral, AllowedMentions: noAllowedMentions()}, false)
 		if err != nil && r.ctx.Err() == nil {
 			r.logger.Warn("Control response could not be delivered", "event", "discord.response", "error", err)
 		}
@@ -147,8 +149,11 @@ func (r *Runtime) execute(ctx context.Context, m MappedInteraction) (session.Sna
 		if m.Operation.Action == session.Inspect {
 			return session.Snapshot{Current: -1, Volume: r.cfg.DefaultVolume, Ducking: r.cfg.ReduceVolumeOnVoice, DuckTarget: r.cfg.ReduceVolumeOnVoiceTarget}, 0, nil
 		}
-		if m.Name != "config" || !m.ManageGuild {
+		if m.Name != "config" {
 			return session.Snapshot{}, 0, session.ErrVoiceAccess
+		}
+		if !m.ManageGuild {
+			return session.Snapshot{}, 0, session.ErrManageGuild
 		}
 		var err error
 		target, err = r.guild(m.Guild)
@@ -180,45 +185,12 @@ func (r *Runtime) play(ctx context.Context, m MappedInteraction) (session.Snapsh
 	if _, err = target.Join(ctx, access.Channel); err != nil {
 		return session.Snapshot{}, 0, err
 	}
-	r.mu.Lock()
-	r.routes[m.Guild] = m.Channel
-	r.mu.Unlock()
 	admission, err := r.player.Play(ctx, target, m.Guild, m.User, m.Query)
 	if err != nil {
 		return session.Snapshot{}, 0, err
 	}
 	snapshot, err := target.Apply(ctx, session.Operation{Action: session.Inspect})
 	return snapshot, len(admission.Tickets), err
-}
-
-func commandMessage(err error) string {
-	if errors.Is(err, errStalePlayer) {
-		return "This player has been replaced. Use the newest player message or /now-playing."
-	}
-	for _, safe := range []error{session.ErrBusy, session.ErrFull, session.ErrVoiceAccess, session.ErrManageGuild, session.ErrSuperseded, session.ErrGuildLimit} {
-		if errors.Is(err, safe) {
-			return safe.Error()
-		}
-	}
-	var classified *failure.Error
-	if errors.As(err, &classified) {
-		switch classified.Reason {
-		case failure.ConnectionReset:
-			return "The media connection was reset before playback finished."
-		case failure.NetworkTimeout:
-			return "The media connection timed out before playback finished."
-		}
-		switch classified.Category {
-		case failure.Authentication:
-			return "This track or connection is currently unavailable. Try another track or reconnect the bot."
-		case failure.Throttled:
-			return "The external service is rate limiting requests. Try again later."
-		case failure.Unavailable:
-			return "The requested media is unavailable."
-		}
-		return "Something interrupted playback. Try again, or choose another track."
-	}
-	return "The operation could not be applied. Check the queue, voice channel, and command values."
 }
 
 func runtimeCard(m MappedInteraction, s session.Snapshot, accepted int) (*discordgo.MessageEmbed, []discordgo.MessageComponent) {
@@ -250,7 +222,13 @@ func runtimeCard(m MappedInteraction, s session.Snapshot, accepted int) (*discor
 		}
 		return botui.BuildPlaybackCard(spec)
 	}
-	return botui.BuildStatusCard(botui.StatusCardSpec{Title: "Nothing playing", Description: "Join a voice channel and use `/play` with a song name or YouTube link.", Color: botui.ColorInfo}), nil
+	title, description := "Nothing playing", "Join a voice channel and use `/play` with a song name or YouTube link."
+	if s.Last.Outcome == playback.Completed && s.Last.Frames > 0 {
+		title, description = "Queue finished", "There are no more tracks queued. Use `/play` to add more music."
+	} else if s.Last.Outcome == playback.Stopped {
+		title, description = "Playback stopped", "The queue is cleared. Use `/play` to start again."
+	}
+	return botui.BuildStatusCard(botui.StatusCardSpec{Title: title, Description: description, Color: botui.ColorInfo}), nil
 }
 
 func runtimeDuration(d time.Duration) string {

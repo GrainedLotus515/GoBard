@@ -7,7 +7,7 @@ and corrected in the player-focused pass below.
 
 ## Player and controls
 
-`/play` acknowledges the number of tracks added and shows the current selection:
+`/play` privately acknowledges the number of tracks added and shows the current selection on the shared card:
 state, linked title, artist, artwork when available, progress/length, requester,
 next song and volume. Adding another track still displays the current player;
 the queue shows upcoming selections. Unknown durations and live streams have
@@ -25,7 +25,13 @@ Progress advances in fifteen-second steps; automatic edits are at least three
 seconds apart and identical views are suppressed. Controls and Refresh fetch a
 fresh snapshot. This is sampled progress, not a continuously running clock.
 
-A new player/queue response becomes the active view. Mutation buttons on older
+Slash commands receive compact private receipts with an Open player link when a
+shared card exists. `/play`, `/queue` and `/now-playing` reuse that card in the
+same channel; they no longer create a public reply for every invocation. A view
+request in a different channel establishes the active card there. Read-only
+requests before a session exists return a private idle/empty view.
+
+Mutation buttons on older
 messages return a private explanation; read-only navigation can refresh and adopt
 an older message. The adapter retains bounded channel/message IDs, not interaction
 tokens or message history. Views are not persisted across bot restarts: use
@@ -35,6 +41,10 @@ Deleted or forbidden messages stop updating. Other failures use at most three
 attempts, with 30/60/90-second backoff; HTTP 429 respects the server delay with a
 30-second minimum. Delays of an hour or more suspend updates. Manual refresh can
 establish a new view. A failed UI edit never stops audio or advances the queue.
+An explicit view request encountering a deleted card can create one replacement;
+the observer never recreates messages on its own. If an applied command's card
+edit fails, the private receipt distinguishes that UI failure from the accepted
+operation, rather than encouraging an accidental duplicate command.
 
 Button mutations keep the existing voice-channel permission checks. A denied
 button press receives an ephemeral follow-up, preserving the shared card and
@@ -42,6 +52,29 @@ buttons. Read-only Queue/Player/Refresh navigation does not require voice member
 All responses suppress allowed mentions; untrusted link labels and artists are
 escaped. Recovery notices describe the music interruption and resume, without
 frame counts or production-log instructions.
+
+## Playback feedback
+
+The intended middle ground is a compact music card with familiar controls and
+useful status, without a stream of bot messages. Interruptions, recovery, final
+failures and queue completion update the same card. There are no separate
+automatic “interrupted,” “empty queue” or “leaving voice” channel posts.
+
+| Situation | Visible feedback |
+| --- | --- |
+| Media connection drops with a permitted resume | “Trying to resume”; explicitly says one attempt, not that audio has already resumed. |
+| Audio delivery resumes for the same request | The interruption notice clears. |
+| Failed track followed by another selection | “Previous track couldn't finish”; explains that the queue moved on. |
+| Voice reconnect in progress / exhausted | Distinct notices; exhaustion explains that the queue is retained and how to reconnect. |
+| Provider refuses access or returns no audio | Specific plain-language explanation and a next step; no raw extractor output. |
+| Queue finishes | The card becomes “Queue finished,” only after a completion with delivered frames. |
+| Permission, capacity or timeout rejection | A private card explains the constraint; timeouts advise checking the queue before retrying. |
+
+Failure copy is allowlisted. Provider/Discord access failures, decoding failures,
+rate limiting and voice failures are distinguished. Unknown failures stay safe;
+tokens, signed URLs, stderr, fingerprints and internal IDs are never shown.
+The card is current state, not a durable event log: fast intermediate transitions
+may coalesce, and complete attempt accounting stays in production Charm logs.
 
 ## Queue
 
@@ -60,6 +93,10 @@ Integrated fake interactions exercise play, simultaneous toggles, authorization
 changes and stop against real session/playback ownership. Automatic-edit tests
 cover coalescing, transitions, stale mutations, cancellation, deleted messages,
 finite failures and rate limits.
+Additional tests prove that repeated play/queue/player commands create only one
+shared message, all slash acknowledgements are private, recovery clears only
+after delivery for the same request, deleted views require explicit recreation,
+applied commands survive UI rate limits, and hostile error causes never appear.
 Docker race/lint/build/smoke are the supported quality gates. Rendering and button
 usability in the real Discord client still require user review; these tests do
 not prove the appearance of the client or live interactions.

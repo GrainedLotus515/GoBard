@@ -1,17 +1,13 @@
 package bot
 
 import (
-	"context"
-	"net/http"
 	"time"
-
-	"github.com/bwmarrin/discordgo"
 
 	"github.com/GrainedLotus515/gobard/internal/playback"
 	"github.com/GrainedLotus515/gobard/internal/session"
 )
 
-// One observer per admitted guild coalesces UI failure notices. Production
+// One observer per admitted guild coalesces player updates. Production
 // terminal accounting remains in Engine; slow Discord responses cannot hold up
 // queue transitions. No per-attempt goroutine or unbounded notification history.
 func (r *Runtime) observe(guild string, target *session.Session) {
@@ -66,25 +62,6 @@ func (r *Runtime) observe(guild string, target *session.Session) {
 			r.sourceStatus.Store(2)
 		case playback.EncodeFailure:
 			r.pipelineStatus.Store(2)
-		}
-		if result.Failure == nil {
-			continue
-		}
-		r.mu.Lock()
-		channel := r.routes[guild]
-		r.mu.Unlock()
-		if !validPathPart(channel, 32) {
-			continue
-		}
-		ctx, cancel := context.WithTimeout(r.ctx, 8*time.Second)
-		message := "Playback interrupted. " + commandMessage(result.Failure)
-		if snapshot.Recovery == "source_resume" {
-			message = "The music connection dropped. Resuming from where it stopped…"
-		}
-		err = r.rest.send(ctx, http.MethodPost, "channels/"+channel+"/messages", &discordgo.MessageSend{Content: message, AllowedMentions: noAllowedMentions()}, true)
-		cancel()
-		if err != nil && r.ctx.Err() == nil {
-			r.logger.Warn("Playback notice could not be delivered", "event", "discord.response", "attempt_id", last, "error", err)
 		}
 	}
 }

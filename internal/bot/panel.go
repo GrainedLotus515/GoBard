@@ -10,6 +10,7 @@ import (
 
 	"github.com/bwmarrin/discordgo"
 
+	"github.com/GrainedLotus515/gobard/internal/botui"
 	"github.com/GrainedLotus515/gobard/internal/session"
 )
 
@@ -25,6 +26,7 @@ type playerPanel struct {
 	digest           [32]byte
 	next             time.Time
 	failures         int
+	dismissedAttempt string
 }
 
 func (p *playerPanel) acquire(ctx context.Context) error {
@@ -86,6 +88,14 @@ func panelView(m MappedInteraction) MappedInteraction {
 
 func panelEdit(m MappedInteraction, s session.Snapshot, accepted int) *discordgo.WebhookEdit {
 	embed, components := runtimeCard(m, s, accepted)
+	if notice := playbackFeedback(s); notice != nil && m.Name != "stop" && m.Name != "disconnect" {
+		if s.Current < 0 && m.Name != "queue" {
+			embed.Title, embed.Description = notice.Name, notice.Value
+		} else {
+			embed.Fields = append(embed.Fields, notice)
+		}
+		embed.Color = botui.ColorWarning
+	}
 	if components == nil {
 		components = []discordgo.MessageComponent{}
 	}
@@ -108,10 +118,23 @@ func (r *Runtime) renderInteraction(ctx context.Context, ref interactionRef, m M
 				s = fresh
 			}
 		}
+		if m.Name == "stop" || m.Name == "disconnect" {
+			p.dismissedAttempt = s.Last.Request.AttemptID
+		}
+		if m.Name == "play" {
+			p.dismissedAttempt = ""
+		}
+		if p.dismissedAttempt != "" && s.Last.Request.AttemptID == p.dismissedAttempt {
+			s.Last.Failure = nil
+			s.Recovery = ""
+		}
+	}
+	if !m.Component {
+		return r.renderCommand(ctx, ref, m, s, accepted, operationErr, p)
 	}
 	edit := panelEdit(m, s, accepted)
 	if operationErr != nil {
-		embed := &discordgo.MessageEmbed{Title: "Command failed", Description: commandMessage(operationErr), Color: 0xDC2626}
+		embed := commandFailure(operationErr)
 		edit.Embeds = &[]*discordgo.MessageEmbed{embed}
 	}
 	message, err := r.rest.request(ctx, http.MethodPatch, "webhooks/"+ref.app+"/"+ref.token+"/messages/@original", edit, false, p != nil)
@@ -132,6 +155,63 @@ func (r *Runtime) renderInteraction(ctx context.Context, ref interactionRef, m M
 	return nil
 }
 
+// Called with p's gate held. Slash receipts stay private; the shared card is
+// bot-owned, so updates do not retain short-lived interaction credentials.
+func (r *Runtime) renderCommand(ctx context.Context, ref interactionRef, m MappedInteraction, s session.Snapshot, accepted int, operationErr error, p *playerPanel) error {
+	card := commandReceipt(m, s, accepted)
+	switch {
+	case operationErr != nil:
+		card = commandFailure(operationErr)
+	case p != nil:
+		editErr := r.showPanel(ctx, m, s, p)
+		r.panelResult(m.Guild, p, time.Now(), editErr)
+		if editErr != nil {
+			card.Color = botui.ColorWarning
+			card.Description += "\n\nThe command was applied, but the shared card couldn't update. Use `/now-playing` to refresh it."
+		}
+		if p.message != "" && validPathPart(m.Guild, 32) {
+			card.Description += "\n[Open player](https://discord.com/channels/" + m.Guild + "/" + p.channel + "/" + p.message + ")"
+		}
+	case m.Name == "queue" || m.Name == "now-playing":
+		card, _ = runtimeCard(m, s, accepted)
+	}
+	return r.rest.send(ctx, http.MethodPatch, "webhooks/"+ref.app+"/"+ref.token+"/messages/@original", &discordgo.WebhookEdit{Embeds: &[]*discordgo.MessageEmbed{card}, Components: &[]discordgo.MessageComponent{}, AllowedMentions: noAllowedMentions()}, false)
+}
+
+// showPanel edits the existing message, or creates one for an explicit view
+// request. A 404 permits exactly one replacement POST; other errors return.
+func (r *Runtime) showPanel(ctx context.Context, m MappedInteraction, s session.Snapshot, p *playerPanel) error {
+	viewRequest := m.Name == "play" || m.Name == "queue" || m.Name == "now-playing"
+	view := p.view
+	if viewRequest {
+		view = panelView(m)
+	}
+	create := viewRequest && (p.message == "" || p.channel != m.Channel)
+	edit := panelEdit(view, s, 0)
+	if !create && p.message != "" {
+		err := r.rest.send(ctx, http.MethodPatch, "channels/"+p.channel+"/messages/"+p.message, edit, true)
+		var status *discordStatus
+		if !viewRequest || !errors.As(err, &status) || status.code != http.StatusNotFound {
+			if err == nil {
+				p.view, p.digest = view, [32]byte{}
+			}
+			return err
+		}
+		p.message, create = "", true
+	}
+	if !create {
+		return nil
+	}
+	if !validPathPart(m.Channel, 32) {
+		return errors.New("player channel unavailable")
+	}
+	message, err := r.rest.request(ctx, http.MethodPost, "channels/"+m.Channel+"/messages", edit, true, true)
+	if err == nil {
+		p.channel, p.message, p.view, p.digest = m.Channel, message, view, [32]byte{}
+	}
+	return err
+}
+
 func (r *Runtime) updatePanel(guild string, s session.Snapshot, now time.Time) {
 	p := r.panel(guild)
 	if p == nil {
@@ -147,6 +227,10 @@ func (r *Runtime) updatePanel(guild string, s session.Snapshot, now time.Time) {
 		return
 	}
 	s.Position = s.Position.Truncate(15 * time.Second)
+	if p.dismissedAttempt != "" && s.Last.Request.AttemptID == p.dismissedAttempt {
+		s.Last.Failure = nil
+		s.Recovery = ""
+	}
 	edit := panelEdit(p.view, s, 0)
 	data, err := json.Marshal(edit)
 	if err != nil {
@@ -159,9 +243,18 @@ func (r *Runtime) updatePanel(guild string, s session.Snapshot, now time.Time) {
 	ctx, cancel := context.WithTimeout(r.ctx, 8*time.Second)
 	err = r.rest.send(ctx, http.MethodPatch, "channels/"+p.channel+"/messages/"+p.message, edit, true)
 	cancel()
+	if err == nil {
+		p.digest = digest
+	}
+	r.panelResult(guild, p, now, err)
+}
+
+// Shared edit policy for observer updates and explicit commands. Caller owns
+// the panel gate. A failed command-side edit must not restart automatic retries.
+func (r *Runtime) panelResult(guild string, p *playerPanel, now time.Time, err error) {
 	p.next = now.Add(3 * time.Second)
 	if err == nil {
-		p.digest, p.failures = digest, 0
+		p.failures = 0
 		return
 	}
 	p.failures++

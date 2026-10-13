@@ -65,8 +65,8 @@ last observed source and pipeline success/failure, and sampled active deliveries
 Source includes cache acquisition. Unknown is explicit until an audio attempt
 provides evidence; a successful metadata lookup is not audio-source proof.
 Delivery counts observe increasing accepted frames, not human audibility.
-Observers sample at one second. A slow player edit and a failure notice can each
-delay the next sample by up to eight seconds; delivery is a sampled indicator,
+Observers sample at one second. A slow player edit can delay the next sample by
+up to eight seconds; delivery is a sampled indicator,
 not an instantaneous count. Readiness requires initialized local tools/cache,
 Gateway connection, voice adapter and reconciled commands; it never makes an
 external provider probe a requirement for an idle process.
@@ -76,3 +76,9 @@ failure count, retry delay and whether automatic updates remain enabled. No
 message content, webhook token or response body is logged. Deleted/forbidden
 messages and exhausted retries disable edits until another interaction establishes
 a view; playback continues independently. Progress edits generate no INFO events.
+
+Discord-facing feedback is separate from production logs: one evolving shared
+card carries playback state, recovery and failure guidance, while command receipts
+and rejections are private. The observer does not post separate failure messages.
+It may coalesce intermediate states; authoritative terminal accounting remains in
+Charm logs. See [the interface contract](discord-interface.md).
