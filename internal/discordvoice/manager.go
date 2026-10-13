@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net"
 	"sync"
 	"time"
 
@@ -14,12 +15,18 @@ import (
 	disgovoice "github.com/disgoorg/disgo/voice"
 	"github.com/disgoorg/godave/golibdave"
 	"github.com/disgoorg/snowflake/v2"
+	"github.com/gorilla/websocket"
+
+	"github.com/GrainedLotus515/gobard/internal/netguard"
 )
 
 // Manager bridges discordgo gateway events into disgo's DAVE-capable voice stack.
 type Manager struct {
-	manager disgovoice.Manager
-	logger  *log.Logger
+	ctx       context.Context
+	cancel    context.CancelFunc
+	closeOnce sync.Once
+	manager   disgovoice.Manager
+	logger    *log.Logger
 
 	speakingMu      sync.RWMutex
 	speakingHandler func(guildID, userID string, speaking bool)
@@ -31,9 +38,9 @@ type Connection struct {
 }
 
 // NewManager creates a DAVE-capable voice manager for an authenticated session.
-func NewManager(session *discordgo.Session, logger *log.Logger) (*Manager, error) {
-	if logger == nil {
-		return nil, fmt.Errorf("voice logger required")
+func NewManager(parent context.Context, session *discordgo.Session, logger *log.Logger) (*Manager, error) {
+	if parent == nil || logger == nil {
+		return nil, fmt.Errorf("voice context and logger required")
 	}
 	sdkLogger := slog.New(sdkLog{logger: logger})
 	if session == nil || session.State == nil || session.State.User == nil {
@@ -45,7 +52,18 @@ func NewManager(session *discordgo.Session, logger *log.Logger) (*Manager, error
 		return nil, fmt.Errorf("parse bot user id: %w", err)
 	}
 
-	voiceManager := &Manager{logger: logger}
+	// #nosec G118 -- Manager.Close cancels its owned dial/socket lifecycle.
+	ctx, cancel := context.WithCancel(parent)
+	voiceManager := &Manager{logger: logger, ctx: ctx, cancel: cancel}
+	dialer := &websocket.Dialer{HandshakeTimeout: 5 * time.Second, NetDialContext: func(_ context.Context, network, address string) (net.Conn, error) {
+		dialCtx, done := context.WithTimeout(ctx, 5*time.Second)
+		defer done()
+		conn, err := (&net.Dialer{}).DialContext(dialCtx, network, address)
+		if err != nil {
+			return nil, err
+		}
+		return netguard.Wrap(ctx, conn), nil
+	}}
 	manager := disgovoice.NewManager(
 		func(ctx context.Context, guildID snowflake.ID, channelID *snowflake.ID, selfMute, selfDeaf bool) error {
 			if err := ctx.Err(); err != nil {
@@ -76,6 +94,7 @@ func NewManager(session *discordgo.Session, logger *log.Logger) (*Manager, error
 		disgovoice.WithLogger(sdkLogger),
 		disgovoice.WithDaveSessionLogger(sdkLogger),
 		disgovoice.WithDaveSessionCreateFunc(golibdave.NewSession),
+		disgovoice.WithConnConfigOpts(disgovoice.WithConnGatewayConfigOpts(disgovoice.WithGatewayAutoReconnect(false), disgovoice.WithGatewayDialer(dialer))),
 	)
 
 	voiceManager.manager = manager
@@ -86,6 +105,9 @@ func NewManager(session *discordgo.Session, logger *log.Logger) (*Manager, error
 func (m *Manager) Join(ctx context.Context, guildID, channelID string, selfMute, selfDeaf bool) (*Connection, error) {
 	if m == nil {
 		return nil, fmt.Errorf("voice manager is not initialized")
+	}
+	if err := m.ctx.Err(); err != nil {
+		return nil, err
 	}
 
 	guildSnowflake, err := snowflake.Parse(guildID)
@@ -137,7 +159,7 @@ func (m *Manager) SetSpeakingHandler(handler func(guildID, userID string, speaki
 
 // HandleVoiceStateUpdate forwards a discordgo voice state event to the disgo voice manager.
 func (m *Manager) HandleVoiceStateUpdate(update *discordgo.VoiceStateUpdate) {
-	if m == nil || update == nil || update.VoiceState == nil {
+	if m == nil || m.ctx.Err() != nil || update == nil || update.VoiceState == nil {
 		return
 	}
 
@@ -152,7 +174,7 @@ func (m *Manager) HandleVoiceStateUpdate(update *discordgo.VoiceStateUpdate) {
 
 // HandleVoiceServerUpdate forwards a discordgo voice server event to the disgo voice manager.
 func (m *Manager) HandleVoiceServerUpdate(update *discordgo.VoiceServerUpdate) {
-	if m == nil || update == nil {
+	if m == nil || m.ctx.Err() != nil || update == nil {
 		return
 	}
 
@@ -170,7 +192,19 @@ func (m *Manager) Close(ctx context.Context) {
 	if m == nil {
 		return
 	}
-	m.manager.Close(ctx)
+	m.closeOnce.Do(func() {
+		m.cancel()
+		// The SDK's Manager.Close iterates/replaces its map without retaining
+		// its lock. Snapshot using its locked iterator, then close outside it.
+		// Admission has already joined at the runtime/session boundary.
+		var conns []disgovoice.Conn
+		for conn := range m.manager.Conns() {
+			conns = append(conns, conn)
+		}
+		for _, conn := range conns {
+			conn.Close(ctx)
+		}
+	})
 }
 
 func (c *Connection) SetSpeaking(ctx context.Context, speaking bool) error {

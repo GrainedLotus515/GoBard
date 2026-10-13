@@ -65,7 +65,14 @@ last observed source and pipeline success/failure, and sampled active deliveries
 Source includes cache acquisition. Unknown is explicit until an audio attempt
 provides evidence; a successful metadata lookup is not audio-source proof.
 Delivery counts observe increasing accepted frames, not human audibility.
-Observers sample at one second, and a slow failure notice can delay a sample by
-up to eight additional seconds. Readiness requires initialized local tools/cache,
+Observers sample at one second. A slow player edit and a failure notice can each
+delay the next sample by up to eight seconds; delivery is a sampled indicator,
+not an instantaneous count. Readiness requires initialized local tools/cache,
 Gateway connection, voice adapter and reconciled commands; it never makes an
 external provider probe a requirement for an idle process.
+
+`discord.panel` WARN reports automatic player-edit failures with safe HTTP status,
+failure count, retry delay and whether automatic updates remain enabled. No
+message content, webhook token or response body is logged. Deleted/forbidden
+messages and exhausted retries disable edits until another interaction establishes
+a view; playback continues independently. Progress edits generate no INFO events.

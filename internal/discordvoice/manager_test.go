@@ -1,11 +1,32 @@
 package discordvoice
 
 import (
+	"context"
+	"errors"
+	"io"
 	"testing"
 	"time"
 
 	"github.com/bwmarrin/discordgo"
+	"github.com/charmbracelet/log"
 )
+
+func TestClosedManagerRejectsNewVoiceWork(t *testing.T) {
+	s, err := discordgo.New("Bot fixture")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.State.User = &discordgo.User{ID: "123"}
+	m, err := NewManager(context.Background(), s, log.New(io.Discard))
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.Close(context.Background())
+	m.Close(context.Background())
+	if _, err = m.Join(context.Background(), "456", "789", false, false); !errors.Is(err, context.Canceled) {
+		t.Fatal(err)
+	}
+}
 
 //nolint:gocyclo // Each assertion documents a distinct field preserved by the adapter.
 func TestToVoiceStateUpdate(t *testing.T) {

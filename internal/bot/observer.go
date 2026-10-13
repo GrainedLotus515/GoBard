@@ -34,6 +34,7 @@ func (r *Runtime) observe(guild string, target *session.Session) {
 		case <-target.Changes():
 		case <-ticker.C:
 		}
+		observed := time.Now()
 		snapshot, err := target.Apply(r.ctx, session.Operation{Action: session.Inspect})
 		if err != nil {
 			continue
@@ -52,6 +53,9 @@ func (r *Runtime) observe(guild string, target *session.Session) {
 			r.sourceStatus.Store(1)
 			r.pipelineStatus.Store(1)
 		}
+		// Use the observation's start time: a command rendered since then
+		// has a later update deadline and must not receive this older snapshot.
+		r.updatePanel(guild, snapshot, observed)
 		result := snapshot.Last
 		if result.Request.AttemptID == last {
 			continue

@@ -118,7 +118,12 @@ func (r *Runtime) executeInteraction(ref interactionRef, m MappedInteraction) {
 		r.logger.Warn("Interaction acknowledgement failed", "event", "discord.response", "error", err)
 		return
 	}
-	snapshot, accepted, err := r.execute(ctx, m)
+	var snapshot session.Snapshot
+	var accepted int
+	err = r.checkPlayer(ctx, m)
+	if err == nil {
+		snapshot, accepted, err = r.execute(ctx, m)
+	}
 	if err != nil && m.Component {
 		// A rejected control must not replace the shared player or its buttons.
 		err = r.rest.send(ctx, http.MethodPost, "webhooks/"+ref.app+"/"+ref.token, &discordgo.WebhookParams{Content: commandMessage(err), Flags: discordgo.MessageFlagsEphemeral, AllowedMentions: noAllowedMentions()}, false)
@@ -127,18 +132,7 @@ func (r *Runtime) executeInteraction(ref interactionRef, m MappedInteraction) {
 		}
 		return
 	}
-	var embed *discordgo.MessageEmbed
-	var components []discordgo.MessageComponent
-	if err != nil {
-		embed = botui.BuildStatusCard(botui.StatusCardSpec{Title: "Command failed", Description: commandMessage(err), Color: botui.ColorError})
-	} else {
-		embed, components = runtimeCard(m, snapshot, accepted)
-	}
-	if components == nil {
-		components = []discordgo.MessageComponent{}
-	}
-	edit := &discordgo.WebhookEdit{Embeds: &[]*discordgo.MessageEmbed{embed}, Components: &components, AllowedMentions: noAllowedMentions()}
-	err = r.rest.send(ctx, http.MethodPatch, "webhooks/"+ref.app+"/"+ref.token+"/messages/@original", edit, false)
+	err = r.renderInteraction(ctx, ref, m, snapshot, accepted, err)
 	if err != nil && r.ctx.Err() == nil {
 		r.logger.Warn("Command response could not be delivered", "event", "discord.response", "error", err)
 	}
@@ -198,6 +192,9 @@ func (r *Runtime) play(ctx context.Context, m MappedInteraction) (session.Snapsh
 }
 
 func commandMessage(err error) string {
+	if errors.Is(err, errStalePlayer) {
+		return "This player has been replaced. Use the newest player message or /now-playing."
+	}
 	for _, safe := range []error{session.ErrBusy, session.ErrFull, session.ErrVoiceAccess, session.ErrManageGuild, session.ErrSuperseded, session.ErrGuildLimit} {
 		if errors.Is(err, safe) {
 			return safe.Error()
@@ -243,7 +240,7 @@ func runtimeCard(m MappedInteraction, s session.Snapshot, accepted int) (*discor
 	}
 	if s.Current >= 0 && s.Current < len(s.Tracks) {
 		t := s.Tracks[s.Current]
-		spec := botui.PlaybackCardSpec{Title: t.Title, URL: t.URL, Artist: t.Artist, ThumbnailURL: t.Thumbnail, Length: trackLength(t), RequestedBy: t.RequestedBy, ContextLabel: playbackLabel(s), ContextValue: runtimeProgress(s.Position, t.Duration), Footer: fmt.Sprintf("Volume %d%% • %d up next • Refresh to update", s.Volume, len(s.Tracks)-s.Current-1), ShowControls: s.Connected, Paused: s.Paused, LoopEnabled: s.Loop, Notice: actionNotice(m.Name, accepted)}
+		spec := botui.PlaybackCardSpec{Title: t.Title, URL: t.URL, Artist: t.Artist, ThumbnailURL: t.Thumbnail, Length: trackLength(t), RequestedBy: t.RequestedBy, ContextLabel: playbackLabel(s), ContextValue: runtimeProgress(s.Position, t.Duration), Footer: fmt.Sprintf("Volume %d%% • %d up next • Progress updates every 15s", s.Volume, len(s.Tracks)-s.Current-1), ShowControls: s.Connected, Paused: s.Paused, LoopEnabled: s.Loop, Notice: actionNotice(m.Name, accepted)}
 		if t.Live {
 			spec.ContextValue = runtimeDuration(s.Position)
 		}

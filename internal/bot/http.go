@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -32,16 +33,30 @@ func newDiscordHTTP(token string) *discordHTTP {
 }
 
 func (d *discordHTTP) send(ctx context.Context, method, path string, body any, authenticated bool) error {
+	_, err := d.request(ctx, method, path, body, authenticated, false)
+	return err
+}
+
+type discordStatus struct {
+	code       int
+	retryAfter time.Duration
+}
+
+func (s *discordStatus) Error() string { return fmt.Sprintf("HTTP status %d", s.code) }
+
+// request optionally extracts only the message ID from a bounded response.
+// All other fields, including untrusted content, are discarded.
+func (d *discordHTTP) request(ctx context.Context, method, path string, body any, authenticated, message bool) (string, error) {
 	data, err := json.Marshal(body)
 	if err != nil {
-		return failure.Wrap("discord_request", failure.Transport, err)
+		return "", failure.Wrap("discord_request", failure.Transport, err)
 	}
 	if len(data) > 256*1024 {
-		return errors.New("discord request exceeds byte budget")
+		return "", errors.New("discord request exceeds byte budget")
 	}
 	req, err := http.NewRequestWithContext(ctx, method, "https://discord.com/api/v10/"+path, bytes.NewReader(data))
 	if err != nil {
-		return failure.Wrap("discord_request", failure.Transport, err)
+		return "", failure.Wrap("discord_request", failure.Transport, err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("User-Agent", "DiscordBot (https://github.com/GrainedLotus515/gobard, 2)")
@@ -50,16 +65,24 @@ func (d *discordHTTP) send(ctx context.Context, method, path string, body any, a
 	}
 	response, err := d.client.Do(req)
 	if err != nil {
-		return failure.Wrap("discord_request", failure.Transport, err)
+		return "", failure.Wrap("discord_request", failure.Transport, err)
 	}
 	defer response.Body.Close()
-	// Discard at most 64 KiB; closing a larger body sacrifices connection reuse.
-	_, err = io.Copy(io.Discard, io.LimitReader(response.Body, 64*1024))
+	data, err = io.ReadAll(io.LimitReader(response.Body, 64*1024+1))
 	if err != nil {
-		return failure.Wrap("discord_response", failure.Transport, err)
+		return "", failure.Wrap("discord_response", failure.Transport, err)
 	}
 	if response.StatusCode >= 200 && response.StatusCode < 300 {
-		return nil
+		if !message {
+			return "", nil
+		}
+		var identity struct {
+			ID string `json:"id"`
+		}
+		if len(data) > 64*1024 || json.Unmarshal(data, &identity) != nil || !validPathPart(identity.ID, 32) {
+			return "", failure.Wrap("discord_message", failure.Transport, errors.New("invalid message identity response"))
+		}
+		return identity.ID, nil
 	}
 	category := failure.Transport
 	switch response.StatusCode {
@@ -68,7 +91,13 @@ func (d *discordHTTP) send(ctx context.Context, method, path string, body any, a
 	case http.StatusUnauthorized, http.StatusForbidden:
 		category = failure.Authentication
 	}
-	return failure.Wrap("discord_response", category, fmt.Errorf("HTTP status %d", response.StatusCode))
+	retry := 30 * time.Second
+	if seconds, parseErr := strconv.ParseFloat(response.Header.Get("Retry-After"), 64); parseErr == nil && seconds > 0 {
+		// An hour or more suspends automatic updates instead of shortening
+		// the server's delay or overflowing a duration conversion.
+		retry = max(retry, time.Duration(min(seconds, 3600)*float64(time.Second)))
+	}
+	return "", failure.Wrap("discord_response", category, &discordStatus{code: response.StatusCode, retryAfter: retry})
 }
 
 // Path components are checked independently of the payload grammar. Tokens

@@ -20,6 +20,7 @@ import (
 type MappedInteraction struct {
 	Guild, User string
 	Channel     string
+	Message     string
 	Name        string
 	Query       string
 	Operation   session.Operation
@@ -67,6 +68,9 @@ func MapInteraction(i *discordgo.InteractionCreate) (MappedInteraction, error) {
 			return out, errors.New("unrecognized control")
 		}
 		out.Component = true
+		if i.Message != nil && validPathPart(i.Message.ID, 32) {
+			out.Message = strings.Clone(i.Message.ID)
+		}
 		switch action {
 		case botui.ActionPlaybackTogglePause:
 			out.Name = "pause"

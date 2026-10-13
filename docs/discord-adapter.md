@@ -65,7 +65,8 @@ Deterministic tests cover pacing, copied packet ownership, stalled writes,
 short writes, deadlines, close joining and repeated close. The connection owner
 must still manage speaking state and close the SDK connection after closing
 Output. The production runtime now uses this interface and core-owned recovery.
-Real DAVE delivery remains an external verification gate.
+Real DAVE delivery was exercised by the user-confirmed live playback runs;
+voice reconnect and shutdown during active audio remain external test gates.
 
 ## Runtime ownership and temporary SDK limitations
 
@@ -78,7 +79,7 @@ a shutdown barrier; callbacks cannot create resources after shutdown begins.
 The SDK REST rate-limit sleeps ignore context. Consumed endpoints use a
 small adapter-local HTTP implementation (respond, edit, ephemeral follow-up,
 channel message, command
-overwrite), with 8-second requests, no redirects, 64 KiB response drain and no
+overwrite), with 8-second requests, no redirects, 64 KiB response projection and no
 hidden retry. Registration owns a three-attempt budget. SDK automatic Gateway
 reconnect is disabled; GoBard owns three reconnect attempts. Gateway sockets
 close on root cancellation and writes have five-second deadlines.
@@ -95,11 +96,15 @@ lock across I/O; the adapter bounds that I/O and holds no GoBard registry lock
 around it. SDK `VoiceState` iterates mutable state without a read lock; GoBard
 retains its own bounded channel observations instead.
 
-The current SDK does not expose a join for its own heartbeat/listener workers.
-GoBard joins its callbacks and closes sockets, but cannot honestly certify a
-strict SDK-worker join from that API. Native DAVE operations also cannot be
-preempted. Both are explicit future-library requirements and live shutdown
-verification gates, not claims established by fake transport tests.
+The pinned SDKs do not expose a join for their heartbeat/listener workers. Voice
+AutoReconnect is disabled, but the SDK's heartbeat reconnect paths ignore that
+flag. Both WebSocket transports have owned cancellation and five-second write
+deadlines. Manager close snapshots connections through the SDK's locked iterator
+and closes outside the lock, avoiding its unsafe map-wide Close implementation.
+Native DAVE operations remain non-preemptible. These are unresolved engineering
+exceptions, not issues a listening test can waive. Exact source findings,
+containment and the required decision are in
+[the SDK lifecycle review](rewrite/sdk-lifecycle-review.md).
 Gateway state caching is disabled in the SDK. The adapter retains only bounded
 guild IDs and user-to-voice-channel observations: 1,024 guilds, 1,024 voices per
 guild, 16,384 voices globally. Oversized snapshots fail authorization closed;

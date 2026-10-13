@@ -18,6 +18,7 @@ import (
 	"github.com/GrainedLotus515/gobard/internal/config"
 	"github.com/GrainedLotus515/gobard/internal/failure"
 	"github.com/GrainedLotus515/gobard/internal/media"
+	"github.com/GrainedLotus515/gobard/internal/netguard"
 	"github.com/GrainedLotus515/gobard/internal/playback"
 	"github.com/GrainedLotus515/gobard/internal/session"
 )
@@ -74,7 +75,7 @@ func TestGatewaySocketCancellationJoinsStalledWrite(t *testing.T) {
 	left, right := net.Pipe()
 	defer right.Close()
 	ctx, cancel := context.WithCancel(context.Background())
-	socket := newGatewaySocket(ctx, left)
+	socket := netguard.Wrap(ctx, left)
 	done := make(chan error, 1)
 	go func() { _, err := socket.Write([]byte("frame")); done <- err }()
 	cancel()

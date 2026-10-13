@@ -18,6 +18,7 @@ import (
 	"github.com/GrainedLotus515/gobard/internal/discordvoice"
 	"github.com/GrainedLotus515/gobard/internal/failure"
 	"github.com/GrainedLotus515/gobard/internal/health"
+	"github.com/GrainedLotus515/gobard/internal/netguard"
 	"github.com/GrainedLotus515/gobard/internal/session"
 )
 
@@ -48,6 +49,7 @@ type Runtime struct {
 	mu             sync.Mutex
 	stopping       bool
 	routes         map[string]string
+	panels         map[string]*playerPanel
 	work           sync.WaitGroup
 	once           sync.Once
 }
@@ -69,6 +71,7 @@ func NewRuntime(parent context.Context, cfg *config.Config, sessions *session.Ma
 	r := &Runtime{ctx: ctx, cancel: cancel, cfg: cfg, logger: logger, discord: d, rest: newDiscordHTTP(cfg.DiscordToken), state: newGatewayState(), removals: make(chan string, maxGatewayGuilds), sessions: sessions,
 		register: make(chan struct{}, 1), disconnected: make(chan struct{}, 1), slots: make(chan struct{}, 32), playSlots: make(chan struct{}, cfg.PlayCommandConcurrency), rejections: make(chan interactionRef, 16), routes: make(map[string]string)}
 	r.player, err = command.NewPlayer(ctx, resolver, r, logger, cfg.PlayCommandConcurrency)
+	r.panels = make(map[string]*playerPanel)
 	if err != nil {
 		cancel()
 		return nil, err
@@ -102,7 +105,7 @@ func (r *Runtime) configureGateway() {
 		if err != nil {
 			return nil, err
 		}
-		return newGatewaySocket(r.ctx, conn), nil
+		return netguard.Wrap(r.ctx, conn), nil
 	}}
 }
 
@@ -176,7 +179,7 @@ func (r *Runtime) handlers() {
 
 func (r *Runtime) readyRuntime() {
 	if r.voice.Load() == nil {
-		manager, err := discordvoice.NewManager(r.discord, r.logger)
+		manager, err := discordvoice.NewManager(r.ctx, r.discord, r.logger)
 		if err != nil {
 			r.logger.Error("Voice initialization failed", "event", "voice.initialize", "category", failure.Transport)
 			return
@@ -302,6 +305,7 @@ func (r *Runtime) removalLoop() {
 			}
 			r.mu.Lock()
 			delete(r.routes, guild)
+			delete(r.panels, guild)
 			r.mu.Unlock()
 		}
 	}
