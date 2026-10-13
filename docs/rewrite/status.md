@@ -111,9 +111,9 @@ Gateway/command readiness. The original `gobard-temp` remains stopped.
    to a cause; one successful run does not establish provider-wide reliability.
 2. The temporary SDK exposes no strict join for private workers, and some voice
    heartbeat reconnects ignore its disabled AutoReconnect setting. Containment
-   is implemented, but strict completion needs an explicit temporary exception
-   or upstream/separate-library fix. See [the source review](sdk-lifecycle-review.md).
-   No exception is implicitly approved by a successful user test.
+   is implemented, but the user explicitly rejected a temporary exception:
+   strict completion remains blocked until an upstream/separate-library fix is
+   integrated and verified. See [the source review and exit criteria](sdk-lifecycle-review.md).
 3. YouTube may reject authentication/automation externally. No personal cookies,
    auth bypass or unsupported fallback is required or implemented.
 4. Spotify metadata/player control and public self-hosted sources remain
@@ -121,7 +121,7 @@ Gateway/command readiness. The original `gobard-temp` remains stopped.
 
 The [acceptance checklist](acceptance-checklist.md) consolidates the remaining
 client tests. The full rewrite is **not declared complete** until those gates
-are resolved and SDK limitations are accepted or addressed. No automatic
+are resolved and the SDK lifecycle fix is verified. No automatic
 VPS rollout or image publication is authorized.
 
 User changes to `AGENTS.md`, removal of `CLAUDE.md`, and the pre-existing

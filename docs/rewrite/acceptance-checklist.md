@@ -28,6 +28,7 @@ provider anti-bot/authentication rejection is not fixed by trying personal cooki
 One successful song proves that observed path only. Fake-transport tests do not
 verify Discord connectivity or listening quality.
 
-The [SDK lifecycle exception](sdk-lifecycle-review.md) is a separate engineering
-decision. This checklist cannot prove private SDK worker joins or waive that
-requirement. The checklist is pending until actual client results are recorded.
+The [SDK lifecycle blocker](sdk-lifecycle-review.md) requires a verified library
+fix; the user rejected a temporary exception. This checklist cannot prove private
+SDK worker joins or waive that requirement. The checklist is pending until actual
+client results are recorded.

@@ -2,9 +2,9 @@
 
 The runtime has been replaced and is available for local Discord testing. It is
 not declared a completed production rewrite: the client acceptance pass remains,
-and the pinned SDK lifecycle exception requires an explicit decision or library
-fix. The latest listening rerun was reported successful; the earlier stutter's
-cause remains unresolved.
+and the pinned SDK lifecycle gaps require a verified library fix. The user
+explicitly rejected a temporary exception. The latest listening rerun was
+reported successful; the earlier stutter's cause remains unresolved.
 
 ## Implemented
 
@@ -90,14 +90,15 @@ cause remains unresolved.
   reconnect paths ignore the disabled AutoReconnect flag. GoBard cancels its
   sockets and joins its own work; native DAVE is non-preemptible. The exact
   [SDK lifecycle review](sdk-lifecycle-review.md) records containment and the
-  unresolved exception. User listening tests cannot waive it.
+  strict completion blocker and required verification. The user declined the
+  temporary exception; user listening tests cannot waive the blocker.
 - No VPS rollout, production-cache migration, credential rotation, image push
   or publisher change occurred. Local testing uses its separate labeled volume.
 
 The remaining user-facing pass is [the acceptance checklist](acceptance-checklist.md).
 Live client rendering/controls, voice reconnect, active shutdown and multiguild
 listening are still unverified for this candidate. Provider availability remains
-external; the SDK exception is an engineering decision rather than a listening test.
+external; the SDK fix is a required engineering gate rather than a listening test.
 
 ## Proposed only
 

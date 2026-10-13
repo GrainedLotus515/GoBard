@@ -86,4 +86,4 @@ no registry lock spans HTTP and no interaction token is retained. Observations
 predating a newly rendered command cannot overwrite it. A shared `netguard`
 socket helper bounds context-free SDK WebSocket writes and joins its own
 cancellation callback. It does not promise joins for private SDK workers; see
-[the specific lifecycle exception](rewrite/sdk-lifecycle-review.md).
+[the SDK lifecycle completion blocker](rewrite/sdk-lifecycle-review.md).

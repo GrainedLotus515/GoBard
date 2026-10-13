@@ -1,9 +1,10 @@
-# Temporary SDK lifecycle exception — 2026-10-13
+# SDK lifecycle completion blocker — 2026-10-13
 
-This is an unresolved engineering exception, not a user playback-test gate.
+This is a strict completion blocker, not a user playback-test gate.
 The engineering standard requires every goroutine to be cancellable and joined.
 The pinned libraries do not expose enough public lifecycle API to prove that
-property for their internal workers. No exception has been approved implicitly.
+property for their internal workers. The user explicitly declined a temporary
+exception: “Keep strict completion blocked until the library is fixed.”
 
 ## Exact dependencies and source findings
 
@@ -45,12 +46,28 @@ manager-rooted dial guard stops new network connections after manager shutdown
 but cannot interrupt a private background retry timer. Process exit provides
 OS cleanup; it is not a substitute for the in-process lifecycle contract.
 
-## Decision needed before claiming strict rewrite completion
+## Decision and evidence required to clear the blocker
 
-Either explicitly accept these temporary SDK limitations for the current bot,
-with the planned independent library responsible for closing them, or require
-an upstream/separate-library fix with public cancellation/join APIs and tests.
+The user requires an upstream/separate-library fix with public cancellation/join
+APIs and tests. The existing adapter mitigations do not satisfy this gate.
 Reimplementing/forking general Discord Gateway/voice internals inside GoBard is
 outside the approved architecture. A successful user acceptance run cannot
-resolve or waive this exception. The rest of the implementation and offline
+resolve or waive this blocker. The rest of the implementation and offline
 verification can be completed independently.
+
+Before clearing the blocker, pin the fixed library versions or integrate the
+independent replacement, then verify:
+
+- Gateway and voice Close cancel and join all owned workers, including opening,
+  heartbeat, listener and asynchronous event work, under concurrent cancellation.
+- Every reconnect path obeys the configured policy, finite budgets and lifecycle
+  cancellation; no private background retry survives session or manager close.
+- Canceled opening cannot strand a result send; connection-map cleanup is race
+  safe and repeated shutdown is safe.
+- Native DAVE work has a verified bounded completion/cleanup contract compatible
+  with shutdown; a Go context alone is not evidence of preemption.
+- Library lifecycle/fault-injection/race tests and GoBard adapter tests pass,
+  followed by authorized live reconnect and active-playback shutdown checks.
+
+Record exact dependency revisions and test evidence here. Neither process exit,
+a sleep after Close, nor an audible song proves that this gate has been met.

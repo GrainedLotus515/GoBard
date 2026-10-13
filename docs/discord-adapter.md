@@ -102,8 +102,9 @@ flag. Both WebSocket transports have owned cancellation and five-second write
 deadlines. Manager close snapshots connections through the SDK's locked iterator
 and closes outside the lock, avoiding its unsafe map-wide Close implementation.
 Native DAVE operations remain non-preemptible. These are unresolved engineering
-exceptions, not issues a listening test can waive. Exact source findings,
-containment and the required decision are in
+gaps that block strict completion until the library is fixed and verified; the
+user rejected a temporary exception. Exact source findings, containment and
+required verification are in
 [the SDK lifecycle review](rewrite/sdk-lifecycle-review.md).
 Gateway state caching is disabled in the SDK. The adapter retains only bounded
 guild IDs and user-to-voice-channel observations: 1,024 guilds, 1,024 voices per

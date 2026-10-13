@@ -7,8 +7,9 @@ It does not support Spotify, SponsorBlock, YouTube API keys, arbitrary audio URL
 This rewrite branch starts the v2 runtime. Offline playback/race/quality gates
 and real YouTube/Discord audio with source recovery to pipeline completion are
 verified, with a successful listening rerun. Live controls and voice reconnect
-remain test gates. Private SDK lifecycle limitations also need an explicit
-exception or library fix; listening tests cannot establish strict worker joins.
+remain test gates. Private SDK lifecycle limitations block strict completion
+until a library fix is verified; the user rejected a temporary exception.
+Listening tests cannot establish strict worker joins.
 See [rewrite status](docs/rewrite/status.md)
 before considering a rollout. No v2 image has been published or deployed to the VPS.
 
