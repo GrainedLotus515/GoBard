@@ -1,5 +1,10 @@
 # Architecture
 
+Product constraint confirmed 2026-10-15: playback and controls stay in Discord.
+The delivery target remains Discord voice; an external official-player page is
+not a substitute. Source/provider alternatives must satisfy actual audio delivery
+and provider authorization, independently of metadata or player-control APIs.
+
 Decision 1 (2026-10-07): modular monolith; retain the tested deployment and URL
 policy while replacing orchestration. Existing internals are reference material.
 

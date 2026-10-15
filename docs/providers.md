@@ -1,5 +1,23 @@
 # Provider capabilities
 
+## Product requirement confirmed 2026-10-15
+
+Music playback and controls must remain in Discord, with audio delivered through
+Discord voice. A companion browser page or external official player does not
+satisfy this requirement. Official-player controls or metadata alone must not be
+presented as an alternative Discord audio backend.
+
+The user reports persistent CAPTCHA rejection from the current VPS IP. Treat
+that as an external deployment constraint, not a defect the rewrite can promise
+to fix. Local playback has the recorded successful tests below; no inference is
+made that another host will guarantee provider availability. Alternative backends
+must establish both usable audio acquisition and authorization for the intended
+delivery. Browser capture, personal cookies and restriction bypasses are not a
+solution within the approved scope. A separate worker remains a proposal, not an
+implemented workaround or an authorization to alter infrastructure.
+
+## Capability matrix
+
 | Provider/backend | Metadata | Audio acquisition | Official player | Discord delivery | Status |
 | --- | --- | --- | --- | --- | --- |
 | YouTube/yt-dlp | Search/video/playlist | Conditional on provider availability and permitted use | Separate browser embedding | Through decode/Opus pipeline | Live audio/recovery and successful listening rerun verified; source resets remain possible |
