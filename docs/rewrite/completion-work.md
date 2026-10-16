@@ -79,3 +79,11 @@ the increased memory footprint are recorded in performance.md. The generated
 input fits the ring; long high-bitrate source admission remains a separate
 constraint. Docker race/helper tests and lint passed for the new workload.
 These gates do not verify provider networking, native DAVE or human audibility.
+
+## Simplification checkpoint — 2026-10-16
+
+Removed the unused pathname-creator/single-flight cache API and its separate
+creator-admission state. Production and benchmark cache writes now use the same
+single-writer transaction; tests retain persistence, lease incarnation, eviction,
+unsafe-key, symlink, byte-budget, cancellation and abort coverage. Docker race
+and lint gates pass. Repeated capacity validation is running for this final form.

@@ -23,12 +23,11 @@ var (
 	ErrEntryTooLarge = errors.New("cache entry exceeds configured size limit")
 	ErrInvalidKey    = errors.New("invalid cache key")
 	ErrEntryLeased   = errors.New("cache entry is in use")
-	ErrBusy          = errors.New("cache creator budget exhausted")
+	ErrBusy          = errors.New("cache writer busy")
 	ErrIndexLimit    = errors.New("cache index entry limit exceeded")
 )
 
 const maxEntries = 65536
-const maxCreators = 16
 
 // Cache manages cached audio files. All mutations of entries and currentSize
 // are protected by mu; file creation happens outside that lock and is
@@ -39,7 +38,6 @@ type Cache struct {
 	mu           sync.RWMutex
 	entries      map[string]*cacheEntry
 	currentSize  int64
-	inFlight     map[string]*inFlightCreate
 	tempSequence atomic.Uint64
 	mutation     chan struct{}
 	writer       chan struct{}
@@ -55,12 +53,6 @@ type cacheEntry struct {
 
 	leases   int
 	evicting bool
-}
-
-type inFlightCreate struct {
-	done chan struct{}
-	path string
-	err  error
 }
 
 // Lease pins a cache entry against eviction until Release is called. It is
@@ -98,7 +90,6 @@ func NewCache(dir string, maxSize int64) (*Cache, error) {
 		dir:      dir,
 		maxSize:  maxSize,
 		entries:  make(map[string]*cacheEntry),
-		inFlight: make(map[string]*inFlightCreate),
 		mutation: make(chan struct{}, 1),
 		writer:   make(chan struct{}, 1),
 	}
@@ -227,95 +218,6 @@ func (c *Cache) release(key string, expected *cacheEntry) {
 	if entry, ok := c.entries[key]; ok && entry == expected && entry.leases > 0 {
 		entry.leases--
 	}
-}
-
-// GetOrCreate gets a cached file or creates it using the supplied function.
-// Concurrent requests for one key share a single creator and every creator
-// writes to a temporary file that is atomically renamed only after completion.
-func (c *Cache) GetOrCreate(key string, create func(path string) error) (string, error) {
-	return c.GetOrCreateContext(context.Background(), key, create)
-}
-
-// GetOrCreateContext allows a waiter to cancel without canceling another caller's creator.
-// A creator runs synchronously and must honor its own caller context.
-func (c *Cache) GetOrCreateContext(ctx context.Context, key string, create func(path string) error) (string, error) {
-	if err := ctx.Err(); err != nil {
-		return "", err
-	}
-	if err := validateKey(key); err != nil {
-		return "", err
-	}
-	if create == nil {
-		return "", fmt.Errorf("cache creator is required")
-	}
-
-	if lease, exists := c.Acquire(key); exists {
-		path := lease.Path
-		lease.Release()
-		return path, nil
-	}
-	c.mu.Lock()
-	if pending, exists := c.inFlight[key]; exists {
-		c.mu.Unlock()
-		select {
-		case <-pending.done:
-			return pending.path, pending.err
-		case <-ctx.Done():
-			return "", ctx.Err()
-		}
-	}
-	if len(c.inFlight) >= maxCreators {
-		c.mu.Unlock()
-		return "", ErrBusy
-	}
-	pending := &inFlightCreate{done: make(chan struct{})}
-	c.inFlight[key] = pending
-	c.mu.Unlock()
-
-	// A preceding creator may have published between the initial lookup and
-	// our admission. Recheck after reserving this key to avoid redundant work.
-	var path string
-	var err error
-	if lease, exists := c.Acquire(key); exists {
-		path = lease.Path
-		lease.Release()
-	} else {
-		path, err = c.createAndStore(ctx, key, create)
-	}
-
-	c.mu.Lock()
-	pending.path = path
-	pending.err = err
-	delete(c.inFlight, key)
-	close(pending.done)
-	c.mu.Unlock()
-
-	return path, err
-}
-
-func (c *Cache) createAndStore(ctx context.Context, key string, create func(path string) error) (string, error) {
-	tmpPath, err := c.tempPath(key)
-	if err != nil {
-		return "", err
-	}
-	defer os.Remove(tmpPath)
-
-	if err := create(tmpPath); err != nil {
-		return "", fmt.Errorf("failed to create cached file: %w", err)
-	}
-
-	info, err := os.Lstat(tmpPath)
-	if err != nil {
-		return "", fmt.Errorf("failed to stat created file: %w", err)
-	}
-	if !info.Mode().IsRegular() {
-		return "", fmt.Errorf("created cache file is not regular")
-	}
-	if info.Size() > c.maxSize {
-		return "", fmt.Errorf("%w: %d bytes exceeds %d bytes", ErrEntryTooLarge, info.Size(), c.maxSize)
-	}
-
-	return c.commitTemp(ctx, key, tmpPath, info.Size())
 }
 
 // commitTemp serializes mutations with a bounded admission gate while leaving

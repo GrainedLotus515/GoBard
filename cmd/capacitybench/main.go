@@ -475,9 +475,10 @@ func runCachePressure(ctx context.Context, workers *sync.WaitGroup, cacheStore *
 		case <-ticker.C:
 			iteration++
 			key := cache.GenerateKey(fmt.Sprintf("pressure-%d", iteration%96))
-			if _, err := cacheStore.GetOrCreateContext(ctx, key, func(path string) error {
-				return os.WriteFile(path, make([]byte, 4096), 0o600)
-			}); err != nil {
+			if err := writeCacheFixture(ctx, cacheStore, key); err != nil {
+				if errors.Is(err, cache.ErrBusy) {
+					continue
+				}
 				if ctx.Err() == nil {
 					measured.workerFailures.Add(1)
 				}
@@ -490,13 +491,27 @@ func runCachePressure(ctx context.Context, workers *sync.WaitGroup, cacheStore *
 func seedCache(cacheStore *cache.Cache) error {
 	for index := range 3 {
 		key := cache.GenerateKey(fmt.Sprintf("guild-0-cache-%d", index))
-		if _, err := cacheStore.GetOrCreate(key, func(path string) error {
-			return os.WriteFile(path, make([]byte, 4096), 0o600)
-		}); err != nil {
+		if err := writeCacheFixture(context.Background(), cacheStore, key); err != nil {
 			return fmt.Errorf("seed benchmark cache: %w", err)
 		}
 	}
 	return nil
+}
+
+func writeCacheFixture(ctx context.Context, store *cache.Cache, key string) error {
+	if lease, ok := store.Acquire(key); ok {
+		lease.Release()
+		return nil
+	}
+	w, err := store.TryBegin(key, 4096)
+	if err != nil {
+		return err
+	}
+	var data [4096]byte
+	if _, err := w.Write(data[:]); err != nil {
+		return errors.Join(err, w.Abort())
+	}
+	return w.Commit(ctx)
 }
 
 type memorySample struct{ total, anonymous uint64 }

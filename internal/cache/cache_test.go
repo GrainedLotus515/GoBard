@@ -3,109 +3,17 @@ package cache
 import (
 	"context"
 	"errors"
-	"fmt"
 	"os"
 	"path/filepath"
-	"sync"
-	"sync/atomic"
 	"testing"
-	"time"
 )
-
-func TestCanceledWaiterDoesNotCancelCreator(t *testing.T) {
-	c, err := NewCache(t.TempDir(), 1024)
-	if err != nil {
-		t.Fatal(err)
-	}
-	started, release, done := make(chan struct{}), make(chan struct{}), make(chan error, 1)
-	go func() {
-		_, err := c.GetOrCreate("one.webm", func(path string) error {
-			close(started)
-			<-release
-			return os.WriteFile(path, []byte("audio"), 0o600)
-		})
-		done <- err
-	}()
-	<-started
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
-	defer cancel()
-	_, err = c.GetOrCreateContext(ctx, "one.webm", func(string) error { t.Error("duplicate creator"); return nil })
-	if !errors.Is(err, context.DeadlineExceeded) {
-		t.Errorf("wait error = %v", err)
-	}
-	close(release)
-	if err := <-done; err != nil {
-		t.Fatal(err)
-	}
-	if _, ok := c.Get("one.webm"); !ok {
-		t.Fatal("creator did not publish")
-	}
-}
-
-func TestCanceledCreatorCannotPublish(t *testing.T) {
-	c, err := NewCache(t.TempDir(), 1024)
-	if err != nil {
-		t.Fatal(err)
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	_, err = c.GetOrCreateContext(ctx, "track.webm", func(path string) error {
-		if err := os.WriteFile(path, []byte("audio"), 0o600); err != nil {
-			return err
-		}
-		cancel()
-		return nil
-	})
-	if !errors.Is(err, context.Canceled) {
-		t.Fatalf("publish error = %v", err)
-	}
-	files, err := os.ReadDir(c.dir)
-	if err != nil || len(files) != 0 {
-		t.Fatalf("canceled files = %v, %v", files, err)
-	}
-}
-
-func TestCreatorAdmissionIsBoundedAndReleased(t *testing.T) {
-	c, err := NewCache(t.TempDir(), 1024)
-	if err != nil {
-		t.Fatal(err)
-	}
-	started, release, done := make(chan struct{}, maxCreators), make(chan struct{}), make(chan error, maxCreators)
-	for i := range maxCreators {
-		go func() {
-			_, err := c.GetOrCreate(fmt.Sprintf("%d.webm", i), func(path string) error {
-				started <- struct{}{}
-				<-release
-				return os.WriteFile(path, []byte("audio"), 0o600)
-			})
-			done <- err
-		}()
-	}
-	for range maxCreators {
-		<-started
-	}
-	_, err = c.GetOrCreate("overflow.webm", func(string) error { t.Error("excess creator admitted"); return nil })
-	if !errors.Is(err, ErrBusy) {
-		t.Errorf("overflow error = %v", err)
-	}
-	close(release)
-	for range maxCreators {
-		if err := <-done; err != nil {
-			t.Fatal(err)
-		}
-	}
-	if _, err := c.GetOrCreate("after.webm", func(path string) error { return os.WriteFile(path, []byte("audio"), 0o600) }); err != nil {
-		t.Fatal(err)
-	}
-}
 
 func TestOldLeaseCannotUnpinReplacement(t *testing.T) {
 	c, err := NewCache(t.TempDir(), 1024)
 	if err != nil {
 		t.Fatal(err)
 	}
-	create := func(path string) error { return os.WriteFile(path, []byte("audio"), 0o600) }
-	path, err := c.GetOrCreate("track.webm", create)
+	path, err := storeBytes(c, "track.webm", []byte("audio"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -116,7 +24,7 @@ func TestOldLeaseCannotUnpinReplacement(t *testing.T) {
 	if err := os.Remove(path); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := c.GetOrCreate("track.webm", create); err != nil {
+	if _, err := storeBytes(c, "track.webm", []byte("audio")); err != nil {
 		t.Fatal(err)
 	}
 	replacement, ok := c.Acquire("track.webm")
@@ -136,27 +44,6 @@ func TestOldLeaseCannotUnpinReplacement(t *testing.T) {
 	}
 }
 
-func TestCreatorSymlinkRejected(t *testing.T) {
-	dir := t.TempDir()
-	target := filepath.Join(dir, "outside")
-	if err := os.WriteFile(target, []byte("private"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	c, err := NewCache(filepath.Join(dir, "cache"), 1024)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := c.GetOrCreate("track.webm", func(path string) error { return os.Symlink(target, path) }); err == nil {
-		t.Fatal("symlink published")
-	}
-	if count, size, _ := c.GetStats(); count != 0 || size != 0 {
-		t.Fatal("rejected file indexed")
-	}
-	if data, err := os.ReadFile(target); err != nil || string(data) != "private" {
-		t.Fatal("symlink target changed")
-	}
-}
-
 func BenchmarkCacheAcquire(b *testing.B) {
 	dir := b.TempDir()
 	cache, err := NewCache(dir, 1024*1024)
@@ -164,9 +51,7 @@ func BenchmarkCacheAcquire(b *testing.B) {
 		b.Fatal(err)
 	}
 	key := GenerateKey("https://www.youtube.com/watch?v=benchmark")
-	if _, err := cache.GetOrCreate(key, func(path string) error {
-		return os.WriteFile(path, []byte("benchmark audio"), 0o600)
-	}); err != nil {
+	if _, err := storeBytes(cache, key, []byte("benchmark audio")); err != nil {
 		b.Fatal(err)
 	}
 	b.ReportAllocs()
@@ -182,90 +67,19 @@ func BenchmarkCacheAcquire(b *testing.B) {
 	})
 }
 
-func TestGetOrCreateSingleFlight(t *testing.T) {
-	c, err := NewCache(t.TempDir(), 16*1024*1024)
-	if err != nil {
-		t.Fatalf("NewCache() error = %v", err)
-	}
-
-	key := GenerateKey("https://example.com/audio")
-	var createCalls int32
-
-	create := func(path string) error {
-		atomic.AddInt32(&createCalls, 1)
-		time.Sleep(25 * time.Millisecond)
-		return os.WriteFile(path, []byte("audio-bytes"), 0o600)
-	}
-
-	const workers = 24
-	var wg sync.WaitGroup
-	paths := make(chan string, workers)
-	errs := make(chan error, workers)
-
-	for i := 0; i < workers; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			path, err := c.GetOrCreate(key, create)
-			if err != nil {
-				errs <- err
-				return
-			}
-			paths <- path
-		}()
-	}
-
-	wg.Wait()
-	close(paths)
-	close(errs)
-
-	for err := range errs {
-		t.Fatalf("GetOrCreate() unexpected error: %v", err)
-	}
-
-	var firstPath string
-	count := 0
-	for path := range paths {
-		count++
-		if firstPath == "" {
-			firstPath = path
-			continue
-		}
-		if path != firstPath {
-			t.Fatalf("GetOrCreate() returned different paths: %q vs %q", firstPath, path)
-		}
-	}
-
-	if count != workers {
-		t.Fatalf("GetOrCreate() returned %d successful paths, want %d", count, workers)
-	}
-
-	if got := atomic.LoadInt32(&createCalls); got != 1 {
-		t.Fatalf("create() called %d times, want 1", got)
-	}
-
-	if _, err := os.Stat(firstPath); err != nil {
-		t.Fatalf("cached file missing at %q: %v", firstPath, err)
-	}
-}
-
-func TestGetOrCreateRejectsOversizeWithoutEvictingExistingEntry(t *testing.T) {
+func TestWriteRejectsOversizeWithoutEvictingExistingEntry(t *testing.T) {
 	c, err := NewCache(t.TempDir(), 4)
 	if err != nil {
 		t.Fatalf("NewCache() error = %v", err)
 	}
 
 	firstKey := GenerateKey("https://example.com/first")
-	firstPath, err := c.GetOrCreate(firstKey, func(path string) error {
-		return os.WriteFile(path, []byte("abc"), 0o600)
-	})
+	firstPath, err := storeBytes(c, firstKey, []byte("abc"))
 	if err != nil {
 		t.Fatalf("create first entry: %v", err)
 	}
 
-	_, err = c.GetOrCreate(GenerateKey("https://example.com/oversize"), func(path string) error {
-		return os.WriteFile(path, []byte("12345"), 0o600)
-	})
+	_, err = storeBytes(c, GenerateKey("https://example.com/oversize"), []byte("12345"))
 	if !errors.Is(err, ErrEntryTooLarge) {
 		t.Fatalf("oversize create error = %v, want ErrEntryTooLarge", err)
 	}
@@ -313,9 +127,7 @@ func TestLeasePreventsEvictionUntilReleased(t *testing.T) {
 	}
 
 	firstKey := GenerateKey("https://example.com/leased")
-	if _, err := c.GetOrCreate(firstKey, func(path string) error {
-		return os.WriteFile(path, []byte("1234"), 0o600)
-	}); err != nil {
+	if _, err := storeBytes(c, firstKey, []byte("1234")); err != nil {
 		t.Fatalf("create first entry: %v", err)
 	}
 	lease, ok := c.Acquire(firstKey)
@@ -324,21 +136,17 @@ func TestLeasePreventsEvictionUntilReleased(t *testing.T) {
 	}
 
 	secondKey := GenerateKey("https://example.com/second")
-	_, err = c.GetOrCreate(secondKey, func(path string) error {
-		return os.WriteFile(path, []byte("5678"), 0o600)
-	})
+	_, err = storeBytes(c, secondKey, []byte("5678"))
 	if err == nil {
-		t.Fatal("GetOrCreate() with only a leased eviction candidate succeeded, want error")
+		t.Fatal("cache write with only a leased eviction candidate succeeded, want error")
 	}
 	if _, ok := c.Get(firstKey); !ok {
 		t.Fatal("leased entry was evicted")
 	}
 
 	lease.Release()
-	if _, err := c.GetOrCreate(secondKey, func(path string) error {
-		return os.WriteFile(path, []byte("5678"), 0o600)
-	}); err != nil {
-		t.Fatalf("GetOrCreate() after Release() error = %v", err)
+	if _, err := storeBytes(c, secondKey, []byte("5678")); err != nil {
+		t.Fatalf("cache write after Release() error = %v", err)
 	}
 	if _, ok := c.Get(firstKey); ok {
 		t.Fatal("released least-recently-used entry still present after capacity eviction")
@@ -354,9 +162,7 @@ func TestConcurrentAcquireClearDeletionResizeAndEviction(t *testing.T) {
 		t.Fatalf("NewCache() error = %v", err)
 	}
 	firstKey := GenerateKey("https://example.com/concurrent-first")
-	firstPath, err := c.GetOrCreate(firstKey, func(path string) error {
-		return os.WriteFile(path, []byte("1234"), 0o600)
-	})
+	firstPath, err := storeBytes(c, firstKey, []byte("1234"))
 	if err != nil {
 		t.Fatalf("create first entry: %v", err)
 	}
@@ -405,9 +211,7 @@ func TestConcurrentAcquireClearDeletionResizeAndEviction(t *testing.T) {
 
 	held.Release()
 	secondKey := GenerateKey("https://example.com/concurrent-second")
-	if _, err := c.GetOrCreate(secondKey, func(path string) error {
-		return os.WriteFile(path, []byte("abcd"), 0o600)
-	}); err != nil {
+	if _, err := storeBytes(c, secondKey, []byte("abcd")); err != nil {
 		t.Fatalf("evict resized entry: %v", err)
 	}
 	if _, ok := c.Get(firstKey); ok {
@@ -436,81 +240,54 @@ func TestCacheRejectsUnsafeKeys(t *testing.T) {
 	}
 
 	for _, key := range []string{"", "../outside.webm", "/tmp/outside.webm", "a/b.webm"} {
-		if _, err := c.GetOrCreate(key, func(path string) error {
-			return os.WriteFile(path, []byte("audio"), 0o600)
-		}); !errors.Is(err, ErrInvalidKey) {
-			t.Fatalf("GetOrCreate(%q) error = %v, want ErrInvalidKey", key, err)
+		if _, err := storeBytes(c, key, []byte("audio")); !errors.Is(err, ErrInvalidKey) {
+			t.Fatalf("cache write(%q) error = %v, want ErrInvalidKey", key, err)
 		}
 	}
 }
 
-func TestGetOrCreateFailureReleasesInFlight(t *testing.T) {
-	c, err := NewCache(t.TempDir(), 16*1024*1024)
+// Test setup uses the same bounded transaction as acquisition; no pathname
+// creator callback bypasses the writer's byte budget.
+func storeBytes(c *Cache, key string, data []byte) (string, error) {
+	if path, ok := c.Get(key); ok {
+		return path, nil
+	}
+	w, err := c.TryBegin(key, c.maxSize)
 	if err != nil {
-		t.Fatalf("NewCache() error = %v", err)
+		return "", err
 	}
-
-	key := GenerateKey("https://example.com/failure")
-	var failCalls int32
-
-	failCreate := func(_ string) error {
-		atomic.AddInt32(&failCalls, 1)
-		time.Sleep(20 * time.Millisecond)
-		return errors.New("forced create failure")
+	if _, err := w.Write(data); err != nil {
+		return "", errors.Join(err, w.Abort())
 	}
-
-	const workers = 12
-	var wg sync.WaitGroup
-	errs := make(chan error, workers)
-
-	for i := 0; i < workers; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			_, err := c.GetOrCreate(key, failCreate)
-			errs <- err
-		}()
+	if err := w.Commit(context.Background()); err != nil {
+		return "", err
 	}
+	path, _ := c.Get(key)
+	return path, nil
+}
 
-	wg.Wait()
-	close(errs)
-
-	for err := range errs {
-		if err == nil {
-			t.Fatal("GetOrCreate() expected error, got nil")
-		}
+func TestExistingSymlinkIsNotAudio(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "outside")
+	if err := os.WriteFile(target, []byte("private"), 0600); err != nil {
+		t.Fatal(err)
 	}
-
-	if got := atomic.LoadInt32(&failCalls); got != 1 {
-		t.Fatalf("fail create() called %d times, want 1", got)
-	}
-
-	var successCalls int32
-	successCreate := func(path string) error {
-		atomic.AddInt32(&successCalls, 1)
-		return os.WriteFile(path, []byte("ok"), 0o600)
-	}
-
-	path, err := c.GetOrCreate(key, successCreate)
+	c, err := NewCache(filepath.Join(dir, "cache"), 1024)
 	if err != nil {
-		t.Fatalf("GetOrCreate() after failure error = %v", err)
+		t.Fatal(err)
 	}
-
-	if got := atomic.LoadInt32(&successCalls); got != 1 {
-		t.Fatalf("success create() called %d times, want 1", got)
+	if err := os.Symlink(target, filepath.Join(c.dir, "track.webm")); err != nil {
+		t.Fatal(err)
 	}
-
-	path2, err := c.GetOrCreate(key, func(_ string) error {
-		atomic.AddInt32(&successCalls, 1)
-		return nil
-	})
+	restarted, err := NewCache(c.dir, 1024)
 	if err != nil {
-		t.Fatalf("second GetOrCreate() error = %v", err)
+		t.Fatal(err)
 	}
-	if path2 != path {
-		t.Fatalf("second GetOrCreate() path = %q, want %q", path2, path)
+	if lease, ok := restarted.Acquire("track.webm"); ok {
+		lease.Release()
+		t.Fatal("symlink accepted as audio")
 	}
-	if got := atomic.LoadInt32(&successCalls); got != 1 {
-		t.Fatalf("cached lookup should not call create(), called %d times", got)
+	if data, err := os.ReadFile(target); err != nil || string(data) != "private" {
+		t.Fatal("symlink target modified")
 	}
 }

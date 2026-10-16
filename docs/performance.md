@@ -71,7 +71,7 @@ Metadata playlist rows are decoded incrementally and rejected at the configured
 track bound before object expansion; nested playlists are unavailable.
 
 Cache storage has a 65,536-entry index cap, 256-entry directory scan batches,
-16 distinct concurrent creators, and one filesystem mutation at a time. The
+one bounded transaction writer, and one filesystem mutation at a time. The
 index cap fails startup without deleting completed media. Snapshot sorting and
 unlink/rename occur outside the metadata lock. External processes modifying the
 same directory are outside the cache's byte-accounting guarantee.
