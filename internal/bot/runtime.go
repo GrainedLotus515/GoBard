@@ -359,7 +359,13 @@ func (r *Runtime) Live() error {
 
 func (r *Runtime) Dimensions() health.Dimensions {
 	states := [3]string{"unknown", "last_success", "last_failure"}
-	return health.Dimensions{DiscordConnected: r.connected.Load(), CommandsReady: r.registered.Load(), Source: states[r.sourceStatus.Load()], Pipeline: states[r.pipelineStatus.Load()], ActiveDelivery: r.delivering.Load()}
+	ctx, cancel := context.WithTimeout(r.ctx, 200*time.Millisecond)
+	defer cancel()
+	busy, err := r.sessions.Busy(ctx)
+	if err != nil {
+		busy = -1
+	}
+	return health.Dimensions{DiscordConnected: r.connected.Load(), CommandsReady: r.registered.Load(), Source: states[r.sourceStatus.Load()], Pipeline: states[r.pipelineStatus.Load()], ActiveDelivery: r.delivering.Load(), BusySessions: busy}
 }
 func (r *Runtime) Ready(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {

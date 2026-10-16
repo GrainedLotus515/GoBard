@@ -77,9 +77,11 @@ last observed source and pipeline success/failure, and sampled active deliveries
 Source includes cache acquisition. Unknown is explicit until an audio attempt
 provides evidence; a successful metadata lookup is not audio-source proof.
 Delivery counts observe increasing accepted frames, not human audibility.
-Observers sample at one second. A slow player edit can delay the next sample by
-up to eight seconds; delivery is a sampled indicator,
-not an instantaneous count. Readiness requires initialized local tools/cache,
+Observers sample at one second independently of the player editor. Delivery is
+a sampled indicator, not an instantaneous count. `busy_sessions` separately
+observes outstanding playback (including pause/preparation), metadata reservations
+and transport work. It is -1 if inspection fails. It is not an admission lock:
+new commands can arrive after a probe. Readiness requires initialized local tools/cache,
 Gateway connection, voice adapter and reconciled commands; it never makes an
 external provider probe a requirement for an idle process.
 

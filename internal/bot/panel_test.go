@@ -47,30 +47,30 @@ func TestPanelCoalescesProgressAndUpdatesState(t *testing.T) {
 	})
 	now := time.Now()
 	s := session.Snapshot{Current: 0, Active: true, Connected: true, Frames: 100, Tracks: []media.Track{{Title: "First", Duration: time.Minute}}}
-	r.updatePanel("guild", s, now)
+	r.updatePanel(r.ctx, "guild", s, now)
 	s.Position = 2 * time.Second
-	r.updatePanel("guild", s, now.Add(4*time.Second))
+	r.updatePanel(r.ctx, "guild", s, now.Add(4*time.Second))
 	if len(cards) != 1 {
 		t.Fatal("unchanged progress generated edit")
 	}
 	s.Position = 16 * time.Second
-	r.updatePanel("guild", s, now.Add(16*time.Second))
+	r.updatePanel(r.ctx, "guild", s, now.Add(16*time.Second))
 	s.Paused = true
-	r.updatePanel("guild", s, now.Add(17*time.Second))
+	r.updatePanel(r.ctx, "guild", s, now.Add(17*time.Second))
 	if len(cards) != 2 {
 		t.Fatal("minimum update interval ignored")
 	}
-	r.updatePanel("guild", s, now.Add(19*time.Second))
+	r.updatePanel(r.ctx, "guild", s, now.Add(19*time.Second))
 	if cards[2].Author.Name != "Paused" {
 		t.Fatal("pause not reflected")
 	}
 	s.Tracks[0].Title, s.Paused, s.Position = "Second", false, 0
-	r.updatePanel("guild", s, now.Add(22*time.Second))
+	r.updatePanel(r.ctx, "guild", s, now.Add(22*time.Second))
 	if cards[3].Title != "Second" {
 		t.Fatal("track change not reflected")
 	}
 	s.Current, s.Tracks, s.Active = -1, nil, false
-	r.updatePanel("guild", s, now.Add(25*time.Second))
+	r.updatePanel(r.ctx, "guild", s, now.Add(25*time.Second))
 	if cards[4].Title != "Nothing playing" {
 		t.Fatal("drain not reflected")
 	}
@@ -87,7 +87,7 @@ func TestPanelFailuresAreFiniteAndRespectRateLimit(t *testing.T) {
 			})
 			now := time.Now()
 			for i := 0; i < 600; i++ {
-				r.updatePanel("guild", session.Snapshot{Current: -1}, now.Add(time.Duration(i)*time.Second))
+				r.updatePanel(r.ctx, "guild", session.Snapshot{Current: -1}, now.Add(time.Duration(i)*time.Second))
 			}
 			want := 3
 			if code == 403 || code == 404 {
@@ -108,12 +108,12 @@ func TestPanel429DoesNotRetryBeforeHeaderDelay(t *testing.T) {
 		return &http.Response{StatusCode: 429, Header: http.Header{"Retry-After": []string{"120"}}, Body: io.NopCloser(strings.NewReader("{}"))}, nil
 	})
 	now := time.Now()
-	r.updatePanel("guild", session.Snapshot{Current: -1}, now)
-	r.updatePanel("guild", session.Snapshot{Current: -1}, now.Add(119*time.Second))
+	r.updatePanel(r.ctx, "guild", session.Snapshot{Current: -1}, now)
+	r.updatePanel(r.ctx, "guild", session.Snapshot{Current: -1}, now.Add(119*time.Second))
 	if calls != 1 {
 		t.Fatal("rate limit ignored")
 	}
-	r.updatePanel("guild", session.Snapshot{Current: -1}, now.Add(120*time.Second))
+	r.updatePanel(r.ctx, "guild", session.Snapshot{Current: -1}, now.Add(120*time.Second))
 	if calls != 2 {
 		t.Fatal("bounded retry not performed")
 	}
@@ -139,8 +139,8 @@ func TestPanelLongRateLimitSuspendsUpdates(t *testing.T) {
 		return &http.Response{StatusCode: 429, Header: http.Header{"Retry-After": []string{"7200"}}, Body: io.NopCloser(strings.NewReader("{}"))}, nil
 	})
 	now := time.Now()
-	r.updatePanel("guild", session.Snapshot{Current: -1}, now)
-	r.updatePanel("guild", session.Snapshot{Current: -1}, now.Add(2*time.Hour))
+	r.updatePanel(r.ctx, "guild", session.Snapshot{Current: -1}, now)
+	r.updatePanel(r.ctx, "guild", session.Snapshot{Current: -1}, now.Add(2*time.Hour))
 	if calls != 1 || p.message != "" {
 		t.Fatal("long rate limit was shortened")
 	}
@@ -156,9 +156,9 @@ func TestPanelJoinsCanceledHTTPAndSkipsBusyUpdates(t *testing.T) {
 	})
 	var wg sync.WaitGroup
 	wg.Add(1)
-	go func() { defer wg.Done(); r.updatePanel("guild", session.Snapshot{Current: -1}, time.Now()) }()
+	go func() { defer wg.Done(); r.updatePanel(r.ctx, "guild", session.Snapshot{Current: -1}, time.Now()) }()
 	<-entered
-	r.updatePanel("guild", session.Snapshot{Current: -1}, time.Now())
+	r.updatePanel(r.ctx, "guild", session.Snapshot{Current: -1}, time.Now())
 	r.cancel()
 	wg.Wait()
 	if len(p.gate) != 0 {

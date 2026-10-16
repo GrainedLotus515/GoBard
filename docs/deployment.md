@@ -67,8 +67,12 @@ removed on completion. Token-file mounts are not provisioned by this helper;
 use a private env file containing `DISCORD_TOKEN` for this isolated test setup.
 Production SOPS/age and token-file deployment remain unchanged.
 
-Updates reject observed active playback and an unreadable running health check.
-Stop explicitly before replacing an unhealthy instance. Failed replacement
+Updates require explicit `busy_sessions=0` and zero sampled delivery. Paused or
+preparing playback and pending resolution/transport work prevent replacement.
+Older images lacking the field and unreadable health are unknown, never idle;
+stop them explicitly before replacement. This observation is not a command
+admission lock: arrange a quiet test window so commands do not race replacement.
+Failed replacement
 readiness restores the previous container; the named cache survives failures.
 Only one stopped rollback container is retained. The helper never removes a
 volume or changes production Compose. Containers retain UID/GID 1000, read-only

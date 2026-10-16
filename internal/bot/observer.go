@@ -1,20 +1,39 @@
 package bot
 
 import (
+	"context"
 	"time"
 
 	"github.com/GrainedLotus515/gobard/internal/playback"
 	"github.com/GrainedLotus515/gobard/internal/session"
 )
 
-// One observer per admitted guild coalesces player updates. Production
-// terminal accounting remains in Engine; slow Discord responses cannot hold up
-// queue transitions. No per-attempt goroutine or unbounded notification history.
+// One observer per admitted guild samples health independently of HTTP. Its
+// child owns automatic player edits; a capacity-one hint coalesces changes and
+// stores no snapshot history. Closing the observer cancels and joins that child.
 func (r *Runtime) observe(guild string, target *session.Session) {
+	ctx, cancel := context.WithCancel(r.ctx)
+	updates, joined := make(chan struct{}, 1), make(chan struct{})
+	go func() {
+		defer close(joined)
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-updates:
+			}
+			observed := time.Now()
+			if snapshot, err := target.Apply(ctx, session.Operation{Action: session.Inspect}); err == nil {
+				r.updatePanel(ctx, guild, snapshot, observed)
+			}
+		}
+	}()
+	defer func() { cancel(); <-joined }()
 	last := ""
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
 	var previous uint64
+	var previousRequest string
 	delivering := false
 	defer func() {
 		if delivering {
@@ -30,13 +49,13 @@ func (r *Runtime) observe(guild string, target *session.Session) {
 		case <-target.Changes():
 		case <-ticker.C:
 		}
-		observed := time.Now()
 		snapshot, err := target.Apply(r.ctx, session.Operation{Action: session.Inspect})
 		if err != nil {
 			continue
 		}
-		active := snapshot.Active && !snapshot.Paused && snapshot.Frames > previous
+		active := snapshot.Active && !snapshot.Paused && snapshot.Frames > 0 && (snapshot.RequestID != previousRequest || snapshot.Frames > previous)
 		previous = snapshot.Frames
+		previousRequest = snapshot.RequestID
 		if active != delivering {
 			if active {
 				r.delivering.Add(1)
@@ -49,9 +68,10 @@ func (r *Runtime) observe(guild string, target *session.Session) {
 			r.sourceStatus.Store(1)
 			r.pipelineStatus.Store(1)
 		}
-		// Use the observation's start time: a command rendered since then
-		// has a later update deadline and must not receive this older snapshot.
-		r.updatePanel(guild, snapshot, observed)
+		select {
+		case updates <- struct{}{}:
+		default: // The editor fetches current state when ready.
+		}
 		result := snapshot.Last
 		if result.Request.AttemptID == last {
 			continue

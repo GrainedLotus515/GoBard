@@ -211,7 +211,9 @@ does not exercise Discord UI HTTP, real DAVE or provider networking.
 
 Automatic player state adds one bounded panel per admitted guild, two IDs of at
 most 32 bytes, one view value, a 32-byte digest and a capacity-one ownership gate.
-There is no message history or new worker. Updates use the existing observer,
+There is no message history. As of October 16, each observer owns one editor
+worker and a capacity-one hint channel, canceled and joined at session removal.
+Slow edits cannot delay health sampling. Updates use this editor,
 at most one automatic HTTP edit per guild per three seconds and fifteen-second
 progress steps. Render payloads have bounded fields/pages; HTTP projects at
 most 64 KiB of response data (plus ReadAll allocation growth), with eight-second

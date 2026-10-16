@@ -48,7 +48,7 @@ class LocalTestSafety(unittest.TestCase):
             if args[0] == "rm":
                 state.pop(helper.NAME, None)
             return ""
-        with patch.object(helper, "inspect", side_effect=lambda name: state.get(name)), patch.object(helper, "docker", side_effect=docker), patch.object(helper, "ready", return_value={"dimensions": {"active_delivery": 0}}), patch.object(helper, "prepare_cache"), patch.object(helper, "wait_ready", side_effect=RuntimeError("not ready")):
+        with patch.object(helper, "inspect", side_effect=lambda name: state.get(name)), patch.object(helper, "docker", side_effect=docker), patch.object(helper, "ready", return_value={"dimensions": {"active_delivery": 0, "busy_sessions": 0}}), patch.object(helper, "prepare_cache"), patch.object(helper, "wait_ready", side_effect=RuntimeError("not ready")):
             with self.assertRaises(RuntimeError):
                 helper.replace("image")
         self.assertIs(state[helper.NAME], old)
@@ -61,6 +61,16 @@ class LocalTestSafety(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 helper.replace("image")
             cache.assert_not_called()
+
+    def test_unknown_or_paused_preparing_playback_is_preserved(self):
+        for busy in [None, -1, 1]:
+            with self.subTest(busy=busy):
+                old = {"State": {"Running": True}}
+                health = {"dimensions": {"active_delivery": 0, "busy_sessions": busy}}
+                with patch.object(helper, "inspect", return_value=old), patch.object(helper, "docker", return_value=json.dumps([{"Architecture": "amd64", "Os": "linux"}])), patch.object(helper, "ready", return_value=health), patch.object(helper, "prepare_cache") as cache:
+                    with self.assertRaises(RuntimeError):
+                        helper.replace("image")
+                    cache.assert_not_called()
 
     def test_failed_first_start_removes_partial_container(self):
         state = {}

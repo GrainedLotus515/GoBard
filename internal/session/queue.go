@@ -65,6 +65,7 @@ type Snapshot struct {
 	Tracks     []Track
 	Current    int
 	Active     bool
+	Busy       bool // Includes preparation, pause, lookup reservations and transport cleanup.
 	Connected  bool
 	Connecting bool
 	Paused     bool

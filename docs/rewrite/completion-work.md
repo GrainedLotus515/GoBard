@@ -60,3 +60,12 @@ Separate SDK workspaces were initialized from the exact pinned module sources
 under `/tmp/gobard-sdk-fixes`. These are development checkpoints, not published
 dependencies; GoBard's dependency pins remain unchanged and strict completion is
 still blocked. Capacity measurements must be rerun with acquisition included.
+
+## Health and local update checkpoint — 2026-10-16
+
+The observer now owns a bounded, canceled/joined editor child. A stalled HTTP
+request cannot delay health sampling; session removal joins the editor. Added
+busy-session observations covering preparation, pause, metadata reservations and
+transport work. The local update helper fails closed on missing/unknown activity.
+Docker race tests, helper tests and lint passed. The acquisition candidate also
+passed the hardened runtime smoke gate. It has not replaced the running test bot.

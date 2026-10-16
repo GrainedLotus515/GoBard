@@ -152,6 +152,37 @@ func (m *Manager) Remove(guild string) error {
 	return nil
 }
 
+// Busy counts sessions with outstanding work. Construction/removal count as
+// busy. This is a bounded observation, not a lock against future commands.
+// Errors mean unknown, never idle. No registry lock spans coordinator calls.
+func (m *Manager) Busy(ctx context.Context) (int, error) {
+	m.mu.Lock()
+	if m.stopping {
+		m.mu.Unlock()
+		return 0, ErrClosed
+	}
+	busy := 0
+	sessions := make([]*Session, 0, len(m.entries))
+	for _, entry := range m.entries {
+		if entry.removing || entry.session == nil {
+			busy++
+		} else {
+			sessions = append(sessions, entry.session)
+		}
+	}
+	m.mu.Unlock()
+	for _, target := range sessions {
+		snapshot, err := target.Apply(ctx, Operation{Action: Inspect})
+		if err != nil {
+			return 0, err
+		}
+		if snapshot.Busy {
+			busy++
+		}
+	}
+	return busy, nil
+}
+
 func (m *Manager) Close() {
 	m.closeOnce.Do(func() {
 		m.mu.Lock()

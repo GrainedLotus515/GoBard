@@ -107,8 +107,8 @@ func TestDeletedPlayerRecreatedOnlyByExplicitRequest(t *testing.T) {
 		t.Fatal(methods, p.message)
 	}
 	methods = nil
-	r.updatePanel("guild", session.Snapshot{Current: -1}, time.Now().Add(time.Minute))
-	r.updatePanel("guild", session.Snapshot{Current: -1}, time.Now().Add(2*time.Minute))
+	r.updatePanel(r.ctx, "guild", session.Snapshot{Current: -1}, time.Now().Add(time.Minute))
+	r.updatePanel(r.ctx, "guild", session.Snapshot{Current: -1}, time.Now().Add(2*time.Minute))
 	if strings.Join(methods, ",") != "PATCH" {
 		t.Fatal("observer recreated deleted card", methods)
 	}

@@ -105,8 +105,8 @@ def replace(image, env_file=None):
         status = ready() if old["State"]["Running"] else None
         if old["State"]["Running"] and status is None:
             raise RuntimeError("Cannot verify idle playback; stop the test bot explicitly before updating")
-        if status and status.get("dimensions", {}).get("active_delivery", 0):
-            raise RuntimeError("Playback is active; stop it before updating the test bot")
+        if status and (status.get("dimensions", {}).get("busy_sessions") != 0 or status.get("dimensions", {}).get("active_delivery", 0)):
+            raise RuntimeError("Idle playback is unconfirmed (including pause/preparation); stop the test bot explicitly before updating")
         values = old["Config"]["Env"]
         if any("\n" in value or "\r" in value for value in values):
             raise RuntimeError("Multiline environment is unsupported")

@@ -55,6 +55,9 @@ func TestStopCancelsJoinAndLateSuccessCannotConnect(t *testing.T) {
 	done := make(chan error, 1)
 	go func() { _, err := s.Join(context.Background(), "voice"); done <- err }()
 	<-started
+	if snap := apply(t, s, Operation{Action: Inspect}); !snap.Busy {
+		t.Fatal("joining session reported idle")
+	}
 	if _, err := s.ApplyAs(context.Background(), Access{Channel: "voice"}, Operation{Action: Stop}); err != nil {
 		t.Fatal(err)
 	}
@@ -224,7 +227,7 @@ func TestPendingResolutionPreventsQueueDrainDisconnect(t *testing.T) {
 	if _, err := tickets[0].Wait(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if snap := apply(t, s, Operation{Action: Inspect}); !snap.Connected {
+	if snap := apply(t, s, Operation{Action: Inspect}); !snap.Connected || !snap.Busy {
 		t.Fatal("pending lookup lost voice")
 	}
 	select {

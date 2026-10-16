@@ -212,7 +212,7 @@ func (r *Runtime) showPanel(ctx context.Context, m MappedInteraction, s session.
 	return err
 }
 
-func (r *Runtime) updatePanel(guild string, s session.Snapshot, now time.Time) {
+func (r *Runtime) updatePanel(parent context.Context, guild string, s session.Snapshot, now time.Time) {
 	p := r.panel(guild)
 	if p == nil {
 		return
@@ -240,7 +240,7 @@ func (r *Runtime) updatePanel(guild string, s session.Snapshot, now time.Time) {
 	if digest == p.digest {
 		return
 	}
-	ctx, cancel := context.WithTimeout(r.ctx, 8*time.Second)
+	ctx, cancel := context.WithTimeout(parent, 8*time.Second)
 	err = r.rest.send(ctx, http.MethodPatch, "channels/"+p.channel+"/messages/"+p.message, edit, true)
 	cancel()
 	if err == nil {

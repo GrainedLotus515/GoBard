@@ -28,6 +28,7 @@ type Dimensions struct {
 	Source           string `json:"source"`
 	Pipeline         string `json:"pipeline"`
 	ActiveDelivery   int32  `json:"active_delivery"`
+	BusySessions     int    `json:"busy_sessions"` // -1 means the observation failed.
 }
 
 type detailedChecker interface{ Dimensions() Dimensions }

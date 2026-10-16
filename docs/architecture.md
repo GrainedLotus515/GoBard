@@ -101,8 +101,10 @@ play lookup. Stop invalidates reservations and cancels joins. Discord callbacks
 perform bounded admission; accepted handler goroutines are canceled and joined
 by the adapter before its dependencies close.
 
-Acceptance preparation decision (2026-10-13): the existing joined guild observer
-owns automatic message updates. One active panel per admitted guild stores only
+Acceptance preparation decision (2026-10-13, revised 2026-10-16): the joined guild
+observer owns one cancellable/joined editor child. A capacity-one payload-free
+hint coalesces updates; the editor obtains a fresh snapshot when ready. Health
+sampling and terminal observation never wait on Discord HTTP. One active panel per admitted guild stores only
 bounded IDs and view state. A cancellable capacity-one gate serializes edits;
 no registry lock spans HTTP and no interaction token is retained. Observations
 predating a newly rendered command cannot overwrite it. A shared `netguard`
