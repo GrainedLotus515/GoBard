@@ -45,6 +45,7 @@ type Request struct {
 	Provider  string
 	MediaID   string
 	TrackID   string // Optional public provider identifier; never an acquisition URL.
+	Live      bool
 	Offset    time.Duration
 	Controls  *Controls
 }

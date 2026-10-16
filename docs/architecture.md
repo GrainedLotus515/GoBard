@@ -26,10 +26,9 @@ session, queue, source or playback packages.
 | Cache | Byte/entry budgets, stable keys, leases and atomic publication. No ownership migration of persisted files. |
 | Observability | Charm events emitted at operation owners; allowlisted diagnostics; independent health dimensions. |
 
-Decision 2: the reference slice uses synchronous pull and synchronous output. A
-single reusable packet and PCM frame provide natural backpressure without a
-frame producer goroutine or buffer pool. Introduce a bounded prefetch ring only
-if measurements justify it. Interfaces exist only for media opening/frames and
+Decision 2: the decoded audio slice uses synchronous pull and synchronous output.
+A reusable packet and PCM frame provide natural backpressure without a decoded
+frame producer goroutine or buffer pool. Interfaces exist only for media opening/frames and
 voice delivery, which need actual production implementations and deterministic
 fault-injection doubles.
 
@@ -60,11 +59,29 @@ session manager bounds admitted guilds and joins constructors/removals before
 shutdown; it never holds its registry mutex across joins or external calls.
 Adapter-owned outputs outlive their sessions and are closed after the manager.
 
-`source.Resolver` handles metadata; `source.YouTubeOpener` handles bytes;
-`source.Cached` owns one optional cache worker. Cached media leases last until
-decoder cleanup, and the stable cache-key algorithm is retained. The shared URL
+`source.Resolver` handles metadata; `source.YouTubeOpener` owns cache lookup and
+attempt-scoped byte acquisition. Cached media leases last until decoder cleanup,
+and the stable cache-key algorithm is retained. The shared URL
 grammar lives in `sourceurl`; every extraction path validates canonical inputs
 before subprocess launch.
+
+Acquisition decision (2026-10-16): the October 15 paced-extraction reproduction
+failed mid-track while fast acquisition of the same track succeeded. This
+justifies decoupling compressed-byte acquisition from decoder/voice pacing with
+an 8 MiB ring. It does not establish the network reset's exact cause or promise
+provider availability. One acquisition worker and one decoder feeder belong to
+each uncached attempt; stream Close cancels and joins both. A 30-second startup
+deadline covers admission through the first encoded packet. Preparation waits
+for 256 KiB, successful EOF, or two seconds after first bytes. Full buffers apply
+backpressure without dropping bytes. The extractor slot is released after reap.
+
+The same acquisition optionally writes one cache transaction, capped at
+min(cache size, 256 MiB). There is no background warming worker or duplicate
+download. Publication requires nonempty successful acquisition and successful
+nonzero decoding; skip/failure/close aborts the transaction. The single writer
+reservation may last through playback. This deliberately favors validation and
+bounded scratch storage over concurrent cache filling. Cache-write admission or
+failure never becomes an audio failure. Live media bypasses the cache.
 
 Decision (2026-10-08): `command.Player` owns a finite number of concurrent play
 lookups with no waiting queue; excess requests receive a busy result. The

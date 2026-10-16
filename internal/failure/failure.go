@@ -17,6 +17,7 @@ const (
 	NetworkTimeout    Reason = "network_timeout"
 	HTTPForbidden     Reason = "http_forbidden"
 	FormatUnavailable Reason = "format_unavailable"
+	StartupTimeout    Reason = "startup_timeout"
 )
 
 const (

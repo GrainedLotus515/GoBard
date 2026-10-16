@@ -11,6 +11,8 @@ Reference slice target budgets:
 | Opus packet | 4,000 bytes; reject larger/empty packets |
 | PCM frame | 960 stereo samples (3,840 bytes); partial final frame zero padded |
 | Audio queue | Synchronous pull/send; one packet in flight; backpressure |
+| Uncached acquisition | 8 MiB compressed ring/attempt, two 32 KiB copy blocks, one 4,000-byte primed packet; backpressure, no drops |
+| Preparation | 256 KiB, successful EOF or 2 seconds after first bytes; 30 seconds through first encoded packet, including admission |
 | Stderr | 16 KiB retained; drain excess; report classification/fingerprint |
 | Metadata | Maximum 500 tracks/playlist; bounded total response and field sizes |
 | Session mailbox | 32 commands; reject saturation |
@@ -22,10 +24,12 @@ Reference slice target budgets:
 
 Additional implemented bounds: metadata subprocess stdout is limited to 8 MiB
 (the standard bytes.Buffer can retain up to twice that in capacity); stderr
-remains 16 KiB; metadata calls have a 30-second deadline. Cache warming has one
-worker/eight hints and drops hints on saturation. Downloads enforce
-min(cache limit, 256 MiB) while writing, with a five-minute deadline; this scratch
-allowance is additional to the committed cache budget. Guild manager construction
+remains 16 KiB; metadata calls have a 30-second deadline. One optional cache writer
+taps acquired bytes, with nonblocking admission and min(cache limit, 256 MiB)
+scratch storage additional to the committed cache budget. Overflow aborts only
+that write; playback continues. No background warming downloads remain. Long and
+live playback has no new duration cutoff; cancellation joins acquisition and the
+decoder feeder. Guild manager construction
 requires explicit session and queue limits; it rejects saturation and retains a
 slot through shutdown. The v2 runtime now uses these admission budgets.
 

@@ -67,6 +67,8 @@ func failureMessage(f *failure.Error) string {
 		return "Playback couldn't finish cleanly. If this repeats, let the bot operator know."
 	}
 	switch f.Reason {
+	case failure.StartupTimeout:
+		return "Audio preparation took too long. Try another track; if this repeats, let the bot operator know."
 	case failure.HTTPForbidden:
 		return "The media provider refused the audio download. Choose another track."
 	case failure.FormatUnavailable:

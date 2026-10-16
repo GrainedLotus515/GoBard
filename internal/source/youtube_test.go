@@ -14,6 +14,7 @@ import (
 
 	"github.com/charmbracelet/log"
 
+	"github.com/GrainedLotus515/gobard/internal/cache"
 	"github.com/GrainedLotus515/gobard/internal/failure"
 	"github.com/GrainedLotus515/gobard/internal/playback"
 	"github.com/GrainedLotus515/gobard/internal/processlimit"
@@ -30,11 +31,16 @@ func fakeExtractor(t *testing.T, script string) *YouTubeOpener {
 	if err := os.WriteFile(path, []byte("#!/bin/sh\n"+script), 0700); err != nil {
 		t.Fatal(err)
 	}
-	o, err := NewYouTubeOpener(processlimit.New(1))
+	store, err := cache.NewCache(t.TempDir(), 16<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	o, err := NewYouTubeOpener(processlimit.New(1), store, log.New(io.Discard))
 	if err != nil {
 		t.Fatal(err)
 	}
 	o.executable = path
+	o.preparationDelay = 0
 	return o
 }
 
@@ -111,7 +117,7 @@ func TestExtractorExitAfterAudioRemainsAuthoritative(t *testing.T) {
 			if status != 0 {
 				want = playback.SourceFailure
 			}
-			if result.Outcome != want || result.Frames == 0 {
+			if result.Outcome != want || (status == 0 && result.Frames == 0) {
 				t.Fatalf("%+v failure=%v", result, result.Failure)
 			}
 			if status != 0 && (result.Failure == nil || result.Failure.ExitCode != status) {

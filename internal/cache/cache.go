@@ -42,6 +42,8 @@ type Cache struct {
 	inFlight     map[string]*inFlightCreate
 	tempSequence atomic.Uint64
 	mutation     chan struct{}
+	writer       chan struct{}
+	writeFailed  atomic.Bool
 }
 
 // cacheEntry represents one indexed file incarnation.
@@ -98,6 +100,7 @@ func NewCache(dir string, maxSize int64) (*Cache, error) {
 		entries:  make(map[string]*cacheEntry),
 		inFlight: make(map[string]*inFlightCreate),
 		mutation: make(chan struct{}, 1),
+		writer:   make(chan struct{}, 1),
 	}
 
 	if err := cache.loadEntries(); err != nil {

@@ -21,7 +21,6 @@ import (
 
 type App struct {
 	discord *bot.Runtime
-	cached  *source.Cached
 }
 
 func New(ctx context.Context, cfg *config.Config, logger *log.Logger) (*App, error) {
@@ -42,35 +41,28 @@ func New(ctx context.Context, cfg *config.Config, logger *log.Logger) (*App, err
 	if err != nil {
 		return nil, err
 	}
-	opener, err := source.NewYouTubeOpener(limiter)
+	opener, err := source.NewYouTubeOpener(limiter, store, logger)
 	if err != nil {
 		return nil, err
 	}
-	cached, err := source.NewCached(ctx, store, opener, opener, logger)
+	engine, err := playback.New(opener, logger)
 	if err != nil {
-		return nil, err
-	}
-	engine, err := playback.New(cached, logger)
-	if err != nil {
-		cached.Close()
 		return nil, err
 	}
 	sessions, err := session.NewManager(ctx, engine, cfg.MaxGuildSessions, cfg.QueueLimit, session.Defaults{Volume: cfg.DefaultVolume, Ducking: cfg.ReduceVolumeOnVoice, DuckTarget: cfg.ReduceVolumeOnVoiceTarget})
 	if err != nil {
-		cached.Close()
 		return nil, err
 	}
 	discord, err := bot.NewRuntime(ctx, cfg, sessions, resolver, logger)
 	if err != nil {
 		sessions.Close()
-		cached.Close()
 		return nil, err
 	}
-	return &App{discord: discord, cached: cached}, nil
+	return &App{discord: discord}, nil
 }
 
 func (a *App) Start() error                    { return a.discord.Start() }
-func (a *App) Close()                          { a.discord.Close(); a.cached.Close() }
+func (a *App) Close()                          { a.discord.Close() }
 func (a *App) Live() error                     { return a.discord.Live() }
 func (a *App) Ready(ctx context.Context) error { return a.discord.Ready(ctx) }
 func (a *App) Dimensions() health.Dimensions   { return a.discord.Dimensions() }
