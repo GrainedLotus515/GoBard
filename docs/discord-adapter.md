@@ -98,22 +98,19 @@ lock across I/O; the adapter bounds that I/O and holds no GoBard registry lock
 around it. SDK `VoiceState` iterates mutable state without a read lock; GoBard
 retains its own bounded channel observations instead.
 
-The pinned SDKs do not expose a join for their heartbeat/listener workers. Voice
-AutoReconnect is disabled, but the SDK's heartbeat reconnect paths ignore that
-flag. Both WebSocket transports have owned cancellation and five-second write
-deadlines. Manager close snapshots connections through the SDK's locked iterator
-and closes outside the lock, avoiding its unsafe map-wide Close implementation.
-Native DAVE operations remain non-preemptible. These are unresolved engineering
-gaps that block strict completion until the library is fixed and verified; the
-user rejected a temporary exception. Exact source findings, containment and
-required verification are in
+The October 16 dependency pins add terminal Shutdown operations for Gateway and
+voice, canceled opening/backoff, worker joins, readiness fixes and explicit native
+DAVE cleanup. GoBard calls OpenContext and terminal Shutdown; it uses the fixed
+SDK manager cleanup instead of the old map-snapshot workaround. Automatic SDK
+reconnect remains disabled because the session owns recovery. Both WebSocket
+transports retain owned cancellation and bounded write deadlines.
+
+These focused fixes are published in separate repositories, not copied into
+GoBard. Native DAVE calls remain cooperative; optional unconsumed SDK audio
+helpers are outside the guarantee. Real DAVE reconnect and active shutdown still
+require acceptance before strict completion can be cleared. Exact revisions,
+regression evidence and the historical blocker are in
 [the SDK lifecycle review](rewrite/sdk-lifecycle-review.md).
-October 16: focused fixes and regression tests now exist in separate local SDK
-repositories, with a tested disposable GoBard integration patch. They add public
-terminal joins and native cleanup rather than copying library internals into this
-adapter. Main dependency pins remain unchanged pending authorized publication;
-the limitations above still describe the running bot. Final integration must use
-immutable revisions and repeat real reconnect/active-shutdown acceptance.
 Gateway state caching is disabled in the SDK. The adapter retains only bounded
 guild IDs and user-to-voice-channel observations: 1,024 guilds, 1,024 voices per
 guild, 16,384 voices globally. Oversized snapshots fail authorization closed;

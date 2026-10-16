@@ -60,7 +60,11 @@ FROM dependencies AS test
 COPY . .
 RUN --mount=type=cache,target=/go/pkg/mod \
 	--mount=type=cache,target=/root/.cache/go-build \
-	go test -race ./...
+	go test -race ./... \
+		github.com/bwmarrin/discordgo \
+		github.com/disgoorg/disgo/voice \
+		github.com/disgoorg/godave/libdave \
+		github.com/disgoorg/godave/golibdave
 
 FROM dependencies AS bench
 

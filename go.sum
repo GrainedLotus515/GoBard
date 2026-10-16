@@ -1,3 +1,11 @@
+github.com/GrainedLotus515/gobard-discordgo v0.0.0-20261016071800-3d1129bd8482 h1:VenFXo92zHeq4leliAY+YiQVvO6njpVoXg6oNzg6Eis=
+github.com/GrainedLotus515/gobard-discordgo v0.0.0-20261016071800-3d1129bd8482/go.mod h1:aP+qu0dsHkHaeok97nbOrX05JSobCziYWlMEaWMi+mo=
+github.com/GrainedLotus515/gobard-disgo v0.0.0-20261016074306-7a61d29e5989 h1:oLJuBG39wTdTg7PQ4FdOUO4piWMNtFnjCyFlIRGSB8Q=
+github.com/GrainedLotus515/gobard-disgo v0.0.0-20261016074306-7a61d29e5989/go.mod h1:NnV63iw4lJdF1fnV0gX27XR43ZgRGqnL122svRMTgTE=
+github.com/GrainedLotus515/gobard-golibdave v0.0.0-20261016071800-7783ee7cd557 h1:JSIt6FSCWmq+INPN3umTR4IRrphc6/7h5liaheR7dsY=
+github.com/GrainedLotus515/gobard-golibdave v0.0.0-20261016071800-7783ee7cd557/go.mod h1:X5N0QoCLqX7wmrSMDa2nGoMna47Svv5phmllHYnjMvM=
+github.com/GrainedLotus515/gobard-libdave v0.0.0-20261016071800-26460929a20e h1:uXR6MpBvd9zCF1giuv3+/wRjes1iVd4Ta6PVMhk3VQY=
+github.com/GrainedLotus515/gobard-libdave v0.0.0-20261016071800-26460929a20e/go.mod h1:CxundbQ722MpK3vD31kaOAxbu1+cFnnEKQDqQ7rpxEM=
 github.com/aymanbagabas/go-osc52/v2 v2.0.1 h1:HwpRHbFMcZLEVr42D4p7XBqjyuxQH5SMiErDT4WkJ2k=
 github.com/aymanbagabas/go-osc52/v2 v2.0.1/go.mod h1:uYgXzlJ7ZpABp8OJ+exZzJJhRNQ2ASbcXHWsFqH8hp8=
 github.com/charmbracelet/colorprofile v0.4.3 h1:QPa1IWkYI+AOB+fE+mg/5/4HRMZcaXex9t5KX76i20Q=
@@ -18,14 +26,8 @@ github.com/clipperhouse/uax29/v2 v2.7.0 h1:+gs4oBZ2gPfVrKPthwbMzWZDaAFPGYK72F0NJ
 github.com/clipperhouse/uax29/v2 v2.7.0/go.mod h1:EFJ2TJMRUaplDxHKj1qAEhCtQPW2tJSwu5BF98AuoVM=
 github.com/davecgh/go-spew v1.1.1 h1:vj9j/u1bqnvCEfJOwUhtlOARqs3+rkHYY13jYWTU97c=
 github.com/davecgh/go-spew v1.1.1/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
-github.com/disgoorg/disgo v0.19.6 h1:1xJQt6KZgiqvBOnjuziG1gE4Iqd0aJn8DNfE6eE+0qw=
-github.com/disgoorg/disgo v0.19.6/go.mod h1:NnV63iw4lJdF1fnV0gX27XR43ZgRGqnL122svRMTgTE=
 github.com/disgoorg/godave v0.3.0 h1:37F3ZuiMd8/EXeoCtTeE8iP2eT2nWsfEa4/ITwoKfe4=
 github.com/disgoorg/godave v0.3.0/go.mod h1:OreAC3hpabr39bMVA+jwOVDq1EUPXH5A0XUBiZaDI1Y=
-github.com/disgoorg/godave/golibdave v0.3.0 h1:mSX4YzIYasUB80fo8izi0ENplOKRm7WDwRxXYfKFKWQ=
-github.com/disgoorg/godave/golibdave v0.3.0/go.mod h1:X5N0QoCLqX7wmrSMDa2nGoMna47Svv5phmllHYnjMvM=
-github.com/disgoorg/godave/libdave v0.3.0 h1:D0MbJXysTbIGY2aqQAiGTB7HkR1Nd6jZi/7I1mcewx0=
-github.com/disgoorg/godave/libdave v0.3.0/go.mod h1:CxundbQ722MpK3vD31kaOAxbu1+cFnnEKQDqQ7rpxEM=
 github.com/disgoorg/json/v2 v2.0.0 h1:U16yy/ARK7/aEpzjjqK1b/KaqqGHozUdeVw/DViEzQI=
 github.com/disgoorg/json/v2 v2.0.0/go.mod h1:jZTBC0nIE1WeetSEI3/Dka8g+qglb4FPVmp5I5HpEfI=
 github.com/disgoorg/omit v1.0.0 h1:y0LkVUOyUHT8ZlnhIAeOZEA22UYykeysK8bLJ0SfT78=
@@ -53,8 +55,6 @@ github.com/mattn/go-runewidth v0.0.30 h1:+KUuiDA4fF0R1p5FeueHefjDm+GIM+kWfFnDjyb
 github.com/mattn/go-runewidth v0.0.30/go.mod h1:3qAiGCV4Koz/yuveO58qUefmUTRm8r0IGEXZ9jeHp/8=
 github.com/muesli/termenv v0.16.0 h1:S5AlUN9dENB57rsbnkPyfdGuWIlkmzJjbFf0Tf5FWUc=
 github.com/muesli/termenv v0.16.0/go.mod h1:ZRfOIKPFDYQoDFF4Olj7/QJbW60Ol/kL1pU3VfY/Cnk=
-github.com/ozraru/discordgo v0.26.2-0.20251101193404-5cce117199f7 h1:yWif5fU0GNCiRW+MhibeYiplZ487LtZD0rGBtX7DRG4=
-github.com/ozraru/discordgo v0.26.2-0.20251101193404-5cce117199f7/go.mod h1:aP+qu0dsHkHaeok97nbOrX05JSobCziYWlMEaWMi+mo=
 github.com/pmezard/go-difflib v1.0.0 h1:4DBwDE0NGyQoBHbLQYPwSUPoCMWR5BEzIk/f1lZbAQM=
 github.com/pmezard/go-difflib v1.0.0/go.mod h1:iKH77koFhYxTK1pcRnkKkqfTogsbg7gZNVY4sRDYZ/4=
 github.com/rivo/uniseg v0.4.7 h1:WUdvkW8uEhrYfLC4ZzdpI2ztxP1I582+49Oc5Mq64VQ=

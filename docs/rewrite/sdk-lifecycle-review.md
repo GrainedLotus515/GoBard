@@ -1,17 +1,17 @@
-# SDK lifecycle completion blocker — 2026-10-13
+# SDK lifecycle review — updated 2026-10-16
 
-## October 16 focused fixes (not yet pinned)
+## October 16 focused fixes (published and pinned)
 
 Separate local repositories are preserved under
 `/home/lotus/Gitea/GoBard-SDK-Fixes`; no library implementation was copied into
 GoBard. Each contains a `LIFECYCLE.md` contract and regression tests.
 
-| Dependency | Local patch revision | Scope |
+| Dependency | Published patch revision | Scope |
 | --- | --- | --- |
-| disgo | `7a61d29e59893a2258a906d2094de335d0554fc6` | terminal Gateway/connection joins, opening ownership, copied state, readiness, finite reconnect policy, generation join, canceled UDP discovery, manager map cleanup, bounded participant/SSRC state |
-| discordgo | `3d1129bd8482c1071aca2f73e5587a1923d6e551` | OpenContext, terminal Shutdown, worker/callback joins, canceled handshake/backoff, finite reconnect attempts |
-| libdave Go bindings | `26460929a20e4c94719b8c2d7ff1ff54a34656eb` | explicit native handle/result/ratchet cleanup and owned C callback storage |
-| golibdave | `7783ee7cd557ab9aa23ad02249a156a41201a13c` | native session cleanup, user replacement/removal, serialized frame state, corrected passthrough copy |
+| [disgo](https://github.com/GrainedLotus515/gobard-disgo) | `7a61d29e59893a2258a906d2094de335d0554fc6` | terminal Gateway/connection joins, opening ownership, copied state, readiness, finite reconnect policy, generation join, canceled UDP discovery, manager map cleanup, bounded participant/SSRC state |
+| [discordgo](https://github.com/GrainedLotus515/gobard-discordgo) | `3d1129bd8482c1071aca2f73e5587a1923d6e551` | OpenContext, terminal Shutdown, worker/callback joins, canceled handshake/backoff, finite reconnect attempts |
+| [libdave Go bindings](https://github.com/GrainedLotus515/gobard-libdave) | `26460929a20e4c94719b8c2d7ff1ff54a34656eb` | explicit native handle/result/ratchet cleanup and owned C callback storage |
+| [golibdave](https://github.com/GrainedLotus515/gobard-golibdave) | `7783ee7cd557ab9aa23ad02249a156a41201a13c` | native session cleanup, user replacement/removal, serialized frame state, corrected passthrough copy |
 
 The native audit used v1.2.1/cpp source at
 `8de72b1f8a2ac3c5a5270755bb8091a62e3c6169`, matching the release used by the
@@ -36,26 +36,37 @@ Native passthrough microbenchmark: 56.20 ns/frame, 8 B/frame, one allocation/fra
 for 320-byte frames on the i9-12900K, linux/amd64; this is not established-MLS
 encryption or a before/after improvement measurement.
 
-The tested integration patch is preserved beside these repositories. It switches
-GoBard to OpenContext/Shutdown, uses SDK manager cleanup and honors the incoming
-voice dial context. **Main GoBard pins and the running bot are unchanged.**
-Publication authorization and an immutable distribution are pending; local
-workspace replacements are not a reproducible release dependency. After pinning,
-repeat final GoBard gates and verify real DAVE reconnect/active shutdown before
-clearing strict completion. Optional SDK audio sender/receiver and legacy
-discordgo voice helpers are outside the consumed path and outside these claims.
+The user authorized publication on October 16. All four repositories are public
+under `GrainedLotus515`, with inherited Actions disabled before the first push.
+They retain upstream licenses and exact baseline snapshots; they are focused
+maintenance repositories, not the future general-purpose Discord library.
+`go.mod` now replaces the upstream module paths with their published immutable
+pseudo-versions, and `go.sum` records verified module checksums. Native libdave
+v1.2.1/cpp and its asset checksum remain unchanged.
+
+The GoBard adapter now uses OpenContext/Shutdown, SDK manager cleanup and the
+incoming voice dial context. No local workspace replacement is required. The
+Docker race gate also runs the pinned Gateway, voice and native-wrapper regression
+suites, so release checks exercise the dependency fixes themselves.
+
+The first authorized local replacement uses the validated acquisition/health
+image, before these pins; see [local evidence](local-2026-10-16.md). SDK runtime
+activation and final gates are recorded there and in status.md. **Strict completion
+remains blocked until real DAVE reconnect and active-playback shutdown are
+verified.** Optional SDK audio sender/receiver and legacy discordgo voice helpers
+are outside the consumed path and outside these claims.
 
 ## Original blocker and containment
 
 This is a strict completion blocker, not a user playback-test gate.
 The engineering standard requires every goroutine to be cancellable and joined.
-The pinned libraries do not expose enough public lifecycle API to prove that
+The original pinned libraries did not expose enough public lifecycle API to prove that
 property for their internal workers. The user explicitly declined a temporary
 exception: “Keep strict completion blocked until the library is fixed.”
 
 ## Exact dependencies and source findings
 
-`github.com/bwmarrin/discordgo` resolves through go.mod to
+Before the October 16 fixes, `github.com/bwmarrin/discordgo` resolved through go.mod to
 `github.com/ozraru/discordgo v0.26.2-0.20251101193404-5cce117199f7`.
 Its `wsapi.go` launches heartbeat/listen workers around lines 212–213.
 `CloseWithCode` (around line 928) closes the listening channel and WebSocket but
@@ -73,10 +84,11 @@ does not wait on worker completion. An elapsed sleep is not a join guarantee.
   mutex, which can conflict with internal asynchronous removal.
 - Native DAVE calls do not expose Go-context preemption.
 
-These findings were checked against source exported from the pinned Docker
-module cache; the SDK source was not copied into the repository or modified.
+These original findings were checked against source exported from the pinned Docker
+module cache; the SDK source was not copied into GoBard. Later fixes live in the separate
+repositories listed above.
 
-## Adapter containment implemented
+## Historical adapter containment (before fixed SDK integration)
 
 The voice adapter disables the public AutoReconnect option (which controls
 listener-error reconnects, not all heartbeat paths). Both SDK WebSocket
@@ -93,7 +105,7 @@ manager-rooted dial guard stops new network connections after manager shutdown
 but cannot interrupt a private background retry timer. Process exit provides
 OS cleanup; it is not a substitute for the in-process lifecycle contract.
 
-## Decision and evidence required to clear the blocker
+## Remaining strict completion decision
 
 The user requires an upstream/separate-library fix with public cancellation/join
 APIs and tests. The existing adapter mitigations do not satisfy this gate.
@@ -102,8 +114,9 @@ outside the approved architecture. A successful user acceptance run cannot
 resolve or waive this blocker. The rest of the implementation and offline
 verification can be completed independently.
 
-Before clearing the blocker, pin the fixed library versions or integrate the
-independent replacement, then verify:
+The separate fixes are now pinned and integrated. Before clearing strict
+completion, retain the deterministic evidence for these contracts and complete
+the remaining real reconnect/active-shutdown gate:
 
 - Gateway and voice Close cancel and join all owned workers, including opening,
   heartbeat, listener and asynchronous event work, under concurrent cancellation.

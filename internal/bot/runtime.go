@@ -227,7 +227,7 @@ func (r *Runtime) Start() error {
 	for range 2 {
 		go func() { defer r.work.Done(); r.rejectionLoop() }()
 	}
-	if err := r.discord.Open(); err != nil {
+	if err := r.discord.OpenContext(r.ctx); err != nil {
 		return failure.Wrap("discord_connect", failure.Transport, err)
 	}
 	r.logger.Info("Discord Gateway connected", "event", "discord.connected")
@@ -251,7 +251,7 @@ func (r *Runtime) gatewayLoop() {
 			if r.connected.Load() {
 				break
 			}
-			if err := r.discord.Open(); err == nil {
+			if err := r.discord.OpenContext(r.ctx); err == nil {
 				r.logger.Info("Gateway reconnected", "event", "discord.recovery", "attempt", attempt)
 				break
 			}
@@ -397,7 +397,7 @@ func (r *Runtime) Close() {
 		// Core shutdown precedes clearing the SDK socket so voice cleanup is
 		// joined. The root socket is already canceled and fails writes promptly.
 		r.sessions.Close()
-		if err := r.discord.Close(); err != nil {
+		if err := r.discord.Shutdown(); err != nil {
 			r.logger.Debug("Gateway socket closed", "event", "discord.close")
 		}
 		if voice := r.voice.Load(); voice != nil {

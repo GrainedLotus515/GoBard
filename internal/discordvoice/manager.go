@@ -55,8 +55,8 @@ func NewManager(parent context.Context, session *discordgo.Session, logger *log.
 	// #nosec G118 -- Manager.Close cancels its owned dial/socket lifecycle.
 	ctx, cancel := context.WithCancel(parent)
 	voiceManager := &Manager{logger: logger, ctx: ctx, cancel: cancel}
-	dialer := &websocket.Dialer{HandshakeTimeout: 5 * time.Second, NetDialContext: func(_ context.Context, network, address string) (net.Conn, error) {
-		dialCtx, done := context.WithTimeout(ctx, 5*time.Second)
+	dialer := &websocket.Dialer{HandshakeTimeout: 5 * time.Second, NetDialContext: func(request context.Context, network, address string) (net.Conn, error) {
+		dialCtx, done := context.WithTimeout(request, 5*time.Second)
 		defer done()
 		conn, err := (&net.Dialer{}).DialContext(dialCtx, network, address)
 		if err != nil {
@@ -120,6 +120,9 @@ func (m *Manager) Join(ctx context.Context, guildID, channelID string, selfMute,
 	}
 
 	conn := m.manager.CreateConn(guildSnowflake)
+	if conn == nil {
+		return nil, fmt.Errorf("voice manager closed")
+	}
 	conn.SetEventHandlerFunc(func(_ disgovoice.Gateway, opcode disgovoice.Opcode, _ int, data disgovoice.GatewayMessageData) {
 		if opcode != disgovoice.OpcodeSpeaking {
 			return
@@ -137,7 +140,7 @@ func (m *Manager) Join(ctx context.Context, guildID, channelID string, selfMute,
 	})
 	if err := conn.Open(ctx, channelSnowflake, selfMute, selfDeaf); err != nil {
 		cleanup, cancel := context.WithTimeout(context.WithoutCancel(ctx), 3*time.Second)
-		conn.Close(cleanup)
+		conn.Shutdown(cleanup)
 		cancel()
 		return nil, err
 	}
@@ -194,16 +197,7 @@ func (m *Manager) Close(ctx context.Context) {
 	}
 	m.closeOnce.Do(func() {
 		m.cancel()
-		// The SDK's Manager.Close iterates/replaces its map without retaining
-		// its lock. Snapshot using its locked iterator, then close outside it.
-		// Admission has already joined at the runtime/session boundary.
-		var conns []disgovoice.Conn
-		for conn := range m.manager.Conns() {
-			conns = append(conns, conn)
-		}
-		for _, conn := range conns {
-			conn.Close(ctx)
-		}
+		m.manager.Close(ctx)
 	})
 }
 
@@ -216,7 +210,7 @@ func (c *Connection) SetSpeaking(ctx context.Context, speaking bool) error {
 }
 
 func (c *Connection) Disconnect(ctx context.Context) error {
-	c.conn.Close(ctx)
+	c.conn.Shutdown(ctx)
 	return nil
 }
 
