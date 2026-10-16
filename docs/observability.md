@@ -48,6 +48,13 @@ formats use `format_unavailable`. Neither reason permits automatic recovery;
 authentication/unavailable/throttled classification takes precedence. Discord
 shows fixed guidance in the existing card, with no extra channel message.
 
+`startup_timeout` identifies expiry of the 30-second source-opening budget,
+including process admission and first encoded packet. It does not qualify for
+the session's source-resume policy. Optional cache failures produce bounded,
+sanitized `cache.fill` warnings without changing a successful audio outcome;
+they are not a second playback terminal event. Cache writes share acquisition
+bytes rather than generating separate download/retry logs.
+
 Production examples (field contract, not evidence of a live run):
 
 ```

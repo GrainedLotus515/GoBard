@@ -71,6 +71,25 @@ before sessions and sources are closed.
 Source acquisition now validates canonical YouTube input before launching
 yt-dlp, disables hidden config/retries, retains 16 KiB of stderr, kills the
 extractor process group on cancellation and waits before returning capacity.
+Each uncached attempt owns an 8 MiB compressed-byte ring, one acquisition worker
+and one decoder feeder. Preparation waits for 256 KiB, successful source EOF or
+two seconds after the first bytes. The 30-second startup budget includes process
+admission, preparation and the first encoded packet. Open primes that packet and
+ends the startup timer before returning, so a subsequent user pause cannot cause
+a false startup timeout. A full ring backpressures acquisition without dropping
+bytes. Long/live inputs can retain an extractor slot until playback consumes more;
+short inputs release the slot as soon as the extractor is reaped.
+
+One optional cache transaction consumes the same acquisition bytes. It never
+launches a second extractor. Its process-wide single-writer reservation and
+min(cache size, 256 MiB) scratch limit are independent of the committed cache
+budget. Cache admission/write failure does not fail playback. Publication requires
+source success and complete nonzero decoding; skip, cancellation, decode failure
+or live media cannot publish. The reservation may therefore remain held through
+playback. Cache leases remain owned until stream Close, including seeked replay.
+Cancellation wakes both ring directions, interrupts I/O, reaps processes and joins
+workers before returning. There is no background warming owner.
+
 Finalization after stdout EOF is bounded to two seconds plus the subprocess
 WaitDelay. FFmpeg receives a pipe with only the pipe protocol enabled.
 Tests use a fake extractor executable and real FFmpeg. The v2 pipeline is wired
@@ -81,6 +100,11 @@ completed the remaining audio. The [October 12 rerun](rewrite/live-2026-10-12.md
 was reported successful and again exercised source recovery. Earlier stuttering
 remains unexplained; accepted packets and local timings do not prove gapless
 reception at the listener.
+
+The [October 16 source probes](rewrite/provider-2026-10-16.md) completed MOTTO
+and PANDEMONIUM through the new acquisition path without recovery, then replayed
+all frames from cache. They used paced fake output, not Discord voice. Full album
+listening and live reconnect/active-shutdown remain separate acceptance gates.
 # Managed voice lifecycle
 
 The guild coordinator serializes Connect/Disconnect after the preceding audio

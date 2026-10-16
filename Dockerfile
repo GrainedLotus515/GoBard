@@ -78,6 +78,12 @@ RUN --mount=type=cache,target=/go/pkg/mod \
 	--mount=type=cache,target=/root/.cache/go-build \
 	CGO_ENABLED=1 GOOS=linux GOARCH=amd64 go build -buildvcs=false -trimpath -o /out/gobard-capacity-bench ./cmd/capacitybench
 
+FROM dependencies AS provider-check-builder
+COPY . .
+RUN --mount=type=cache,target=/go/pkg/mod \
+	--mount=type=cache,target=/root/.cache/go-build \
+	go test -c -o /out/provider-check ./internal/source
+
 FROM dependencies AS vulncheck
 
 ARG GOVULNCHECK_VERSION=v1.8.0
@@ -198,6 +204,12 @@ HEALTHCHECK NONE
 COPY --chown=root:root --chmod=0555 scripts/bench-extractor.sh /usr/local/bin/yt-dlp
 COPY --from=capacity-bench-builder --chown=root:root --chmod=0555 /out/gobard-capacity-bench /app/gobard-capacity-bench
 ENTRYPOINT ["/app/gobard-capacity-bench"]
+
+# Opt-in external provider tests, separate from the runtime and offline gates.
+FROM runtime AS provider-check
+HEALTHCHECK NONE
+COPY --from=provider-check-builder --chown=root:root --chmod=0555 /out/provider-check /app/provider-check
+ENTRYPOINT ["/app/provider-check", "-test.run=^TestProviderNFColdAndWarm$", "-test.v", "-test.timeout=21m"]
 
 # Exercise the operator helper with an isolated fake Docker state machine.
 FROM runtime AS local-test-check
