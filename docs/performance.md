@@ -1,5 +1,35 @@
 # Performance and budgets
 
+## Acquisition soak — 2026-10-16
+
+The updated `make docker-bench` passed all three 900-second profiles. The actual
+YouTube opener consumes a benchmark-only local extractor into its 8 MiB ring,
+then real FFmpeg/libopus and the paced fake voice output. Generated input is
+64 kbit/s constant-rate stereo Opus; output remains 128 kbit/s. No provider or
+Discord connection is made. The runtime image retains real yt-dlp; only the
+capacity image replaces it with the fixed local fixture script.
+
+| Guilds | CPU quota | CPU / quota | Peak anonymous MiB | Added anonymous MiB/guild | Maximum gap ms | Maximum session shutdown ms |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 4 | 2 | 7.73% | 139.96 | 33.32 | 27.69 | 13.05 |
+| 12 | 4 | 10.02% | 383.15 | 31.37 | 29.92 | 32.35 |
+| 24 | 8 | 9.63% | 702.27 | 28.98 | 39.13 | 20.01 |
+
+All had zero gaps over 60 ms, worker failures and retained temporary files;
+goroutines returned from two to one. Maximum first-frame latencies were
+89.60/78.91/101.61 ms. This local acquisition timing is not cold YouTube startup.
+The i9-12900K host ran the profiles concurrently, with overlapping quality/SDK
+builds and an idle local bot. See [raw results](rewrite/capacity-acquisition-2026-10-16.json).
+
+Memory is materially higher than the earlier direct-file soak. This workload
+includes the new compressed buffer, copy workers and their retention; input
+bitrate also changed, so the difference is not a controlled attribution solely
+to the ring. The 15-minute fixture fits the ring. Longer/higher-bitrate media
+backpressures acquisition and retains extractor slots: simultaneous cold starts
+can hit the startup/admission deadline. The full-ring cancellation regression
+tests that saturation path, but this soak does not establish 24 simultaneous
+long-source acquisitions or unrestricted production capacity.
+
 The original runtime had five buffered packets plus a producer packet and
 unbounded queue/guild admission. V2 replaces those paths with the budgets below.
 Measurements are workload evidence, not a general production capacity guarantee.

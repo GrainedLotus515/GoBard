@@ -69,3 +69,13 @@ busy-session observations covering preparation, pause, metadata reservations and
 transport work. The local update helper fails closed on missing/unknown activity.
 Docker race tests, helper tests and lint passed. The acquisition candidate also
 passed the hardened runtime smoke gate. It has not replaced the running test bot.
+
+## Capacity checkpoint — 2026-10-16
+
+The 4/12/24-guild 15-minute profiles now exercise the acquisition ring, real
+decoding/encoding and paced fake output. All passed, with zero missed 60 ms
+deadlines, worker failures or retained temporary files. Raw measurements and
+the increased memory footprint are recorded in performance.md. The generated
+input fits the ring; long high-bitrate source admission remains a separate
+constraint. Docker race/helper tests and lint passed for the new workload.
+These gates do not verify provider networking, native DAVE or human audibility.

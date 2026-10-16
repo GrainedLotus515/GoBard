@@ -195,6 +195,7 @@ ENTRYPOINT ["/app/gobard"]
 FROM runtime AS capacity-bench
 
 HEALTHCHECK NONE
+COPY --chown=root:root --chmod=0555 scripts/bench-extractor.sh /usr/local/bin/yt-dlp
 COPY --from=capacity-bench-builder --chown=root:root --chmod=0555 /out/gobard-capacity-bench /app/gobard-capacity-bench
 ENTRYPOINT ["/app/gobard-capacity-bench"]
 

@@ -22,13 +22,13 @@ import (
 
 	"github.com/charmbracelet/log"
 
-	"github.com/GrainedLotus515/gobard/internal/audio"
 	"github.com/GrainedLotus515/gobard/internal/cache"
 	"github.com/GrainedLotus515/gobard/internal/discordvoice"
 	"github.com/GrainedLotus515/gobard/internal/failure"
 	"github.com/GrainedLotus515/gobard/internal/playback"
 	"github.com/GrainedLotus515/gobard/internal/processlimit"
 	"github.com/GrainedLotus515/gobard/internal/session"
+	"github.com/GrainedLotus515/gobard/internal/source"
 )
 
 const opusInterval = 20 * time.Millisecond
@@ -55,6 +55,7 @@ type measurements struct {
 }
 
 type report struct {
+	AcquisitionWorkload         string  `json:"acquisition_workload"`
 	Profile                     string  `json:"profile"`
 	DurationSeconds             float64 `json:"duration_seconds"`
 	SimultaneousGuilds          int     `json:"simultaneous_guilds"`
@@ -118,6 +119,9 @@ func run() error {
 		return err
 	}
 
+	if err := os.Setenv("GOBARD_BENCH_MEDIA", mediaPath); err != nil {
+		return err
+	}
 	baselineGoroutines := runtime.NumGoroutine()
 	baselineAnonymous := readAnonymousMemory()
 	startCPU, quotaCPUs := readCPUUsage()
@@ -127,10 +131,14 @@ func run() error {
 	var measured measurements
 	peakMemory := sampleMemory(ctx)
 	limiter := processlimit.New(cfg.ytdlpConcurrency)
+	opener, err := source.NewYouTubeOpener(limiter, cacheStore, log.New(io.Discard))
+	if err != nil {
+		return err
+	}
 	var workers sync.WaitGroup
 	for guild := range cfg.guilds {
 		workers.Add(1)
-		go runGuild(ctx, &workers, guild, mediaPath, cacheStore, &measured)
+		go runGuild(ctx, &workers, guild, opener, cacheStore, &measured)
 	}
 	runLimiterPressure(ctx, &workers, limiter, &measured)
 	workers.Add(1)
@@ -160,6 +168,7 @@ func run() error {
 
 	frames := measured.frames.Load()
 	result := report{
+		AcquisitionWorkload:         "offline extractor -> 8 MiB ring -> FFmpeg -> 128 kbit/s Opus -> paced fake voice; 64 kbit/s input",
 		Profile:                     cfg.name,
 		DurationSeconds:             elapsed.Seconds(),
 		SimultaneousGuilds:          cfg.guilds,
@@ -190,7 +199,10 @@ func run() error {
 		return fmt.Errorf("encode benchmark report: %w", err)
 	}
 	fmt.Println(string(encoded))
+	return validateReport(result, cfg)
+}
 
+func validateReport(result report, cfg profile) error {
 	var failures []error
 	if result.AverageCPUPercentOfQuota >= 80 {
 		failures = append(failures, fmt.Errorf("average CPU %.2f%% is not below 80%% of quota", result.AverageCPUPercentOfQuota))
@@ -207,11 +219,11 @@ func run() error {
 	if result.MaximumCacheDownloads > 1 {
 		failures = append(failures, fmt.Errorf("cache downloads exceeded global limit"))
 	}
-	if afterGoroutines > baselineGoroutines+2 {
-		failures = append(failures, fmt.Errorf("goroutines grew from %d to %d", baselineGoroutines, afterGoroutines))
+	if result.GoroutinesAfter > result.GoroutinesBefore+2 {
+		failures = append(failures, fmt.Errorf("goroutines grew from %d to %d", result.GoroutinesBefore, result.GoroutinesAfter))
 	}
-	if temporaryFiles != 0 {
-		failures = append(failures, fmt.Errorf("%d cache temporary files remained", temporaryFiles))
+	if result.TemporaryFilesAfter != 0 {
+		failures = append(failures, fmt.Errorf("%d cache temporary files remained", result.TemporaryFilesAfter))
 	}
 	if result.WorkerFailures != 0 {
 		failures = append(failures, fmt.Errorf("%d benchmark workers failed", result.WorkerFailures))
@@ -239,13 +251,8 @@ func selectedProfile(name string) (profile, error) {
 
 // runGuild exercises the actual v2 coordinator, decoder, encoder, controls and
 // cancellation path. Only network delivery and provider work are simulated.
-func runGuild(ctx context.Context, workers *sync.WaitGroup, guild int, mediaPath string, cacheStore *cache.Cache, measured *measurements) {
+func runGuild(ctx context.Context, workers *sync.WaitGroup, guild int, opener playback.Opener, cacheStore *cache.Cache, measured *measurements) {
 	defer workers.Done()
-	opener, err := audio.NewFileOpener(mediaPath)
-	if err != nil {
-		measured.workerFailures.Add(1)
-		return
-	}
 	engine, err := playback.New(opener, log.New(io.Discard))
 	if err != nil {
 		measured.workerFailures.Add(1)
@@ -278,7 +285,7 @@ func runGuild(ctx context.Context, workers *sync.WaitGroup, guild int, mediaPath
 			return
 		}
 	}
-	_, err = target.Enqueue(ctx, playback.Request{Provider: "file", MediaID: "deterministic"})
+	_, err = target.Enqueue(ctx, playback.Request{Provider: "fixture", MediaID: fmt.Sprintf("https://www.youtube.com/watch?v=fixture%04d", guild)})
 	if err != nil {
 		measured.workerFailures.Add(1)
 		return
@@ -374,7 +381,7 @@ func createDeterministicMedia(dir string, duration time.Duration) (string, error
 		"ffmpeg",
 		"-nostdin", "-hide_banner", "-loglevel", "error",
 		"-f", "lavfi", "-i", "sine=frequency=997:sample_rate=48000",
-		"-t", strconv.FormatFloat(duration.Seconds(), 'f', 3, 64), "-ac", "2", "-c:a", "libopus", "-b:a", "128k", "-y", path,
+		"-t", strconv.FormatFloat(duration.Seconds(), 'f', 3, 64), "-ac", "2", "-c:a", "libopus", "-b:a", "64k", "-vbr", "off", "-y", path,
 	)
 	var stderr failure.Diagnostic
 	cmd.Stderr = &stderr

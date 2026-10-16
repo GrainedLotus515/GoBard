@@ -2,11 +2,18 @@ package main
 
 import (
 	"context"
+	"io"
+	"os"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/charmbracelet/log"
+
 	"github.com/GrainedLotus515/gobard/internal/cache"
+	"github.com/GrainedLotus515/gobard/internal/processlimit"
+	"github.com/GrainedLotus515/gobard/internal/source"
 )
 
 func TestCapacityWorkloadUsesRealAudioAndJoins(t *testing.T) {
@@ -15,7 +22,21 @@ func TestCapacityWorkloadUsesRealAudioAndJoins(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	fixture, err := os.ReadFile("../../scripts/bench-extractor.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// #nosec G306 G703 -- fixed filename, owner-only executable in t.TempDir; no external path input.
+	if err := os.WriteFile(filepath.Join(dir, "yt-dlp"), fixture, 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("GOBARD_BENCH_MEDIA", path)
 	store, err := cache.NewCache(t.TempDir(), 1<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	opener, err := source.NewYouTubeOpener(processlimit.New(1), store, log.New(io.Discard))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -24,7 +45,7 @@ func TestCapacityWorkloadUsesRealAudioAndJoins(t *testing.T) {
 	var measured measurements
 	var workers sync.WaitGroup
 	workers.Add(1)
-	go runGuild(ctx, &workers, 0, path, store, &measured)
+	go runGuild(ctx, &workers, 0, opener, store, &measured)
 	done := make(chan struct{})
 	go func() { workers.Wait(); close(done) }()
 	select {
