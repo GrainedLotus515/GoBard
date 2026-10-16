@@ -164,7 +164,7 @@ func (m *metadataEntry) track() (media.Track, error) {
 	if _, err := sourceurl.ValidateCanonicalYouTubeVideoURL(canonical); err != nil {
 		return media.Track{}, err
 	}
-	t := media.Track{Provider: "youtube", MediaID: canonical, URL: canonical, Title: boundedText(m.Title, 512), Artist: boundedText(m.Artist, 256), Live: m.Live}
+	t := media.Track{Provider: "youtube", MediaID: canonical, TrackID: m.ID, URL: canonical, Title: boundedText(m.Title, 512), Artist: boundedText(m.Artist, 256), Live: m.Live}
 	if t.Title == "" {
 		t.Title = m.ID
 	}

@@ -4,6 +4,30 @@ The v2 runtime is implemented and running as local `gobard-v2-test`.
 The original local `gobard-temp` remains stopped. No VPS service, persisted user
 cache, secrets configuration or image publisher was changed.
 
+## October 15 album investigation
+
+The user stopped the older VPS instance. Local v2 testing of NF's *HOPE* shows
+intermittent zero-frame source failures and repeated mid-stream connection
+resets. Both suspect album entries downloaded successfully in isolated probes;
+a paced MOTTO acquisition/encoding probe reproduced a reset after 166.8605
+seconds of encoded audio. See [evidence and limits](live-2026-10-15.md).
+
+The diagnostic patch adds safe public track IDs and specific HTTP 403/missing
+format reasons without changing recovery policy. It does **not** establish or
+fix the cause of the two historical startup failures. Streaming reliability
+remains an open issue alongside the strict SDK lifecycle blocker.
+
+The diagnostic patch passed `make docker-test` (race suite and five local-test
+helper checks), `make docker-lint` (formatting/vet, zero lint issues), and
+`make docker-smoke DOCKER_IMAGE=gobard:nf-diagnostics`. Identifier tests cover
+resolution, queue/retry identity, terminal logging and rejection of unsafe
+values; failure tests cover safe guidance, precedence and no new retry paths.
+The staged runtime is
+`sha256:a5f6ca8adfc41c2dd4e037b584674b9b53cea652e4ec820d0077fcf361632829`.
+It was not loaded while active playback continued. The running bot still uses
+the `6faf849` image identified in the evidence document. No audio hot-path or
+optimization change is claimed; the new track field is bounded to 32 bytes.
+
 ## Implemented checkpoints
 
 - `81d254f`: session-owned voice join, drain cleanup, cancellation and finite

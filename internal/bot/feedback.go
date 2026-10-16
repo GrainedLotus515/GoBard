@@ -67,6 +67,10 @@ func failureMessage(f *failure.Error) string {
 		return "Playback couldn't finish cleanly. If this repeats, let the bot operator know."
 	}
 	switch f.Reason {
+	case failure.HTTPForbidden:
+		return "The media provider refused the audio download. Choose another track."
+	case failure.FormatUnavailable:
+		return "The media provider offered no compatible audio format for this track."
 	case failure.ConnectionReset:
 		return "The media connection dropped."
 	case failure.NetworkTimeout:

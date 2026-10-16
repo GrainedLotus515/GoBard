@@ -34,6 +34,8 @@ func TestCommandFailuresGiveSafeSpecificGuidance(t *testing.T) {
 		{failure.Wrap("read", failure.ZeroFrames, private), "no playable audio"},
 		{failure.Wrap("read", failure.Codec, private), "couldn't be processed"},
 		{failure.Wrap("send", failure.Transport, private), "voice connection"},
+		{&failure.Error{Category: failure.Source, Reason: failure.HTTPForbidden, Cause: private}, "refused the audio download"},
+		{&failure.Error{Category: failure.Source, Reason: failure.FormatUnavailable, Cause: private}, "no compatible audio format"},
 		{private, "command values"},
 	} {
 		card := commandFailure(tc.err)

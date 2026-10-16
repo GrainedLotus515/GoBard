@@ -43,6 +43,12 @@ func TestTransientNetworkReasonIsSafeAndCannotOverrideAuth(t *testing.T) {
 		{"The read operation timed out", Source, NetworkTimeout},
 		{"Sign in to confirm you're not a bot; connection reset", Authentication, ""},
 		{"HTTP Error 429; connection reset", Throttled, ""},
+		{"ERROR: unable to download video data: HTTP Error 403: Forbidden https://private.invalid/?token=secret", Source, HTTPForbidden},
+		{"ERROR: Requested format is not available. Use --list-formats for a list of available formats", Source, FormatUnavailable},
+		{"HTTP Error 403; connection reset", Source, HTTPForbidden},
+		{"Requested format is not available; connection reset", Source, FormatUnavailable},
+		{"Sign in to confirm you're not a bot; HTTP Error 403", Authentication, ""},
+		{"Private video; Requested format is not available", Unavailable, ""},
 	} {
 		var d Diagnostic
 		if _, err := d.Write([]byte(tc.text)); err != nil {

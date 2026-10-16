@@ -10,6 +10,13 @@ requires at least one accepted frame and successful source finalization. ERROR
 means a terminal failure; INFO means completion or intentional cancellation.
 Lower layers return wrapped causes without duplicate terminal logs.
 
+`track_id` is the optional public provider identifier, distinct from the private
+acquisition key (`MediaID`). YouTube metadata supplies its validated video ID;
+queue admission preserves it across attempts. Playback emits only nonempty IDs
+of at most 32 ASCII letters, digits, hyphens or underscores. Other sources must
+omit this field unless they can guarantee a public identifier. Acquisition URLs,
+paths, titles and requester data are never substituted into this field.
+
 Terminal events also include `first_frame_ms`, `max_read_ms`, `max_send_ms`,
 `slow_reads` and `slow_sends`. First-frame latency includes source opening and
 startup. Read/send maxima and counts measure only subsequent accepted packets:
@@ -32,9 +39,14 @@ command event reports accepted track count; it never claims delivered audio.
 
 Never log raw errors from external commands/SDKs blindly. Bounded stderr is
 classified using allowlisted patterns (authentication, unavailable, throttled,
-connection reset and network timeout);
+connection reset, network timeout, HTTP 403 and unavailable requested format);
 unknown failures expose a fingerprint and exit status, never raw stderr, URLs,
 headers, cookies or tokens. Original errors remain available through Unwrap.
+HTTP 403 remains category `source`, reason `http_forbidden`: the status alone
+does not prove CAPTCHA, a missing account or an expired signed URL. Missing
+formats use `format_unavailable`. Neither reason permits automatic recovery;
+authentication/unavailable/throttled classification takes precedence. Discord
+shows fixed guidance in the existing card, with no extra channel message.
 
 Production examples (field contract, not evidence of a live run):
 

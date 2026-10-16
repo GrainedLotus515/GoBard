@@ -3,6 +3,7 @@ package playback
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"strings"
@@ -14,6 +15,34 @@ import (
 )
 
 type openFunc func(context.Context, Request) (Stream, error)
+
+func TestTerminalLogsOnlyPublicTrackIdentifier(t *testing.T) {
+	for _, id := range []string{"8fM1xnLTApg", "", "https://signed.invalid/?token=private", "@everyone", strings.Repeat("x", 33)} {
+		var logs bytes.Buffer
+		logger := log.NewWithOptions(&logs, log.Options{Formatter: log.JSONFormatter})
+		engine, err := New(openFunc(func(context.Context, Request) (Stream, error) {
+			return &testStream{frames: 1, end: io.EOF}, nil
+		}), logger)
+		if err != nil {
+			t.Fatal(err)
+		}
+		result := engine.Run(context.Background(), Request{TrackID: id, MediaID: "https://signed.invalid/?token=private"}, sendFunc(func(context.Context, []byte) error { return nil }))
+		var event map[string]any
+		if err := json.Unmarshal(logs.Bytes(), &event); err != nil || result.Outcome != Completed {
+			t.Fatal("expected one completed JSON terminal event", err)
+		}
+		if id == "8fM1xnLTApg" {
+			if event["track_id"] != id {
+				t.Fatal("missing public identifier")
+			}
+		} else if _, ok := event["track_id"]; ok {
+			t.Fatal("unsafe identifier logged")
+		}
+		if strings.Contains(logs.String(), "signed.invalid") || strings.Contains(logs.String(), "@everyone") {
+			t.Fatal("private or untrusted text logged")
+		}
+	}
+}
 
 func (f openFunc) Open(ctx context.Context, r Request) (Stream, error) { return f(ctx, r) }
 

@@ -140,7 +140,7 @@ func (s *Session) Enqueue(ctx context.Context, request playback.Request) (*Ticke
 	if request.Offset != 0 {
 		return nil, errors.New("initial offset requires a seek operation")
 	}
-	tickets, err := s.Add(ctx, []Track{{Provider: request.Provider, MediaID: request.MediaID}})
+	tickets, err := s.Add(ctx, []Track{{Provider: request.Provider, MediaID: request.MediaID, TrackID: request.TrackID}})
 	if err != nil {
 		return nil, err
 	}
@@ -373,7 +373,7 @@ func (c *coordinator) add(tracks []Track, commandID string) response {
 	tickets := make([]*Ticket, 0, len(tracks))
 	for _, track := range tracks {
 		c.sequence++
-		request := playback.Request{ID: c.id + "/" + strconv.FormatUint(c.sequence, 10), CommandID: commandID, Provider: track.Provider, MediaID: track.MediaID}
+		request := playback.Request{ID: c.id + "/" + strconv.FormatUint(c.sequence, 10), CommandID: commandID, Provider: track.Provider, MediaID: track.MediaID, TrackID: track.TrackID}
 		ticket := &Ticket{done: make(chan struct{}), request: request}
 		c.queue.entries = append(c.queue.entries, entry{track: track, ticket: ticket})
 		tickets = append(tickets, ticket)

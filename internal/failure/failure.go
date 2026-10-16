@@ -13,8 +13,10 @@ type Category string
 type Reason string
 
 const (
-	ConnectionReset Reason = "connection_reset"
-	NetworkTimeout  Reason = "network_timeout"
+	ConnectionReset   Reason = "connection_reset"
+	NetworkTimeout    Reason = "network_timeout"
+	HTTPForbidden     Reason = "http_forbidden"
+	FormatUnavailable Reason = "format_unavailable"
 )
 
 const (
@@ -74,6 +76,10 @@ func (d *Diagnostic) Failure(stage string, fallback Category, cause error) *Erro
 	f := Wrap(stage, category, cause)
 	if category == Source {
 		switch {
+		case strings.Contains(text, "http error 403"):
+			f.Reason = HTTPForbidden
+		case strings.Contains(text, "requested format is not available"):
+			f.Reason = FormatUnavailable
 		case strings.Contains(text, "connection reset"):
 			f.Reason = ConnectionReset
 		case strings.Contains(text, "timed out"), strings.Contains(text, "timeout error"):

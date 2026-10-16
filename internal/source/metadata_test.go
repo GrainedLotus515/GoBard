@@ -27,6 +27,9 @@ func TestMetadataPlaylistAndURLBoundary(t *testing.T) {
 	if tracks[0].MediaID != "https://www.youtube.com/watch?v=first" || tracks[0].Duration != 65*time.Second || !tracks[1].Live {
 		t.Fatal(tracks)
 	}
+	if tracks[0].TrackID != "first" || tracks[1].TrackID != "second" {
+		t.Fatal("public track identifiers lost during resolution")
+	}
 	for _, query := range []string{"http://youtube.com/watch?v=x", "https://youtube.com.attacker.invalid/watch?v=x", "file:///etc/passwd", "https://www.youtube.com@localhost/watch?v=x"} {
 		if _, err := r.Resolve(context.Background(), query); !errors.Is(err, sourceurl.ErrUnsafeSourceURL) {
 			t.Fatalf("%s: %v", query, err)

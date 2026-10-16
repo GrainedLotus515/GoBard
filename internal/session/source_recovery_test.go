@@ -51,13 +51,16 @@ func (*recoveryStream) Close() error { return nil }
 
 func TestSourceResumeUsesDeliveredPositionAndOneRequest(t *testing.T) {
 	source := &recoverySource{opened: make(chan playback.Request, 3), fail: &failure.Error{Stage: "acquire", Category: failure.Source, Reason: failure.ConnectionReset, Cause: errors.New("reset")}}
-	result, requests := runSourceRecovery(t, source, Track{Provider: "fixture", MediaID: "audio", Duration: time.Minute})
+	result, requests := runSourceRecovery(t, source, Track{Provider: "fixture", MediaID: "audio", TrackID: "public-track", Duration: time.Minute})
 	if result.Outcome != playback.Completed || len(requests) != 2 {
 		t.Fatalf("result %+v, attempts %d", result, len(requests))
 	}
 	first, next := requests[0], requests[1]
 	if first.ID != next.ID || first.AttemptID == next.AttemptID || next.Offset != playback.FrameDuration {
 		t.Fatalf("resume lost identity/position: %+v %+v", first, next)
+	}
+	if first.TrackID != "public-track" || next.TrackID != first.TrackID || result.Request.TrackID != first.TrackID {
+		t.Fatal("resume lost the diagnostic track identifier")
 	}
 }
 
@@ -73,6 +76,8 @@ func TestSourceResumeBudgetAndTerminalExclusions(t *testing.T) {
 		{"reset", failure.Source, failure.ConnectionReset, false, false, time.Minute, 2},
 		{"timeout", failure.Source, failure.NetworkTimeout, false, false, time.Minute, 2},
 		{"unknown", failure.Source, "", false, false, time.Minute, 1},
+		{"forbidden", failure.Source, failure.HTTPForbidden, false, false, time.Minute, 1},
+		{"format unavailable", failure.Source, failure.FormatUnavailable, false, false, time.Minute, 1},
 		{"auth", failure.Authentication, failure.ConnectionReset, false, false, time.Minute, 1},
 		{"empty", failure.Source, failure.ConnectionReset, true, false, time.Minute, 1},
 		{"live", failure.Source, failure.ConnectionReset, false, true, time.Minute, 1},

@@ -10,6 +10,7 @@ import (
 	"github.com/charmbracelet/log"
 
 	"github.com/GrainedLotus515/gobard/internal/failure"
+	"github.com/GrainedLotus515/gobard/internal/media"
 )
 
 const MaxPacketBytes = 4000
@@ -43,6 +44,7 @@ type Request struct {
 	CommandID string
 	Provider  string
 	MediaID   string
+	TrackID   string // Optional public provider identifier; never an acquisition URL.
 	Offset    time.Duration
 	Controls  *Controls
 }
@@ -208,6 +210,9 @@ func (e *Engine) terminal(r Result) {
 		"command_id", r.Request.CommandID, "provider", r.Request.Provider, "outcome", r.Outcome, "recovery", "none", "frames", r.Frames, "elapsed_ms", r.Elapsed.Milliseconds(),
 		"first_frame_ms", r.Timing.FirstFrame.Milliseconds(), "max_read_ms", r.Timing.MaxRead.Milliseconds(), "max_send_ms", r.Timing.MaxSend.Milliseconds(),
 		"slow_reads", r.Timing.SlowReads, "slow_sends", r.Timing.SlowSends}
+	if media.ValidTrackID(r.Request.TrackID) {
+		fields = append(fields, "track_id", r.Request.TrackID)
+	}
 	if r.Failure != nil {
 		fields = append(fields, "stage", r.Failure.Stage, "category", r.Failure.Category, "reason", r.Failure.Reason, "fingerprint", r.Failure.Fingerprint, "exit_code", r.Failure.ExitCode)
 		e.logger.Error("Playback failed", fields...)
