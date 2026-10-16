@@ -47,7 +47,9 @@ v1.2.1/cpp and its asset checksum remain unchanged.
 The GoBard adapter now uses OpenContext/Shutdown, SDK manager cleanup and the
 incoming voice dial context. No local workspace replacement is required. The
 Docker race gate also runs the pinned Gateway, voice and native-wrapper regression
-suites, so release checks exercise the dependency fixes themselves.
+suites, so release checks exercise the dependency fixes themselves. The final
+Docker race/helper, lint and hardened smoke gates passed against these published
+pins; `go mod verify` also passed.
 
 The first authorized local replacement uses the validated acquisition/health
 image, before these pins; see [local evidence](local-2026-10-16.md). SDK runtime
@@ -118,7 +120,7 @@ The separate fixes are now pinned and integrated. Before clearing strict
 completion, retain the deterministic evidence for these contracts and complete
 the remaining real reconnect/active-shutdown gate:
 
-- Gateway and voice Close cancel and join all owned workers, including opening,
+- Gateway and voice terminal Shutdown cancel and join all owned workers, including opening,
   heartbeat, listener and asynchronous event work, under concurrent cancellation.
 - Every reconnect path obeys the configured policy, finite budgets and lifecycle
   cancellation; no private background retry survives session or manager close.

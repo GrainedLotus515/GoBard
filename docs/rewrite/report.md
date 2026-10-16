@@ -1,9 +1,8 @@
 # V2 implementation report — 2026-10-16
 
 GoBard has a working replacement core and a validated local candidate for the
-existing feature set. Strict completion remains blocked by dependency integration
-and live acceptance. The current local bot has not yet been replaced by this
-candidate. No VPS service, production cache, credentials or publisher changed.
+existing feature set. Strict completion remains blocked by live acceptance. SDK fixes are published
+and pinned; the local test bot now runs the SDK-enabled candidate `0b15b9e`. Exact running-image evidence is in local-2026-10-16.md. No VPS service, production cache, credentials or publisher changed.
 
 ## Implemented in GoBard
 
@@ -31,18 +30,19 @@ candidate. No VPS service, production cache, credentials or publisher changed.
 - Hardened containers, strict configuration, SOPS/age compatibility and existing
   Docker/GHCR/Gitea responsibilities remain intact. Local test state is isolated.
 
-## Implemented separately, not integrated into the release
+## SDK fixes published and integrated
 
-Four focused SDK repositories are committed under
-`/home/lotus/Gitea/GoBard-SDK-Fixes`, with contracts and tests. They add terminal
+Four focused SDK repositories are published under `GrainedLotus515` and retained
+locally at `/home/lotus/Gitea/GoBard-SDK-Fixes`, with contracts and tests. They add terminal
 Gateway/voice cancellation and joins, bounded reconnect policy, safe readiness
 handoff and map cleanup, participant limits, explicit native DAVE cleanup and
-frame-state synchronization. A disposable GoBard integration uses the new APIs.
+frame-state synchronization. GoBard now uses their OpenContext/Shutdown APIs
+and fixed manager cleanup through the existing integration boundary.
 
 The [SDK review](sdk-lifecycle-review.md) records exact revisions, native-source
-inspection, test scope and exclusions. Main GoBard dependency pins are unchanged.
-Publishing immutable dependency revisions requires authorization; local workspace
-replacements are not a release solution. Native calls remain cooperative, and
+inspection, test scope and exclusions. User-authorized publication is complete;
+GoBard pins immutable pseudo-versions and verified checksums, with no local
+workspace replacements. Native calls remain cooperative, and
 optional unconsumed SDK helpers are outside the verified contract. Strict
 completion cannot be cleared by listening tests alone.
 
@@ -62,7 +62,9 @@ completion cannot be cleared by listening tests alone.
   Cold first frames were 2.026/1.817 seconds; warm first frames 73/142 ms.
   [The probe record](provider-2026-10-16.md) includes reproduction and limits.
   This is two source samples through fake output, not a full-album or p95 claim.
-- Separate SDK race/vet checks and a disposable integrated GoBard race suite pass.
+- Separate SDK race/vet checks, the disposable integration and the final
+  published-dependency Docker race gate pass. The final gate runs GoBard and the
+  four consumed dependency regression suites; lint and runtime smoke also pass.
   Native tests exercise key-package creation, passthrough, user replacement and
   repeated cleanup. They do not prove established-MLS encryption performance or
   a native race/preemption guarantee.
@@ -72,20 +74,18 @@ completion cannot be cleared by listening tests alone.
   October [9](live-2026-10-09.md), [12](live-2026-10-12.md) and
   [15](live-2026-10-15.md) records.
 
+The authorized local replacement preserved all 21 completed cache files by
+SHA-256 and reached Discord/commands readiness on the SDK-enabled image. See [local replacement evidence](local-2026-10-16.md).
+
 ## Outstanding acceptance and external blockers
 
-1. Authorize the prepared separate dependency publication, pin immutable revisions,
-   apply the tested adapter integration and rerun final GoBard quality gates.
-2. Replace only the local test bot in an agreed quiet window, preserving its cache.
-   The old image lacks the new busy-session field, so the helper deliberately
-   refuses to infer safe idle from zero currently delivered audio.
-3. Complete two isolated cold NF album passes and one warm pass, with truthful
+1. Complete two isolated cold NF album passes and one warm pass, with truthful
    terminal accounting and no unexplained skipped tracks or audible gaps. Recovered
    playback must be recorded as an interruption, not uninterrupted success.
-4. Execute the existing UI/control/authorization, real voice reconnect and active
+2. Execute the existing UI/control/authorization, real voice reconnect and active
    shutdown checks, plus 30 minutes of concurrent two-guild listening. Record exact
    image, commands, times and observed outcomes in the [checklist](acceptance-checklist.md).
-5. Reconcile the evidence and SDK/native limitations before declaring strict
+3. Reconcile the evidence and SDK/native limitations before declaring strict
    completion. Unknown historical failures remain unknown; provider anti-bot,
    authentication or availability rejection remains external and cannot be
    guaranteed away by an internal rewrite.

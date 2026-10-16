@@ -42,7 +42,8 @@ Opener/Stream/Output contracts remain intact.
 
 No passing fake transport test substitutes for listening. Historical unknown
 failures stay labeled unknown until new evidence identifies them. No VPS change,
-production cache migration, dependency publication or image push is authorized.
+production cache migration or bot image push is authorized. The user later
+authorized the separate SDK publication and local replacement recorded below.
 Results and outstanding external gates are maintained in status.md.
 
 ## Acquisition checkpoint — 2026-10-16
@@ -106,3 +107,21 @@ pass. Main pins and the running bot remain unchanged pending publication and
 quiet local replacement permission. Full album, controls, reconnect, active
 shutdown and multiguild listening gates remain open; the strict blocker is not
 waived. No new product capabilities or provider bypasses were introduced.
+
+## Publication and local activation checkpoint — 2026-10-16
+
+The user authorized publication of all four SDK repositories and local bot
+replacement. Published revisions are pinned through go.mod/go.sum; no local
+workspace is required. The adapter uses the new cancellation/join APIs and fixed
+manager cleanup. The Docker race gate now includes the consumed SDK packages.
+The acquisition/health candidate replaced the previous local bot, preserved all
+21 completed media checksums and reached command readiness. Final SDK image
+activation and gate evidence are recorded in local-2026-10-16.md and status.md.
+Historical pending-authorization notes above describe their checkpoint only.
+
+The final pinned SDK integration is committed as `0b15b9e`. The strengthened
+Docker race gate (including all four consumed SDK regression suites), lint and
+hardened smoke passed. While still known idle, the local helper activated that
+SDK-enabled image; Gateway/commands readiness and all 21 completed cache checksums
+were verified. DAVE reconnect, active shutdown and listening acceptance remain
+unverified; no production action or bot image publication occurred.

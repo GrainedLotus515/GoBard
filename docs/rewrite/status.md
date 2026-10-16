@@ -20,23 +20,29 @@
 - Docker race/helper, formatting/vet/lint and hardened runtime smoke gates pass
   for those checkpoints; final Compose profile validation also passed. Local candidate image:
   `sha256:55761fc75d41e4521e007d7d28358b36b991667839999f3f1606f477bd3d071b`.
-  It has not replaced the running test bot; a quiet replacement window is pending.
-- Focused SDK/native cleanup patches are committed in four separate local
-  repositories; their combined race/vet tests and a disposable GoBard integration
-  pass. Main dependency pins remain unchanged. See
+  It replaced the local test bot with user authorization; all 21 completed cache
+  checksums matched and commands became ready. [Local evidence](local-2026-10-16.md).
+- Focused SDK/native cleanup patches are published in four separate repositories
+  with user authorization. Main dependency pins now use immutable published
+  pseudo-versions and verified checksums; the adapter uses their cancellation/join
+  APIs (`0b15b9e`). The strengthened Docker race gate, lint and smoke pass.
+  Inherited GitHub Actions were disabled before publication. See
   [exact revisions and remaining gates](sdk-lifecycle-review.md).
 
-Strict completion remains blocked: SDK publication/pinning and live
-reconnect/active-shutdown acceptance are outstanding. Album/listening acceptance
+Strict completion remains blocked: live DAVE reconnect/active-shutdown and
+full listening acceptance are outstanding. Album/listening acceptance
 is not established by offline soaks. No new provider or convenience feature was
 added, and no VPS service, secrets, production cache or publisher was changed.
 
-The v2 runtime is implemented and running as local `gobard-v2-test`, but the
-running image is still `6faf849` feedback code, not the October 16 candidate.
-The safe local update helper rejects its missing busy-session observation; an
-explicit quiet stop/replacement is awaiting user permission.
-The original local `gobard-temp` remains stopped. No VPS service, persisted user
-cache, secrets configuration or image publisher was changed.
+The v2 runtime is running as local `gobard-v2-test` on the final SDK-enabled
+candidate from `0b15b9e`:
+`sha256:8a4c447ae068ec6868003b5319211a68945e22f50bbfdf6b4365c14b01980158`.
+The strengthened Docker race gate (including the published SDK suites), lint and
+hardened smoke pass. Discord and commands are ready; all 21 completed cache-file
+checksums are preserved. The acquisition/health predecessor is stopped as the
+rollback container. [Exact local evidence](local-2026-10-16.md) distinguishes
+Gateway readiness from still-pending DAVE and listening acceptance. No VPS
+service or bot image publisher was changed.
 
 ## October 15 album investigation
 
