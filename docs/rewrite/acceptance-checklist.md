@@ -5,6 +5,20 @@ this pass. Check `make local-test-status` first. Record the image ID, approximat
 time, command/query or public media link, and what you saw/heard. Do not share
 tokens, private env files or signed media URLs.
 
+For the October 16 completion candidate, execute three full NF *HOPE* album
+passes: two independently empty temporary test caches, then one replay of the
+second pass's warm cache. Keep the normal named test cache and production cache
+intact; coordinate isolated volumes with the operator rather than deleting them.
+Record each resolved track, accepted terminal outcome, skipped/failing entry,
+first-frame timing and audible interruption. A recovered reset remains an
+interruption. Cache warming is now part of successful playback, not a second
+background acquisition. The two-track source probe is not this album gate.
+
+Complete the controls/reconnect/active-shutdown rows below on the exact candidate
+and a 30-minute two-guild concurrent listening session. The SDK fixes must be
+pinned before the final reconnect/shutdown acceptance. If a guild, credential or
+listener is unavailable, leave that gate explicitly unverified.
+
 | Check | Expected result |
 | --- | --- |
 | Play an exact permitted YouTube link, then a search query | Joins your voice channel, displays the resolved track and delivers audio. Search is provider-ranked: use an exact link to disambiguate a song. |

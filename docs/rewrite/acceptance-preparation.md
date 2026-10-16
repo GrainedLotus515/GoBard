@@ -9,7 +9,9 @@ navigation can refresh an old view. Deleted/forbidden messages stop automatic
 updates. Updates coalesce at a three-second minimum interval; progress changes
 in fifteen-second steps. Failed updates have a three-attempt budget with bounded
 backoff and explicit rate-limit delay. Manual interaction can establish a fresh
-view. No new background worker or unbounded message history is introduced.
+view. As revised on October 16, the observer owns one canceled/joined editor
+child and a capacity-one hint channel so HTTP cannot delay health observation.
+No unbounded message history is retained.
 
 Local live testing will use a dedicated Docker named volume and a tracked helper
 for start/status/stop/update. Preserve the existing temporary test cache by copy
@@ -20,5 +22,6 @@ stays `no`; local authorization does not authorize an unattended production bot.
 
 The final SDK review must distinguish joins proven by GoBard from undocumented
 third-party behavior. If public SDK APIs cannot establish a guarantee, record
-the precise exception and containment rather than implement a general Discord
-library here or claim a listening test proves it.
+the precise blocker and containment rather than implement a general Discord
+library here or claim a listening test proves it. The user rejected an exception;
+separate focused SDK fixes must be pinned and verified before strict completion.

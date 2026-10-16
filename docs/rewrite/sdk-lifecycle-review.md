@@ -1,5 +1,52 @@
 # SDK lifecycle completion blocker — 2026-10-13
 
+## October 16 focused fixes (not yet pinned)
+
+Separate local repositories are preserved under
+`/home/lotus/Gitea/GoBard-SDK-Fixes`; no library implementation was copied into
+GoBard. Each contains a `LIFECYCLE.md` contract and regression tests.
+
+| Dependency | Local patch revision | Scope |
+| --- | --- | --- |
+| disgo | `7a61d29e59893a2258a906d2094de335d0554fc6` | terminal Gateway/connection joins, opening ownership, copied state, readiness, finite reconnect policy, generation join, canceled UDP discovery, manager map cleanup, bounded participant/SSRC state |
+| discordgo | `3d1129bd8482c1071aca2f73e5587a1923d6e551` | OpenContext, terminal Shutdown, worker/callback joins, canceled handshake/backoff, finite reconnect attempts |
+| libdave Go bindings | `26460929a20e4c94719b8c2d7ff1ff54a34656eb` | explicit native handle/result/ratchet cleanup and owned C callback storage |
+| golibdave | `7783ee7cd557ab9aa23ad02249a156a41201a13c` | native session cleanup, user replacement/removal, serialized frame state, corrected passthrough copy |
+
+The native audit used v1.2.1/cpp source at
+`8de72b1f8a2ac3c5a5270755bb8091a62e3c6169`, matching the release used by the
+pinned build image. Its C API copies ratchets when installing them, allowing
+explicit release of caller-owned handles. The optional pairwise-fingerprint API
+starts a detached native thread; GoBard does not consume it. Native calls remain
+cooperative rather than context-preemptible. Neither an elapsed timeout nor Go's
+race detector proves a hard preemption or native data-race guarantee.
+
+Executed evidence: full disgo and discordgo race suites; combined workspace race
+tests for the modified voice/Gateway/native packages and a disposable GoBard
+checkout; go vet on those dependency packages. Tests include canceled opening,
+duplicate readiness, missing heartbeat acknowledgment with reconnect disabled,
+old/new generation separation, UDP cancellation, concurrent map removal, blocked
+callbacks, native key-package creation/passthrough and repeated explicit cleanup.
+Voice participant state is capped at 1,024; duplicate announcements are idempotent,
+SSRC replacement removes the stale mapping, and participant overflow closes the
+Gateway. SSRC callbacks execute outside the map lock, with a reentrant inspection
+regression. This matches the existing GoBard membership budget. The combined race
+suite and vet were rerun after this correction.
+Native passthrough microbenchmark: 56.20 ns/frame, 8 B/frame, one allocation/frame
+for 320-byte frames on the i9-12900K, linux/amd64; this is not established-MLS
+encryption or a before/after improvement measurement.
+
+The tested integration patch is preserved beside these repositories. It switches
+GoBard to OpenContext/Shutdown, uses SDK manager cleanup and honors the incoming
+voice dial context. **Main GoBard pins and the running bot are unchanged.**
+Publication authorization and an immutable distribution are pending; local
+workspace replacements are not a reproducible release dependency. After pinning,
+repeat final GoBard gates and verify real DAVE reconnect/active shutdown before
+clearing strict completion. Optional SDK audio sender/receiver and legacy
+discordgo voice helpers are outside the consumed path and outside these claims.
+
+## Original blocker and containment
+
 This is a strict completion blocker, not a user playback-test gate.
 The engineering standard requires every goroutine to be cancellable and joined.
 The pinned libraries do not expose enough public lifecycle API to prove that

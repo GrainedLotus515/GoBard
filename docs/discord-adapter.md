@@ -108,6 +108,12 @@ gaps that block strict completion until the library is fixed and verified; the
 user rejected a temporary exception. Exact source findings, containment and
 required verification are in
 [the SDK lifecycle review](rewrite/sdk-lifecycle-review.md).
+October 16: focused fixes and regression tests now exist in separate local SDK
+repositories, with a tested disposable GoBard integration patch. They add public
+terminal joins and native cleanup rather than copying library internals into this
+adapter. Main dependency pins remain unchanged pending authorized publication;
+the limitations above still describe the running bot. Final integration must use
+immutable revisions and repeat real reconnect/active-shutdown acceptance.
 Gateway state caching is disabled in the SDK. The adapter retains only bounded
 guild IDs and user-to-voice-channel observations: 1,024 guilds, 1,024 voices per
 guild, 16,384 voices globally. Oversized snapshots fail authorization closed;

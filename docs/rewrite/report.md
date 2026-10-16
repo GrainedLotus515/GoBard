@@ -1,116 +1,104 @@
-# V2 implementation report — 2026-10-13
+# V2 implementation report — 2026-10-16
 
-The runtime has been replaced and is available for local Discord testing. It is
-not declared a completed production rewrite: the client acceptance pass remains,
-and the pinned SDK lifecycle gaps require a verified library fix. The user
-explicitly rejected a temporary exception. The latest listening rerun was
-reported successful; the earlier stutter's cause remains unresolved.
+GoBard has a working replacement core and a validated local candidate for the
+existing feature set. Strict completion remains blocked by dependency integration
+and live acceptance. The current local bot has not yet been replaced by this
+candidate. No VPS service, production cache, credentials or publisher changed.
 
-## Implemented
+## Implemented in GoBard
 
-- Modular Go composition; SDK-free session, command, playback, source and cache
-  contracts; original bot/player/YouTube orchestration removed.
-- All inventoried slash commands and buttons, voice/Manage Guild authorization,
-  bounded queue/guild/command admission and retained disconnect selection.
-- Owned attempts, cancellation and cleanup; exactly one authoritative terminal
-  per attempt; zero-frame rejection; explicit source/codec/transport outcomes;
-  bounded voice recovery, one classified transient source resume from delivered
-  position, and stop/skip/reconnect race handling.
-- Charm JSON/text events with stable command/request/attempt correlation and
-  safe extractor classifications; bounded Discord HTTP responses, cancellation,
-  mention suppression, Gateway membership observations and callback shutdown.
-- Fixed-size startup/read/send timing summaries on attempt terminal events,
-  to diagnose future live stutter without per-frame logs or a sample buffer.
-- YouTube resolver/acquisition and stable-key media cache, bounded metadata,
-  stderr, subprocesses, downloads and warming. No personal-cookie requirement.
-- Existing hardened runtime, strict config, pinned dependencies, GHCR/Gitea and
-  SOPS/age deployment compatibility retained; explicit migration/rollout docs.
-- Restored `/play` track card and playback controls, current progress/next track,
-  Queue/Refresh navigation and private errors that preserve shared player cards.
-  One active player/queue message follows state and sampled progress automatically;
-  stale mutation buttons are rejected privately. Deleted messages, cancellation
-  and rate limits have finite update policies. See [the interface contract](../discord-interface.md).
-- Durable local test start/status/stop/update helper, labeled named cache volume,
-  readiness rollback and private configuration transfer. Production cache is untouched.
-- Shared cancellable WebSocket guard, disabled public voice AutoReconnect,
-  locked connection snapshots for manager shutdown and exact SDK source review.
-- Discord feedback overhaul (`6faf849`): all slash receipts private, one shared
-  card reused for play/queue/player requests, and recovery/failure/queue completion
-  inside that card. Automatic standalone failure posts and their route map were
-  removed. Specific safe guidance replaces generic raw domain-error wording.
+- Modular Go composition, SDK-free session/command/playback/source contracts,
+  bounded admission, original orchestration removed, and adapter isolation tests.
+- Inventoried commands and buttons, same-channel mutation authorization,
+  Manage Guild configuration checks, queue/seek/loop policy and finite recovery.
+- One authoritative terminal event per attempt after cleanup; zero-frame
+  rejection; source/codec/transport classifications and stable correlation IDs.
+  One classified transient source resume remains session-owned and bounded.
+- An 8 MiB compressed acquisition ring separates network reads from paced
+  playback. Preparation and first-packet startup have a 30-second budget;
+  cancellation joins acquisition, feeder and subprocesses. Long/live media
+  backpressures at the bound; extractor slots are released after process reap.
+- One optional bounded cache transaction taps those same bytes. Duplicate warming
+  downloads and the unused cache-creator API were removed. Cache failure does
+  not fail audio; successful nonzero decoding is required before publication.
+  Cache keys, leases, persistence and existing mounts are preserved.
+- Charm events with safe diagnostics; no raw external stderr, tokens or signed
+  URLs. One evolving shared player card, private receipts, inline failure/recovery
+  guidance and finite edit retries keep channel noise low.
+- Health observation is independent of stalled Discord HTTP edits. Observer-owned
+  editors are bounded, canceled and joined. Local updates require a known idle
+  observation; pause/preparation/reservations/cleanup cannot count as idle.
+- Hardened containers, strict configuration, SOPS/age compatibility and existing
+  Docker/GHCR/Gitea responsibilities remain intact. Local test state is isolated.
 
-## Verified
+## Implemented separately, not integrated into the release
 
-- Docker race tests, lint/vet/formatting, runtime build/smoke and rendered Compose
-  profile gates. Fake interaction and voice fault injection cover contracts.
-- Real local-media FFmpeg/Opus → session → paced fake transport slice, including
-  cancellation, stalls, failures, zero frames and cleanup.
-- Full 15-minute offline capacity gates at 4/12/24 guilds. No missed 60 ms
-  deadlines, worker failures, temporary files or workload goroutine growth.
-  See `capacity-soak-2026-10-08.json` and `../performance.md` for measurements.
-- Actual local Discord login and command reconciliation in four guilds.
-- User-confirmed audible `/play hope`; 2,233 accepted frames before a source
-  connection reset, independently reproduced with the same diagnostic fingerprint.
-  A separate cache download contains all 5,548 Opus frames (110.961 seconds).
-  This is partial live playback evidence, not successful full-track completion.
-- A later live source reset at 203.980 seconds triggered exactly one resume;
-  the next attempt completed. Total accepted audio across both attempts was
-  268.540 seconds. The user's listening report was qualified, so uninterrupted
-  audible playback is not claimed. See [live evidence](live-2026-10-09.md).
-- Deterministic source-resume tests cover offset/identity, one-retry budget,
-  auth/unknown/empty/live exclusions, and stop/shutdown during the resumed attempt.
-- Timing fault-injection tests, Docker race/lint/build/smoke gates and a short
-  4/12/24-guild capacity regression passed after adding timing summaries. The
-  synthetic overhead sample is recorded in `../performance.md`; live timing
-  data for the reported stutter is unavailable retroactively.
-- Idle connected-container SIGTERM: exit 0, no OOM, 1.377-second shutdown.
-- User-confirmed successful October 12 rerun: one source reset at 180.540
-  seconds, then a completed 88.000-second resume. No measured read/send call
-  exceeded 60 ms; see [the live timing evidence](live-2026-10-12.md).
-- October 13 Docker race tests, five helper safety tests, lint (zero issues),
-  hardened build/smoke and all three Compose profile checks passed. New fake
-  interaction tests exercise play, concurrent controls, changed permissions and
-  stop; panel tests cover transitions, coalescing, deleted messages and rate limits.
-- Final 30-second 4/12/24-guild regression: no gaps over 60 ms, worker failures
-  or retained temporary files. This does not replace the earlier fifteen-minute
-  soak or verify real Discord UI/DAVE. See [performance](../performance.md).
-- The updated local bot logged in with commands ready. Its one completed test
-  cache file was copied to the named volume and verified by SHA-256; the previous
-  container exited zero without OOM. No production cache was mounted.
-- The helper's subsequent idle stop/start returned the bot to healthy readiness;
-  the completed media checksum still matched and the original `gobard-temp`
-  remained stopped. This verifies idle lifecycle and cache persistence only.
-- The feedback overhaul passed Docker race/lint/build/smoke. New tests cover
-  shared-card reuse, private acknowledgements, error sanitization, recovery
-  versus next-track state, deleted-card recreation and UI rate-limit handling.
+Four focused SDK repositories are committed under
+`/home/lotus/Gitea/GoBard-SDK-Fixes`, with contracts and tests. They add terminal
+Gateway/voice cancellation and joins, bounded reconnect policy, safe readiness
+handoff and map cleanup, participant limits, explicit native DAVE cleanup and
+frame-state synchronization. A disposable GoBard integration uses the new APIs.
 
-## External gates and limitations
+The [SDK review](sdk-lifecycle-review.md) records exact revisions, native-source
+inspection, test scope and exclusions. Main GoBard dependency pins are unchanged.
+Publishing immutable dependency revisions requires authorization; local workspace
+replacements are not a release solution. Native calls remain cooperative, and
+optional unconsumed SDK helpers are outside the verified contract. Strict
+completion cannot be cleared by listening tests alone.
 
-- Provider retrieval, audible Discord delivery, live source recovery and pipeline
-  completion are confirmed for the observed requests, with a successful user
-  report on the latest rerun. Channel controls and voice reconnect remain
-  unverified. Completion does not establish lossless delivery to the listener,
-  and the earlier stutter's cause remains unresolved.
-- YouTube authentication/anti-bot rejection remains possible and is terminal
-  when appropriate. A rewrite cannot guarantee provider availability.
-- The current SDK exposes no strict heartbeat/listener join. Some voice heartbeat
-  reconnect paths ignore the disabled AutoReconnect flag. GoBard cancels its
-  sockets and joins its own work; native DAVE is non-preemptible. The exact
-  [SDK lifecycle review](sdk-lifecycle-review.md) records containment and the
-  strict completion blocker and required verification. The user declined the
-  temporary exception; user listening tests cannot waive the blocker.
-- No VPS rollout, production-cache migration, credential rotation, image push
-  or publisher change occurred. Local testing uses its separate labeled volume.
+## Executed verification
 
-The remaining user-facing pass is [the acceptance checklist](acceptance-checklist.md).
-Live client rendering/controls, voice reconnect, active shutdown and multiguild
-listening are still unverified for this candidate. Provider availability remains
-external; the SDK fix is a required engineering gate rather than a listening test.
+- Docker race suite, formatting/vet/lint, six local-helper safety tests and final
+  hardened runtime build/smoke pass. Meaningful fault coverage includes full-ring
+  cancellation, zero frames, source reset after delivered audio, startup/admission
+  timeout, pause after preparation, cache saturation/leases/persistence, stalled
+  panel edits, authorization and control/termination races.
+- Two 15-minute capacity runs at 4/12/24 guilds exercise the real acquisition ring,
+  FFmpeg/libopus and paced fake output. [Performance evidence](../performance.md)
+  records image IDs, CPU/memory/timing measurements and workload limitations.
+  These runs do not test provider networking or native Discord encryption.
+- Real provider probes completed MOTTO and PANDEMONIUM without recovery, then
+  replayed exactly 10,864 and 9,851 frames from cache with extraction disabled.
+  Cold first frames were 2.026/1.817 seconds; warm first frames 73/142 ms.
+  [The probe record](provider-2026-10-16.md) includes reproduction and limits.
+  This is two source samples through fake output, not a full-album or p95 claim.
+- Separate SDK race/vet checks and a disposable integrated GoBard race suite pass.
+  Native tests exercise key-package creation, passthrough, user replacement and
+  repeated cleanup. They do not prove established-MLS encryption performance or
+  a native race/preemption guarantee.
+- Earlier user-confirmed Discord playback and successful reruns remain historical
+  evidence. Those requests included connection resets and one-time recovery;
+  they do not establish uninterrupted playback on the new candidate. See the
+  October [9](live-2026-10-09.md), [12](live-2026-10-12.md) and
+  [15](live-2026-10-15.md) records.
 
-## Proposed only
+## Outstanding acceptance and external blockers
 
-Spotify metadata and official-player control remain separately assessed
-capabilities; no independent Spotify audio source or browser rebroadcast exists.
-Public self-hosted origins and an independent official-player wrapper remain
-design proposals. The local media source is an operator-owned test fixture,
-not a Discord-controlled filesystem or arbitrary-URL feature.
+1. Authorize the prepared separate dependency publication, pin immutable revisions,
+   apply the tested adapter integration and rerun final GoBard quality gates.
+2. Replace only the local test bot in an agreed quiet window, preserving its cache.
+   The old image lacks the new busy-session field, so the helper deliberately
+   refuses to infer safe idle from zero currently delivered audio.
+3. Complete two isolated cold NF album passes and one warm pass, with truthful
+   terminal accounting and no unexplained skipped tracks or audible gaps. Recovered
+   playback must be recorded as an interruption, not uninterrupted success.
+4. Execute the existing UI/control/authorization, real voice reconnect and active
+   shutdown checks, plus 30 minutes of concurrent two-guild listening. Record exact
+   image, commands, times and observed outcomes in the [checklist](acceptance-checklist.md).
+5. Reconcile the evidence and SDK/native limitations before declaring strict
+   completion. Unknown historical failures remain unknown; provider anti-bot,
+   authentication or availability rejection remains external and cannot be
+   guaranteed away by an internal rewrite.
+
+The generated capacity fixture fits the ring. Longer/high-bitrate cold sources
+can hold extraction slots under backpressure and reach admission deadlines;
+no unlimited 24-guild cold-source claim is made. Startup percentiles and live
+client rendering/audibility still need representative acceptance samples.
+
+## Proposed only / outside this completion pass
+
+No Muse feature-parity goal or new provider was added. Spotify metadata,
+official-player control and independent delivery capabilities remain separately
+assessed proposals. There is no Spotify audio backend, browser rebroadcast,
+Discord-controlled local filesystem or arbitrary-URL feature. New conveniences
+and persistent preference expansion follow completion of existing commitments.

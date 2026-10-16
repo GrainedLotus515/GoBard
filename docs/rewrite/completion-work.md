@@ -59,7 +59,7 @@ provider-availability claim is made by those deterministic fixtures.
 Separate SDK workspaces were initialized from the exact pinned module sources
 under `/tmp/gobard-sdk-fixes`. These are development checkpoints, not published
 dependencies; GoBard's dependency pins remain unchanged and strict completion is
-still blocked. Capacity measurements must be rerun with acquisition included.
+still blocked. Subsequent acquisition-backed capacity measurements are below.
 
 ## Health and local update checkpoint — 2026-10-16
 
@@ -86,4 +86,23 @@ Removed the unused pathname-creator/single-flight cache API and its separate
 creator-admission state. Production and benchmark cache writes now use the same
 single-writer transaction; tests retain persistence, lease incarnation, eviction,
 unsafe-key, symlink, byte-budget, cancellation and abort coverage. Docker race
-and lint gates pass. Repeated capacity validation is running for this final form.
+and lint gates pass. Repeated 15-minute capacity validation passed at 4/12/24
+guilds with zero missed 60 ms deadlines, worker failures or temporary files;
+see capacity-transactions-2026-10-16.json. Final runtime smoke and rendered Compose
+profile validation passed. The canceled/closing activity guard was committed as
+`697128d` and the opt-in real-provider regression/evidence as `039e738`.
+
+## External source and SDK checkpoints — 2026-10-16
+
+MOTTO and PANDEMONIUM completed the real provider/acquisition/codec path and
+replayed identical full frame counts from cache with extraction disabled. The
+paced output was fake; this is not Discord listening evidence. Reproduction and
+startup observations are in provider-2026-10-16.md.
+
+Four separate SDK repositories are preserved durably under
+`/home/lotus/Gitea/GoBard-SDK-Fixes`; exact commits, tests and limitations are in
+sdk-lifecycle-review.md. Combined SDK/native/disposable-GoBard race tests and vet
+pass. Main pins and the running bot remain unchanged pending publication and
+quiet local replacement permission. Full album, controls, reconnect, active
+shutdown and multiguild listening gates remain open; the strict blocker is not
+waived. No new product capabilities or provider bypasses were introduced.

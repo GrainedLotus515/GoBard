@@ -30,6 +30,27 @@ can hit the startup/admission deadline. The full-ring cancellation regression
 tests that saturation path, but this soak does not establish 24 simultaneous
 long-source acquisitions or unrestricted production capacity.
 
+The final repeat after removing the unused cache-creator API also passed all
+three 900-second profiles. Cache pressure now uses the production transaction
+API. Same host/workload and overlapping local validation; no controlled speedup
+claim is made. [Raw final results](rewrite/capacity-transactions-2026-10-16.json)
+identify the image and all counters.
+
+| Guilds | CPU / quota | Peak anonymous MiB | Maximum gap ms | Maximum session shutdown ms |
+| ---: | ---: | ---: | ---: | ---: |
+| 4 | 7.00% | 139.94 | 26.53 | 15.77 |
+| 12 | 9.19% | 380.82 | 30.32 | 24.38 |
+| 24 | 8.71% | 685.98 | 29.80 | 22.03 |
+
+All had zero missed 60 ms deadlines, worker failures and retained temporary
+files; goroutines returned from two to one. Maximum first-frame latencies were
+76.57/90.15/106.93 ms. The microbenchmark gate measured synthetic 1,000-frame
+attempts at 101,196 ns, 4,169 B/four allocations; real 1,000-frame attempts at
+304,511,891 ns, 118,576 Go B/92 allocations. Cache acquire measured 750.5 ns,
+352 B/three allocations, and limiter admission 86.48 ns, 64 B/two allocations.
+The real-media sample is slower than the October 13 sample and overlapped other
+work; these measurements do not isolate a cause or establish an optimization.
+
 The original runtime had five buffered packets plus a producer packet and
 unbounded queue/guild admission. V2 replaces those paths with the budgets below.
 Measurements are workload evidence, not a general production capacity guarantee.

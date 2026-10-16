@@ -1,6 +1,40 @@
-# Rewrite status — 2026-10-13
+# Rewrite status — 2026-10-16
 
-The v2 runtime is implemented and running as local `gobard-v2-test`.
+## Existing-commitment completion work
+
+- `de47336`: bounded 8 MiB acquisition, preparation/first-packet deadline,
+  attempt-owned canceled/joined workers, early extractor-slot release and one
+  optional same-stream cache transaction; duplicate warming downloads removed.
+- `36889e6`: editor work isolated from health, canceled/joined at session removal;
+  busy-session observations and fail-closed local update guards.
+- `e026c0a`: acquisition-backed 4/12/24-guild 15-minute soaks, all passing with no
+  missed 60 ms deadlines, worker failures or retained scratch files. Memory cost
+  and workload limits are recorded in [performance.md](../performance.md).
+- `15c392f`: removed the obsolete cache-creator API; one bounded transaction
+  path now serves production and benchmark writes. Repeated 15-minute soaks at
+  4/12/24 guilds passed with no missed 60 ms deadlines, failures or retained
+  temporary files; [final raw results](capacity-transactions-2026-10-16.json).
+- `697128d`: canceled/closing observations cannot report safe idle.
+- `039e738`: opt-in real-provider test; MOTTO and PANDEMONIUM completed cold
+  playback and full warm replay without recovery. See [source evidence](provider-2026-10-16.md).
+- Docker race/helper, formatting/vet/lint and hardened runtime smoke gates pass
+  for those checkpoints; final Compose profile validation also passed. Local candidate image:
+  `sha256:55761fc75d41e4521e007d7d28358b36b991667839999f3f1606f477bd3d071b`.
+  It has not replaced the running test bot; a quiet replacement window is pending.
+- Focused SDK/native cleanup patches are committed in four separate local
+  repositories; their combined race/vet tests and a disposable GoBard integration
+  pass. Main dependency pins remain unchanged. See
+  [exact revisions and remaining gates](sdk-lifecycle-review.md).
+
+Strict completion remains blocked: SDK publication/pinning and live
+reconnect/active-shutdown acceptance are outstanding. Album/listening acceptance
+is not established by offline soaks. No new provider or convenience feature was
+added, and no VPS service, secrets, production cache or publisher was changed.
+
+The v2 runtime is implemented and running as local `gobard-v2-test`, but the
+running image is still `6faf849` feedback code, not the October 16 candidate.
+The safe local update helper rejects its missing busy-session observation; an
+explicit quiet stop/replacement is awaiting user permission.
 The original local `gobard-temp` remains stopped. No VPS service, persisted user
 cache, secrets configuration or image publisher was changed.
 
