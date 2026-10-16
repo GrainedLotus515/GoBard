@@ -156,8 +156,11 @@ func (m *Manager) Remove(guild string) error {
 // busy. This is a bounded observation, not a lock against future commands.
 // Errors mean unknown, never idle. No registry lock spans coordinator calls.
 func (m *Manager) Busy(ctx context.Context) (int, error) {
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
 	m.mu.Lock()
-	if m.stopping {
+	if m.stopping || m.ctx.Err() != nil {
 		m.mu.Unlock()
 		return 0, ErrClosed
 	}
