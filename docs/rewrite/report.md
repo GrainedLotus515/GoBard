@@ -1,5 +1,9 @@
 # V2 implementation report — 2026-10-16
 
+Historical checkpoint. The current offline review fixes and remaining gates are
+in [status](status.md) and [quality-fix validation](quality-fixes-2026-11-01.md).
+The local deployment statements below are October observations, not fresh checks.
+
 GoBard has a working replacement core and a validated local candidate for the
 existing feature set. Strict completion remains blocked by live acceptance. SDK fixes are published
 and pinned; the local test bot now runs the SDK-enabled candidate `0b15b9e`. Exact running-image evidence is in local-2026-10-16.md. No VPS service, production cache, credentials or publisher changed.

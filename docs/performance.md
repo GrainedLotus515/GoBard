@@ -1,5 +1,18 @@
 # Performance and budgets
 
+## November 1 review-fix evidence
+
+The new [quality-fix report](rewrite/quality-fixes-2026-11-01.md) preserves the
+baseline regressions, short-profile comparisons, a failed long-source stress
+probe and admitted-capacity high-bitrate runs. Runtime admission now uses visible
+memory and extractor capacity; historical 4/12/24-guild fixture counts below are
+stress workloads, not the runtime's admission promise. The benchmark supports
+`GOBARD_BENCH_ADMISSION=runtime`, `GOBARD_BENCH_INPUT_KBPS=256` and
+`GOBARD_BENCH_MEDIA_DURATION=20m` to exercise cold backpressure with a fixture
+larger than the 8 MiB ring. Its default `stress` mode retains fixed profile counts
+for like-for-like historical checks. Both modes use real acquisition/codec/pacing
+and explicitly fake provider/voice endpoints.
+
 ## Acquisition soak — 2026-10-16
 
 The updated `make docker-bench` passed all three 900-second profiles. The actual

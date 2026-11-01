@@ -1,6 +1,31 @@
-# Rewrite status — 2026-10-16
+# Rewrite status — 2026-11-01
 
-## Existing-commitment completion work
+## Current offline quality-fix candidate
+
+The independent [review](quality-review-2026-11-01.md) reproduced three defects
+at `25a8161` and identified runtime admission/diagnostic gaps. Its original
+artifacts are copied here unchanged; new execution evidence is separate in
+[quality-fix validation](quality-fixes-2026-11-01.md).
+
+Implementation commit `a2f6bf3` preserves delivered offsets across voice recovery and intentional
+disconnect, prevents bursts after slow successful transport writes, preserves
+specific wrapped metadata classifications, derives active-stream admission from
+memory/extractor capacity, and logs safe actionable reason/guidance fields.
+Finite request/attempt identity and control priorities remain owned by sessions.
+Live/unknown-duration interruptions end that selection instead of replaying it.
+
+This work is offline only. It has not updated or inspected the existing local
+bot, accessed a VPS, changed credentials, published an image, or touched real
+media caches. All local-bot/image claims below are historical observations at
+their recorded checkpoints, not a claim about today's running state.
+
+The missing SDK join API blocker is superseded by `0b15b9e` and its pinned SDK
+regressions. Exact remaining live gates are DAVE reconnect, shutdown during
+active encrypted audio, UI/permissions, 30-minute two-guild listening, and two
+isolated cold plus one warm full NF *HOPE* album passes on the approved candidate.
+Offline fake transport cannot verify audibility. Full acceptance is still open.
+
+## Historical existing-commitment completion work (October 16)
 
 - `de47336`: bounded 8 MiB acquisition, preparation/first-packet deadline,
   attempt-owned canceled/joined workers, early extractor-slot release and one
@@ -55,7 +80,8 @@ seconds of encoded audio. See [evidence and limits](live-2026-10-15.md).
 The diagnostic patch adds safe public track IDs and specific HTTP 403/missing
 format reasons without changing recovery policy. It does **not** establish or
 fix the cause of the two historical startup failures. Streaming reliability
-remains an open issue alongside the strict SDK lifecycle blocker.
+remains an open issue. The SDK join-API blocker present at that checkpoint was
+subsequently addressed by the pinned fixes noted above; live DAVE acceptance remains open.
 
 The diagnostic patch passed `make docker-test` (race suite and five local-test
 helper checks), `make docker-lint` (formatting/vet, zero lint issues), and
@@ -180,7 +206,8 @@ improvement is claimed, and this UI work does not establish real client renderin
 The local bot now runs feedback image
 `sha256:6f5bb7484e1b6d7135db84e03bd07bfeb6002b0f07a3e6d30efa2bd57552d711`;
 Gateway and commands are ready after the idle update. Client appearance and the
-new message flow remain user acceptance checks. The SDK completion blocker stands.
+new message flow remained user acceptance checks. The then-current SDK API
+blocker was subsequently superseded by the pinned library fixes.
 
 ## Remaining gates and risks
 
@@ -188,11 +215,9 @@ new message flow remain user acceptance checks. The SDK completion blocker stand
    user-driven Discord tests. The latest listening rerun, source resume and
    pipeline completion passed live. Earlier stuttering has not been attributed
    to a cause; one successful run does not establish provider-wide reliability.
-2. The temporary SDK exposes no strict join for private workers, and some voice
-   heartbeat reconnects ignore its disabled AutoReconnect setting. Containment
-   is implemented, but the user explicitly rejected a temporary exception:
-   strict completion remains blocked until an upstream/separate-library fix is
-   integrated and verified. See [the source review and exit criteria](sdk-lifecycle-review.md).
+2. Pinned SDK fixes now expose and test the required joins and reconnect policy.
+   Their offline suites pass; established DAVE reconnect and active encrypted
+   shutdown still need live verification. See [the source review and exit criteria](sdk-lifecycle-review.md).
 3. YouTube may reject authentication/automation externally. No personal cookies,
    auth bypass or unsupported fallback is required or implemented.
 4. Spotify metadata/player control and public self-hosted sources remain
@@ -200,7 +225,7 @@ new message flow remain user acceptance checks. The SDK completion blocker stand
 
 The [acceptance checklist](acceptance-checklist.md) consolidates the remaining
 client tests. The full rewrite is **not declared complete** until those gates
-are resolved and the SDK lifecycle fix is verified. No automatic
+are resolved on the exact candidate. No automatic
 VPS rollout or image publication is authorized.
 
 User changes to `AGENTS.md`, removal of `CLAUDE.md`, and the pre-existing
