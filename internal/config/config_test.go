@@ -21,6 +21,14 @@ var configEnvKeys = []string{
 	"REDUCE_VOL_WHEN_VOICE_TARGET",
 	"MAX_PLAYLIST_TRACKS",
 	"YTDLP_MAX_CONCURRENCY",
+	"MAX_GUILD_SESSIONS",
+	"MAX_ACTIVE_STREAMS",
+	"PLAYBACK_MEMORY_LIMIT",
+	"PLAYBACK_MEMORY_HEADROOM",
+	"MEMORY_BUDGET",
+	"QUEUE_LIMIT",
+	"PLAY_COMMAND_CONCURRENCY",
+	"LOG_FORMAT",
 	"HEALTH_LISTEN_ADDR",
 	"DEBUG",
 	"DEBUG_PLAYBACK",
@@ -103,6 +111,20 @@ func TestLoadRejectsMalformedValues(t *testing.T) {
 		{"zero playlist limit", "MAX_PLAYLIST_TRACKS", "0"},
 		{"playlist limit above safety ceiling", "MAX_PLAYLIST_TRACKS", "501"},
 		{"too many yt-dlp processes", "YTDLP_MAX_CONCURRENCY", "17"},
+		{"zero guild budget", "MAX_GUILD_SESSIONS", "0"},
+		{"obsolete memory limit", "PLAYBACK_MEMORY_LIMIT", "1GB"},
+		{"obsolete headroom", "PLAYBACK_MEMORY_HEADROOM", "256MB"},
+		{"zero active budget", "MAX_ACTIVE_STREAMS", "0"},
+		{"excess active budget", "MAX_ACTIVE_STREAMS", "65"},
+		{"insufficient memory", "MEMORY_BUDGET", "128MB"},
+		{"empty memory", "MEMORY_BUDGET", ""},
+		{"invalid memory", "MEMORY_BUDGET", "plenty"},
+		{"excess guild budget", "MAX_GUILD_SESSIONS", "1025"},
+		{"zero queue budget", "QUEUE_LIMIT", "0"},
+		{"excess queue budget", "QUEUE_LIMIT", "501"},
+		{"zero command budget", "PLAY_COMMAND_CONCURRENCY", "0"},
+		{"excess command budget", "PLAY_COMMAND_CONCURRENCY", "17"},
+		{"unknown log format", "LOG_FORMAT", "xml"},
 		{"public health listener", "HEALTH_LISTEN_ADDR", "0.0.0.0:8080"},
 		{"invalid health port", "HEALTH_LISTEN_ADDR", "127.0.0.1:0"},
 	}
@@ -130,5 +152,26 @@ func TestLoadAcceptsLoopbackIPv6HealthListener(t *testing.T) {
 	}
 	if cfg.HealthListenAddr != "[::1]:9090" {
 		t.Fatalf("HealthListenAddr = %q", cfg.HealthListenAddr)
+	}
+}
+
+func TestCapacityConfigMigrationAndValidatedOverrides(t *testing.T) {
+	cleanConfigEnvironment(t)
+	t.Setenv("DISCORD_TOKEN", "test-token")
+	t.Setenv("MEMORY_BUDGET", "512MB")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.MaxGuildSessions != 16 || cfg.Capacity.Streams != 1 {
+		t.Fatalf("legacy session budget changed meaning: %+v", cfg.Capacity)
+	}
+	t.Setenv("MAX_ACTIVE_STREAMS", "2")
+	if _, err := Load(); err == nil {
+		t.Fatal("override exceeded memory capacity")
+	}
+	t.Setenv("MAX_ACTIVE_STREAMS", "1")
+	if _, err := Load(); err != nil {
+		t.Fatal(err)
 	}
 }

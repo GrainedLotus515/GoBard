@@ -1,6 +1,6 @@
 module github.com/GrainedLotus515/gobard
 
-go 1.27.1
+go 1.27.3
 
 require (
 	github.com/bwmarrin/discordgo v0.29.0
@@ -8,6 +8,7 @@ require (
 	github.com/disgoorg/disgo v0.19.6
 	github.com/disgoorg/godave/golibdave v0.3.0
 	github.com/disgoorg/snowflake/v2 v2.0.3
+	github.com/gorilla/websocket v1.5.3
 	github.com/hraban/opus v0.0.0-20260708213942-bde8e4304501
 	github.com/joho/godotenv v1.5.1
 )
@@ -26,7 +27,6 @@ require (
 	github.com/disgoorg/json/v2 v2.0.0 // indirect
 	github.com/disgoorg/omit v1.0.0 // indirect
 	github.com/go-logfmt/logfmt v0.6.1 // indirect
-	github.com/gorilla/websocket v1.5.3 // indirect
 	github.com/klauspost/compress v1.20.1 // indirect
 	github.com/lucasb-eyer/go-colorful v1.4.1 // indirect
 	github.com/mattn/go-isatty v0.0.24 // indirect
@@ -40,7 +40,13 @@ require (
 	golang.org/x/sys v0.48.0 // indirect
 )
 
-// Use ozraru's fork for gateway/session compatibility fixes.
-// Actual voice transport is handled by internal/discordvoice via disgo+libdave
-// because this fork still does not implement Discord's DAVE/E2EE voice protocol.
-replace github.com/bwmarrin/discordgo => github.com/ozraru/discordgo v0.26.2-0.20251101193404-5cce117199f7
+// Focused temporary SDK fixes, published separately and pinned to immutable commits.
+// discordgo retains the ozraru compatibility baseline; voice/DAVE use disgo and
+// libdave through internal/discordvoice. See docs/rewrite/sdk-lifecycle-review.md.
+replace github.com/bwmarrin/discordgo => github.com/GrainedLotus515/gobard-discordgo v0.0.0-20261016071800-3d1129bd8482
+
+replace github.com/disgoorg/disgo => github.com/GrainedLotus515/gobard-disgo v0.0.0-20261016074306-7a61d29e5989
+
+replace github.com/disgoorg/godave/libdave => github.com/GrainedLotus515/gobard-libdave v0.0.0-20261016071800-26460929a20e
+
+replace github.com/disgoorg/godave/golibdave => github.com/GrainedLotus515/gobard-golibdave v0.0.0-20261016071800-7783ee7cd557

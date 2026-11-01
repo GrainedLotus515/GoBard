@@ -2,7 +2,7 @@
 
 # GoBard releases are intentionally linux/amd64 only.  Pin the exact platform
 # manifests rather than mutable image tags so a rebuild has a reviewable base.
-ARG BUILD_IMAGE=golang:1.27.1-trixie@sha256:7bffdb405cd12940d2980daa49a86ef575ed4525a17ee7d0c9562547357ab46a
+ARG BUILD_IMAGE=golang:1.27.3-trixie@sha256:8aa2821993207ae840ce09e4223217efcd14e01f71525db734faf4232bd59999
 ARG RUNTIME_IMAGE=debian:trixie-slim@sha256:918311b7b6c4c6f68b232ba516584925f6c78ad82b6fd534b98979df6438e483
 
 FROM --platform=linux/amd64 ${BUILD_IMAGE} AS build-base
@@ -11,6 +11,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 	build-essential \
 	ca-certificates \
 	curl \
+	ffmpeg \
 	libopus-dev \
 	libopusfile-dev \
 	libsodium-dev \
@@ -59,7 +60,11 @@ FROM dependencies AS test
 COPY . .
 RUN --mount=type=cache,target=/go/pkg/mod \
 	--mount=type=cache,target=/root/.cache/go-build \
-	go test -race ./...
+	go test -race -count=1 ./... \
+		github.com/bwmarrin/discordgo \
+		github.com/disgoorg/disgo/voice \
+		github.com/disgoorg/godave/libdave \
+		github.com/disgoorg/godave/golibdave
 
 FROM dependencies AS bench
 
@@ -67,7 +72,8 @@ COPY . .
 RUN --mount=type=cache,target=/go/pkg/mod \
 	--mount=type=cache,target=/root/.cache/go-build \
 	go test -run '^$' -bench . -benchmem \
-		./internal/player ./internal/cache ./internal/processlimit ./internal/bot ./internal/youtube
+		./internal/cache ./internal/processlimit ./internal/bot ./internal/source \
+		./internal/playback ./internal/session ./internal/audio ./internal/discordvoice
 
 FROM dependencies AS capacity-bench-builder
 
@@ -75,6 +81,12 @@ COPY . .
 RUN --mount=type=cache,target=/go/pkg/mod \
 	--mount=type=cache,target=/root/.cache/go-build \
 	CGO_ENABLED=1 GOOS=linux GOARCH=amd64 go build -buildvcs=false -trimpath -o /out/gobard-capacity-bench ./cmd/capacitybench
+
+FROM dependencies AS provider-check-builder
+COPY . .
+RUN --mount=type=cache,target=/go/pkg/mod \
+	--mount=type=cache,target=/root/.cache/go-build \
+	go test -c -o /out/provider-check ./internal/source
 
 FROM dependencies AS vulncheck
 
@@ -192,8 +204,21 @@ ENTRYPOINT ["/app/gobard"]
 
 FROM runtime AS capacity-bench
 
+HEALTHCHECK NONE
+COPY --chown=root:root --chmod=0555 scripts/bench-extractor.sh /usr/local/bin/yt-dlp
 COPY --from=capacity-bench-builder --chown=root:root --chmod=0555 /out/gobard-capacity-bench /app/gobard-capacity-bench
 ENTRYPOINT ["/app/gobard-capacity-bench"]
+
+# Opt-in external provider tests, separate from the runtime and offline gates.
+FROM runtime AS provider-check
+HEALTHCHECK NONE
+COPY --from=provider-check-builder --chown=root:root --chmod=0555 /out/provider-check /app/provider-check
+ENTRYPOINT ["/app/provider-check", "-test.run=^TestProviderNFColdAndWarm$", "-test.v", "-test.timeout=21m"]
+
+# Exercise the operator helper with an isolated fake Docker state machine.
+FROM runtime AS local-test-check
+COPY --chown=root:root scripts/local-test.py scripts/test_local_test.py /checks/
+RUN python3 -B -m unittest discover -s /checks -p 'test_*.py'
 
 # Keep the hardened bot runtime as the default Dockerfile result. The capacity
 # runner is build-only and selected explicitly by docker-compose.bench.yml.

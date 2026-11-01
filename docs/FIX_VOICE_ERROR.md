@@ -62,3 +62,6 @@ pkg-config --modversion libsodium
 3. Test: Join a voice channel and use `/play`
 
 The bot should now successfully connect to voice and play audio! 🎵
+> Historical pre-v2 reference. Commands, dependency explanations and deployment
+> advice below may be obsolete. Use [the current README](../README.md),
+> [deployment contract](deployment.md) and [rewrite evidence](rewrite/status.md).

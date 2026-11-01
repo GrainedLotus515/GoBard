@@ -194,3 +194,6 @@ See [QUICKSTART.md](QUICKSTART.md) for detailed instructions.
 **Project Status**: ✅ COMPLETE AND PRODUCTION-READY
 
 Built with ❤️ in Go
+> Historical pre-v2 reference. Commands, dependency explanations and deployment
+> advice below may be obsolete. Use [the current README](../README.md),
+> [deployment contract](deployment.md) and [rewrite evidence](rewrite/status.md).

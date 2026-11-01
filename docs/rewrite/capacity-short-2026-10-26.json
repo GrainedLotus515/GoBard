@@ -1,0 +1,100 @@
+{
+  "date": "2026-10-26",
+  "checkpoint": "Uncommitted recovery audit on v2-rewrite, based on 25a8161d1789357d31b767ad5f8c9140953fee90",
+  "toolchain": "Pinned Go 1.27.3 linux/amd64 Docker image",
+  "host": {
+    "cpu": "12th Gen Intel Core i9-12900K, 24 logical CPUs",
+    "memory_bytes": 33388384256,
+    "kernel": "Linux 6.18.57"
+  },
+  "commands": [
+    "docker build --target bench --progress=plain .",
+    "GOBARD_BENCH_DURATION=30s sh ./scripts/docker-bench.sh"
+  ],
+  "limitations": [
+    "The three profiles ran concurrently with their configured CPU and memory quotas; microbenchmarks completed before the profiles started.",
+    "Unrelated host containers and interactive desktop/game workloads were present; no GoBard bot or GoBard quality build ran during the profiles. This was not an idle or dedicated benchmark host.",
+    "Real acquisition ring, FFmpeg, libopus, cache pressure and voice pacing; the extractor reads an owned local fixture and the voice writer discards packets.",
+    "No provider networking, Discord connection, DAVE encryption or listener evidence; these results are not production capacity guarantees."
+  ],
+  "microbenchmarks": [
+    {"name": "BenchmarkCacheAcquire", "ns_per_op": 604.1, "bytes_per_op": 352, "allocations_per_op": 3},
+    {"name": "BenchmarkLimiterAcquire", "ns_per_op": 76.53, "bytes_per_op": 32, "allocations_per_op": 2},
+    {"name": "BenchmarkAttempt", "frames": 1000, "ns_per_op": 89096, "bytes_per_op": 4168, "allocations_per_op": 4},
+    {"name": "BenchmarkRealMedia", "frames": 1000, "ns_per_op": 198146996, "megabytes_per_second": 19.38, "go_bytes_per_op": 118712, "go_allocations_per_op": 92}
+  ],
+  "profiles": [
+    {
+      "acquisition_workload": "offline extractor -> 8 MiB ring -> FFmpeg -> 128 kbit/s Opus -> paced fake voice; 64 kbit/s input",
+      "profile": "small",
+      "duration_seconds": 30.004874465,
+      "simultaneous_guilds": 4,
+      "frames": 5992,
+      "average_cpu_percent_of_quota": 11.067880171734766,
+      "peak_cgroup_memory_bytes": 63115264,
+      "peak_anonymous_memory_bytes": 53338112,
+      "added_anonymous_bytes_per_guild": 12952576,
+      "memory_limit_bytes": 1073741824,
+      "peak_memory_percent_of_limit": 5.8780670166015625,
+      "missed_three_frame_deadlines": 0,
+      "maximum_frame_delay_ms": 21.813127,
+      "average_first_frame_latency_ms": 49.953529,
+      "maximum_first_frame_latency_ms": 52.271335,
+      "ytdlp_configured_limit": 4,
+      "goroutines_before": 2,
+      "goroutines_after": 1,
+      "temporary_files_after": 0,
+      "worker_failures": 0,
+      "maximum_session_shutdown_ms": 4.282222,
+      "p99_frame_gap_ms": 20
+    },
+    {
+      "acquisition_workload": "offline extractor -> 8 MiB ring -> FFmpeg -> 128 kbit/s Opus -> paced fake voice; 64 kbit/s input",
+      "profile": "medium",
+      "duration_seconds": 30.026254254,
+      "simultaneous_guilds": 12,
+      "frames": 17960,
+      "average_cpu_percent_of_quota": 15.81173096051209,
+      "peak_cgroup_memory_bytes": 383655936,
+      "peak_anonymous_memory_bytes": 149856256,
+      "added_anonymous_bytes_per_guild": 12349098,
+      "memory_limit_bytes": 2147483648,
+      "peak_memory_percent_of_limit": 17.865371704101562,
+      "missed_three_frame_deadlines": 0,
+      "maximum_frame_delay_ms": 22.911722,
+      "average_first_frame_latency_ms": 74.616938,
+      "maximum_first_frame_latency_ms": 96.876722,
+      "ytdlp_configured_limit": 8,
+      "goroutines_before": 2,
+      "goroutines_after": 1,
+      "temporary_files_after": 0,
+      "worker_failures": 0,
+      "maximum_session_shutdown_ms": 25.442951,
+      "p99_frame_gap_ms": 20
+    },
+    {
+      "acquisition_workload": "offline extractor -> 8 MiB ring -> FFmpeg -> 128 kbit/s Opus -> paced fake voice; 64 kbit/s input",
+      "profile": "large",
+      "duration_seconds": 30.029275813,
+      "simultaneous_guilds": 24,
+      "frames": 35858,
+      "average_cpu_percent_of_quota": 15.584305232144299,
+      "peak_cgroup_memory_bytes": 325013504,
+      "peak_anonymous_memory_bytes": 295088128,
+      "added_anonymous_bytes_per_guild": 12223317,
+      "memory_limit_bytes": 4294967296,
+      "peak_memory_percent_of_limit": 7.567310333251953,
+      "missed_three_frame_deadlines": 0,
+      "maximum_frame_delay_ms": 50.265555,
+      "average_first_frame_latency_ms": 104.448747,
+      "maximum_first_frame_latency_ms": 158.138993,
+      "ytdlp_configured_limit": 12,
+      "goroutines_before": 2,
+      "goroutines_after": 1,
+      "temporary_files_after": 0,
+      "worker_failures": 0,
+      "maximum_session_shutdown_ms": 28.230345,
+      "p99_frame_gap_ms": 21
+    }
+  ]
+}

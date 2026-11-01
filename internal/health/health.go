@@ -20,6 +20,19 @@ type Checker interface {
 	Ready(context.Context) error
 }
 
+// Dimensions are observations, not claims that idle providers or remote audio
+// are currently working. ActiveDelivery is sampled transport acceptance.
+type Dimensions struct {
+	DiscordConnected bool   `json:"discord_connected"`
+	CommandsReady    bool   `json:"commands_ready"`
+	Source           string `json:"source"`
+	Pipeline         string `json:"pipeline"`
+	ActiveDelivery   int32  `json:"active_delivery"`
+	BusySessions     int    `json:"busy_sessions"` // -1 means the observation failed.
+}
+
+type detailedChecker interface{ Dimensions() Dimensions }
+
 // Server owns the HTTP server used only for local Docker health checks.
 type Server struct {
 	server *http.Server
@@ -42,12 +55,12 @@ func Start(addr string, checker Checker) (*Server, error) {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/live", func(w http.ResponseWriter, _ *http.Request) {
-		respond(w, checker.Live())
+		respond(w, checker.Live(), checker)
 	})
 	mux.HandleFunc("/ready", func(w http.ResponseWriter, r *http.Request) {
 		ctx, cancel := context.WithTimeout(r.Context(), probeTimeout)
 		defer cancel()
-		respond(w, checker.Ready(ctx))
+		respond(w, checker.Ready(ctx), checker)
 	})
 
 	ln, err := net.Listen("tcp", addr)
@@ -85,7 +98,11 @@ func (s *Server) Shutdown(ctx context.Context) error {
 
 	shutdownErr := s.server.Shutdown(ctx)
 	if shutdownErr != nil {
-		return shutdownErr
+		// Graceful timeout does not transfer ownership back to the caller:
+		// force-close sockets and join Serve before returning the failure.
+		closeErr := s.server.Close()
+		<-s.done
+		return errors.Join(shutdownErr, closeErr)
 	}
 
 	select {
@@ -126,16 +143,22 @@ func Probe(ctx context.Context, url string) error {
 	return nil
 }
 
-func respond(w http.ResponseWriter, err error) {
+func respond(w http.ResponseWriter, err error, checker Checker) {
 	w.Header().Set("Content-Type", "application/json")
+	body := struct {
+		Status     string      `json:"status"`
+		Error      string      `json:"error,omitempty"`
+		Dimensions *Dimensions `json:"dimensions,omitempty"`
+	}{Status: "ok"}
+	if detailed, ok := checker.(detailedChecker); ok {
+		dimensions := detailed.Dimensions()
+		body.Dimensions = &dimensions
+	}
 	if err != nil {
 		w.WriteHeader(http.StatusServiceUnavailable)
-		if encodeErr := json.NewEncoder(w).Encode(map[string]string{"status": "unavailable", "error": err.Error()}); encodeErr != nil {
-			return
-		}
-		return
+		body.Status, body.Error = "unavailable", err.Error()
 	}
-	if encodeErr := json.NewEncoder(w).Encode(map[string]string{"status": "ok"}); encodeErr != nil {
+	if encodeErr := json.NewEncoder(w).Encode(body); encodeErr != nil {
 		return
 	}
 }

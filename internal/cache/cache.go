@@ -1,10 +1,12 @@
 package cache
 
 import (
+	"context"
 	"crypto/sha256"
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"path/filepath"
 	"sort"
@@ -21,7 +23,11 @@ var (
 	ErrEntryTooLarge = errors.New("cache entry exceeds configured size limit")
 	ErrInvalidKey    = errors.New("invalid cache key")
 	ErrEntryLeased   = errors.New("cache entry is in use")
+	ErrBusy          = errors.New("cache writer busy")
+	ErrIndexLimit    = errors.New("cache index entry limit exceeded")
 )
+
+const maxEntries = 65536
 
 // Cache manages cached audio files. All mutations of entries and currentSize
 // are protected by mu; file creation happens outside that lock and is
@@ -30,27 +36,23 @@ type Cache struct {
 	dir          string
 	maxSize      int64
 	mu           sync.RWMutex
-	entries      map[string]*CacheEntry
+	entries      map[string]*cacheEntry
 	currentSize  int64
-	inFlight     map[string]*inFlightCreate
 	tempSequence atomic.Uint64
+	mutation     chan struct{}
+	writer       chan struct{}
+	writeFailed  atomic.Bool
 }
 
-// CacheEntry represents a cached file.
-type CacheEntry struct {
+// cacheEntry represents one indexed file incarnation.
+type cacheEntry struct {
 	Path         string
 	Size         int64
 	LastAccessed time.Time
-	URL          string
 	persistedAt  time.Time
 
-	leases int
-}
-
-type inFlightCreate struct {
-	done chan struct{}
-	path string
-	err  error
+	leases   int
+	evicting bool
 }
 
 // Lease pins a cache entry against eviction until Release is called. It is
@@ -60,6 +62,7 @@ type Lease struct {
 
 	cache *Cache
 	key   string
+	entry *cacheEntry
 	once  sync.Once
 }
 
@@ -70,7 +73,7 @@ func (l *Lease) Release() {
 		return
 	}
 	l.once.Do(func() {
-		l.cache.release(l.key)
+		l.cache.release(l.key, l.entry)
 	})
 }
 
@@ -86,8 +89,9 @@ func NewCache(dir string, maxSize int64) (*Cache, error) {
 	cache := &Cache{
 		dir:      dir,
 		maxSize:  maxSize,
-		entries:  make(map[string]*CacheEntry),
-		inFlight: make(map[string]*inFlightCreate),
+		entries:  make(map[string]*cacheEntry),
+		mutation: make(chan struct{}, 1),
+		writer:   make(chan struct{}, 1),
 	}
 
 	if err := cache.loadEntries(); err != nil {
@@ -96,47 +100,49 @@ func NewCache(dir string, maxSize int64) (*Cache, error) {
 	return cache, nil
 }
 
-// loadEntries loads completed entries and removes crash-left temporary files.
+// loadEntries scans in bounded batches. A too-large index fails closed without
+// silently deleting completed media to meet the metadata budget.
 func (c *Cache) loadEntries() error {
-	files, err := os.ReadDir(c.dir)
+	dir, err := os.Open(c.dir)
 	if err != nil {
-		return fmt.Errorf("failed to read cache directory: %w", err)
+		return fmt.Errorf("open cache directory: %w", err)
 	}
-
-	for _, file := range files {
-		if file.IsDir() || file.Type()&os.ModeSymlink != 0 {
-			continue
+	defer dir.Close()
+	for {
+		files, readErr := dir.ReadDir(256)
+		if readErr != nil && !errors.Is(readErr, io.EOF) {
+			return fmt.Errorf("read cache directory: %w", readErr)
 		}
-
-		path := filepath.Join(c.dir, file.Name())
-		if isPartialName(file.Name()) {
-			if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
-				return fmt.Errorf("remove stale cache partial %q: %w", file.Name(), err)
+		for _, file := range files {
+			if file.IsDir() || file.Type()&os.ModeSymlink != 0 {
+				continue
 			}
-			continue
+			path := filepath.Join(c.dir, file.Name())
+			if isPartialName(file.Name()) {
+				if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+					return fmt.Errorf("remove stale cache partial: %w", err)
+				}
+				continue
+			}
+			info, err := file.Info()
+			if err != nil || !info.Mode().IsRegular() {
+				continue
+			}
+			if len(c.entries) >= maxEntries {
+				return ErrIndexLimit
+			}
+			if info.Size() > math.MaxInt64-c.currentSize {
+				return errors.New("cache size accounting overflow")
+			}
+			c.entries[file.Name()] = &cacheEntry{Path: path, Size: info.Size(), LastAccessed: info.ModTime(), persistedAt: info.ModTime()}
+			c.currentSize += info.Size()
 		}
-
-		info, err := file.Info()
-		if err != nil {
-			continue
+		if errors.Is(readErr, io.EOF) {
+			break
 		}
-		if !info.Mode().IsRegular() {
-			continue
-		}
-
-		c.entries[file.Name()] = &CacheEntry{
-			Path:         path,
-			Size:         info.Size(),
-			LastAccessed: info.ModTime(),
-			persistedAt:  info.ModTime(),
-		}
-		c.currentSize += info.Size()
 	}
-
 	if c.currentSize > c.maxSize {
-		if err := c.evictLocked(c.currentSize - c.maxSize); err != nil {
-			return fmt.Errorf("shrink cache to configured limit: %w", err)
-		}
+		return c.evict(c.currentSize - c.maxSize)
 	}
 	return nil
 }
@@ -160,7 +166,7 @@ func (c *Cache) Acquire(key string) (*Lease, bool) {
 	}
 	c.mu.Lock()
 	entry, ok := c.entries[key]
-	if !ok {
+	if !ok || entry.evicting {
 		c.mu.Unlock()
 		return nil, false
 	}
@@ -203,182 +209,131 @@ func (c *Cache) Acquire(key string) (*Lease, bool) {
 			c.mu.Unlock()
 		}
 	}
-	return &Lease{Path: path, cache: c, key: key}, true
+	return &Lease{Path: path, cache: c, key: key, entry: entry}, true
 }
 
-func (c *Cache) release(key string) {
+func (c *Cache) release(key string, expected *cacheEntry) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if entry, ok := c.entries[key]; ok && entry.leases > 0 {
+	if entry, ok := c.entries[key]; ok && entry == expected && entry.leases > 0 {
 		entry.leases--
 	}
 }
 
-// Set adds a completed file to the cache. The actual source size is
-// authoritative; the legacy size parameter is retained for API compatibility.
-func (c *Cache) Set(key, sourcePath string, _ int64) error {
-	if err := validateKey(key); err != nil {
-		return err
+// commitTemp serializes mutations with a bounded admission gate while leaving
+// the metadata mutex available to leases and snapshots during filesystem I/O.
+func (c *Cache) commitTemp(ctx context.Context, key, tmpPath string, size int64) (string, error) {
+	select {
+	case c.mutation <- struct{}{}:
+	case <-ctx.Done():
+		return "", ctx.Err()
 	}
-	info, err := os.Stat(sourcePath)
-	if err != nil {
-		return fmt.Errorf("stat cache source: %w", err)
-	}
-	if !info.Mode().IsRegular() {
-		return fmt.Errorf("cache source is not a regular file")
-	}
-	if info.Size() > c.maxSize {
-		return fmt.Errorf("%w: %d bytes exceeds %d bytes", ErrEntryTooLarge, info.Size(), c.maxSize)
-	}
-
-	tmpPath, err := c.tempPath(key)
-	if err != nil {
-		return err
-	}
-	defer os.Remove(tmpPath)
-	if err := copyFile(sourcePath, tmpPath); err != nil {
-		return fmt.Errorf("failed to copy file to cache: %w", err)
-	}
-	_, err = c.commitTemp(key, tmpPath, info.Size())
-	return err
-}
-
-// GetOrCreate gets a cached file or creates it using the supplied function.
-// Concurrent requests for one key share a single creator and every creator
-// writes to a temporary file that is atomically renamed only after completion.
-func (c *Cache) GetOrCreate(key string, create func(path string) error) (string, error) {
-	if err := validateKey(key); err != nil {
-		return "", err
-	}
-	if create == nil {
-		return "", fmt.Errorf("cache creator is required")
-	}
-
-	if lease, exists := c.Acquire(key); exists {
-		path := lease.Path
-		lease.Release()
+	defer func() { <-c.mutation }()
+	c.mu.Lock()
+	if entry, ok := c.entries[key]; ok {
+		entry.LastAccessed = time.Now()
+		path := entry.Path
+		c.mu.Unlock()
 		return path, nil
 	}
-	c.mu.Lock()
-	if pending, exists := c.inFlight[key]; exists {
+	if len(c.entries) >= maxEntries {
 		c.mu.Unlock()
-		<-pending.done
-		return pending.path, pending.err
-	}
-	pending := &inFlightCreate{done: make(chan struct{})}
-	c.inFlight[key] = pending
-	c.mu.Unlock()
-
-	path, err := c.createAndStore(key, create)
-
-	c.mu.Lock()
-	pending.path = path
-	pending.err = err
-	delete(c.inFlight, key)
-	close(pending.done)
-	c.mu.Unlock()
-
-	return path, err
-}
-
-func (c *Cache) createAndStore(key string, create func(path string) error) (string, error) {
-	tmpPath, err := c.tempPath(key)
-	if err != nil {
-		return "", err
-	}
-	defer os.Remove(tmpPath)
-
-	if err := create(tmpPath); err != nil {
-		return "", fmt.Errorf("failed to create cached file: %w", err)
-	}
-
-	info, err := os.Stat(tmpPath)
-	if err != nil {
-		return "", fmt.Errorf("failed to stat created file: %w", err)
-	}
-	if !info.Mode().IsRegular() {
-		return "", fmt.Errorf("created cache file is not regular")
-	}
-	if info.Size() > c.maxSize {
-		return "", fmt.Errorf("%w: %d bytes exceeds %d bytes", ErrEntryTooLarge, info.Size(), c.maxSize)
-	}
-
-	return c.commitTemp(key, tmpPath, info.Size())
-}
-
-func (c *Cache) commitTemp(key, tmpPath string, size int64) (string, error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	if entry, exists := c.entries[key]; exists {
-		entry.LastAccessed = time.Now()
-		return entry.Path, nil
+		return "", ErrIndexLimit
 	}
 	if size > c.maxSize {
-		return "", fmt.Errorf("%w: %d bytes exceeds %d bytes", ErrEntryTooLarge, size, c.maxSize)
+		c.mu.Unlock()
+		return "", ErrEntryTooLarge
 	}
-	if required := c.currentSize + size - c.maxSize; required > 0 {
-		if err := c.evictLocked(required); err != nil {
-			return "", fmt.Errorf("make room for cache entry: %w", err)
+	required := c.currentSize - (c.maxSize - size)
+	c.mu.Unlock()
+	if required > 0 {
+		if err := c.evict(required); err != nil {
+			return "", err
 		}
 	}
-
-	destPath := filepath.Join(c.dir, key)
-	if err := os.Rename(tmpPath, destPath); err != nil {
-		return "", fmt.Errorf("failed to finalize cached file: %w", err)
+	// External file resizing may have changed accounting during eviction.
+	c.mu.RLock()
+	fits := c.currentSize <= c.maxSize-size
+	c.mu.RUnlock()
+	if !fits {
+		return "", errors.New("cache capacity changed during commit")
 	}
-	c.entries[key] = &CacheEntry{
-		Path:         destPath,
-		Size:         size,
-		LastAccessed: time.Now(),
-		persistedAt:  time.Now(),
+	if err := ctx.Err(); err != nil {
+		return "", err
 	}
+	path := filepath.Join(c.dir, key)
+	if err := os.Rename(tmpPath, path); err != nil {
+		return "", fmt.Errorf("publish cache entry: %w", err)
+	}
+	c.mu.Lock()
+	c.entries[key] = &cacheEntry{Path: path, Size: size, LastAccessed: time.Now(), persistedAt: time.Now()}
 	c.currentSize += size
-	return destPath, nil
+	c.mu.Unlock()
+	return path, nil
 }
 
-// evictLocked removes least-recently-used, unleased entries until targetSize
-// bytes have been freed. c.mu must be held by the caller.
-func (c *Cache) evictLocked(targetSize int64) error {
-	if targetSize <= 0 {
-		return nil
-	}
-	type entrySort struct {
-		key   string
-		entry *CacheEntry
-	}
+type candidate struct {
+	key      string
+	entry    *cacheEntry
+	accessed time.Time
+}
 
-	entries := make([]entrySort, 0, len(c.entries))
+func (c *Cache) candidates() []candidate {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	entries := make([]candidate, 0, len(c.entries))
 	for key, entry := range c.entries {
-		if entry.leases == 0 {
-			entries = append(entries, entrySort{key: key, entry: entry})
-		}
+		entries = append(entries, candidate{key: key, entry: entry, accessed: entry.LastAccessed})
 	}
-	sort.Slice(entries, func(i, j int) bool {
-		return entries[i].entry.LastAccessed.Before(entries[j].entry.LastAccessed)
-	})
+	return entries
+}
 
-	var (
-		freed int64
-		errs  []error
-	)
-	for _, candidate := range entries {
-		if freed >= targetSize {
+// unlink reserves an unleased entry under the metadata mutex, then performs
+// removal without that lock. Acquires reject reserved entries.
+func (c *Cache) unlink(item candidate) (int64, error) {
+	c.mu.Lock()
+	if c.entries[item.key] != item.entry {
+		c.mu.Unlock()
+		return 0, nil
+	}
+	if item.entry.leases > 0 {
+		c.mu.Unlock()
+		return 0, ErrEntryLeased
+	}
+	item.entry.evicting = true
+	path, size := item.entry.Path, item.entry.Size
+	c.mu.Unlock()
+	err := os.Remove(path)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if err != nil && !os.IsNotExist(err) {
+		item.entry.evicting = false
+		return 0, fmt.Errorf("remove cache entry: %w", err)
+	}
+	c.removeEntryLocked(item.key)
+	return size, nil
+}
+
+// evict requires mutation admission (or unpublished constructor ownership).
+func (c *Cache) evict(target int64) error {
+	entries := c.candidates()
+	sort.Slice(entries, func(i, j int) bool { return entries[i].accessed.Before(entries[j].accessed) })
+	var freed int64
+	var firstErr error
+	for _, item := range entries {
+		if freed >= target {
 			break
 		}
-		err := os.Remove(candidate.entry.Path)
-		if err != nil && !os.IsNotExist(err) {
-			errs = append(errs, fmt.Errorf("remove cache entry %q: %w", candidate.key, err))
-			continue
+		size, err := c.unlink(item)
+		if err != nil && firstErr == nil {
+			firstErr = err
 		}
-		freed += candidate.entry.Size
-		c.removeEntryLocked(candidate.key)
+		freed += size
 	}
-
-	if freed < targetSize {
-		errs = append(errs, fmt.Errorf("cache capacity unavailable: need %d more bytes", targetSize-freed))
+	if freed < target {
+		return errors.Join(firstErr, errors.New("cache capacity unavailable"))
 	}
-	return errors.Join(errs...)
+	return nil
 }
 
 func (c *Cache) removeEntryLocked(key string) {
@@ -393,25 +348,17 @@ func (c *Cache) removeEntryLocked(key string) {
 	delete(c.entries, key)
 }
 
-// Clear removes all unleased cache entries. Active leases are retained rather
-// than unlinking a file while FFmpeg may still be opening it.
+// Clear removes unleased entries, preserving active decoder leases.
 func (c *Cache) Clear() error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	var errs []error
-	for key, entry := range c.entries {
-		if entry.leases > 0 {
-			errs = append(errs, fmt.Errorf("%w: %q", ErrEntryLeased, key))
-			continue
+	c.mutation <- struct{}{}
+	defer func() { <-c.mutation }()
+	var firstErr error
+	for _, item := range c.candidates() {
+		if _, err := c.unlink(item); err != nil && firstErr == nil {
+			firstErr = err
 		}
-		if err := os.Remove(entry.Path); err != nil && !os.IsNotExist(err) {
-			errs = append(errs, fmt.Errorf("remove cache entry %q: %w", key, err))
-			continue
-		}
-		c.removeEntryLocked(key)
 	}
-	return errors.Join(errs...)
+	return firstErr
 }
 
 // GenerateKey generates a stable cache key from a URL. Keep the historical
@@ -429,7 +376,7 @@ func (c *Cache) tempPath(key string) (string, error) {
 }
 
 func validateKey(key string) error {
-	if key == "" || key == "." || filepath.IsAbs(key) || filepath.Base(key) != key || strings.ContainsAny(key, `/\\`) {
+	if len(key) > 255 || key == "" || key == "." || filepath.IsAbs(key) || filepath.Base(key) != key || strings.ContainsAny(key, `/\\`) {
 		return fmt.Errorf("%w: %q", ErrInvalidKey, key)
 	}
 	return nil
@@ -437,31 +384,6 @@ func validateKey(key string) error {
 
 func isPartialName(name string) bool {
 	return strings.Contains(name, ".tmp-") || strings.HasSuffix(name, ".part") || strings.Contains(name, ".part-")
-}
-
-// copyFile copies src to dst and syncs the completed temporary destination
-// before it is atomically renamed into the cache.
-func copyFile(src, dst string) (err error) {
-	sourceFile, err := os.Open(src)
-	if err != nil {
-		return err
-	}
-	defer sourceFile.Close()
-
-	destFile, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
-	if err != nil {
-		return err
-	}
-	defer func() {
-		if closeErr := destFile.Close(); err == nil && closeErr != nil {
-			err = closeErr
-		}
-	}()
-
-	if _, err = io.Copy(destFile, sourceFile); err != nil {
-		return err
-	}
-	return destFile.Sync()
 }
 
 // GetStats returns cache entry count, current size, and configured maximum.

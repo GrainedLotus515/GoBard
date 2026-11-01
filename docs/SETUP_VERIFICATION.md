@@ -215,3 +215,6 @@ If you're still having issues:
 ---
 
 Happy music listening! 🎵
+> Historical pre-v2 reference. Commands, dependency explanations and deployment
+> advice below may be obsolete. Use [the current README](../README.md),
+> [deployment contract](deployment.md) and [rewrite evidence](rewrite/status.md).

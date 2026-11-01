@@ -1,0 +1,131 @@
+{
+  "baseline_revision": "25a8161",
+  "implementation_revision": "a2f6bf303bd498ab3c02b04bb8f7991fd2b91c06",
+  "branch": "t3code/gobard-v2-quality-fixes",
+  "date_utc": "2026-11-01",
+  "microbenchmark_conditions": "Single invocation, 24 visible logical CPUs, no explicit CPU/memory quota; builds and capacity probes serialized for this final run. No speedup claim.",
+  "microbenchmarks": [
+    {"name": "BenchmarkCacheAcquire", "ns_per_op": 638.0, "bytes_per_op": 352, "allocs_per_op": 3},
+    {"name": "BenchmarkLimiterAcquireInteractive", "ns_per_op": 111.0, "bytes_per_op": 64, "allocs_per_op": 2},
+    {"name": "BenchmarkAttempt", "ns_per_op": 89750, "bytes_per_op": 4168, "allocs_per_op": 4},
+    {"name": "BenchmarkRealMedia", "ns_per_op": 200596120, "bytes_per_op": 118668, "allocs_per_op": 91}
+  ],
+  "runtime_image_id": "sha256:d270160ec496fb2a3618fdf8f7d3652c15a51b5882a352201a5d3a23cc994536",
+  "host_cpu": "12th Gen Intel(R) Core(TM) i9-12900K",
+  "visible_logical_cpus": 24,
+  "source_sha256": "0ae8f196a1fa4ca58780e619cc536a2a2ed29e283e4eed8f6f6c63c72aadfba1",
+  "source_hash_definition": "SHA256 of sorted filenames + NUL + contents + NUL for internal/**/*.go, cmd/**/*.go, go.mod, go.sum, Dockerfile, Makefile, .golangci.yml and scripts/*.{sh,py}",
+  "gates": [
+    {
+      "name": "docker-test",
+      "command": [
+        "nix-shell",
+        "-p",
+        "gnumake",
+        "--run",
+        "make docker-test"
+      ],
+      "exit_code": 0,
+      "finished_utc": "2026-11-01T00:45:20.423717+00:00",
+      "log_path": "/tmp/gobard-quality-fixes/final-docker-test.log",
+      "log_sha256": "b6b73e634208bb6580b4595507efe758e7b46d9b7f536e2cae0954845b0c4cf9"
+    },
+    {
+      "name": "docker-lint",
+      "command": [
+        "nix-shell",
+        "-p",
+        "gnumake",
+        "--run",
+        "make docker-lint"
+      ],
+      "exit_code": 0,
+      "finished_utc": "2026-11-01T00:45:42.476569+00:00",
+      "log_path": "/tmp/gobard-quality-fixes/final-docker-lint.log",
+      "log_sha256": "a3ed6a345d9c37f5c43e1a2b27fadc59f5c2501f658921f935a46821766e08c6"
+    },
+    {
+      "name": "docker-smoke",
+      "command": [
+        "nix-shell",
+        "-p",
+        "gnumake",
+        "--run",
+        "make docker-smoke DOCKER_IMAGE=gobard:quality-fixes"
+      ],
+      "exit_code": 0,
+      "finished_utc": "2026-11-01T00:45:47.292514+00:00",
+      "log_path": "/tmp/gobard-quality-fixes/final-docker-smoke.log",
+      "log_sha256": "1e939828c1c63740ba8ace113a250e789e9f03359924c6d21cbe72a89384db7b"
+    },
+    {
+      "name": "docker-profile-check",
+      "command": [
+        "nix-shell",
+        "-p",
+        "gnumake",
+        "--run",
+        "make docker-profile-check"
+      ],
+      "exit_code": 0,
+      "finished_utc": "2026-11-01T00:45:48.257422+00:00",
+      "log_path": "/tmp/gobard-quality-fixes/final-docker-profile-check.log",
+      "log_sha256": "e93d3f0d2f4565d8247761ad209c2eec81bc6a4ed488040476111c5404f10c97"
+    },
+    {
+      "name": "docker-bench",
+      "command": [
+        "docker",
+        "build",
+        "--target",
+        "bench",
+        "--progress=plain",
+        "."
+      ],
+      "exit_code": 0,
+      "finished_utc": "2026-11-01T00:45:58.186068+00:00",
+      "log_path": "/tmp/gobard-quality-fixes/final-docker-bench.log",
+      "log_sha256": "4e68e5f4e579a5d515ac4b6181d89ff43cda2853e858ec70aed2441d80e94cff"
+    },
+    {
+      "name": "capacity-build",
+      "command": [
+        "docker",
+        "build",
+        "--target",
+        "capacity-bench",
+        "--progress=plain",
+        "-t",
+        "gobard:quality-capacity-final",
+        "."
+      ],
+      "exit_code": 0,
+      "finished_utc": "2026-11-01T00:46:07.711613+00:00",
+      "log_path": "/tmp/gobard-quality-fixes/final-capacity-build.log",
+      "log_sha256": "4750cc6b5699a9c7d554f16c6645cdbc932db690382f273625bb3563f54c6ecf"
+    }
+  ],
+  "reproduction": {
+    "command": [
+      "nix-shell",
+      "-p",
+      "gnumake",
+      "--run",
+      "make docker-test"
+    ],
+    "exit_code": 2,
+    "expected_failure": true,
+    "log_path": "/tmp/gobard-quality-fixes/reproduction.log",
+    "log_sha256": "1c4331b62fe7dff90366894ddb0259949233a9751ca2af03b768741860883658",
+    "failures": [
+      "zero voice-recovery offset",
+      "42.264 microsecond gap after slow successful write",
+      "generic feedback for authentication, throttling and unavailable metadata"
+    ]
+  },
+  "notes": [
+    "All supported Go tooling ran in Docker.",
+    "Initial lint failures were corrected; final lint reports 0 issues.",
+    "No deployment, existing bot actions, provider requests, credentials or real cache operations."
+  ]
+}
