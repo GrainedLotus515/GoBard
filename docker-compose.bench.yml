@@ -1,4 +1,16 @@
 services:
+  bench-reduced:
+    image: gobard-capacity-bench:local
+    environment:
+      GOBARD_BENCH_PROFILE: reduced
+      GOBARD_BENCH_DURATION: ${GOBARD_BENCH_DURATION:-15m}
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=128m
+    mem_limit: 512m
+    cpus: 2.0
+    pids_limit: 256
+
   bench-small:
     image: gobard-capacity-bench:local
     environment:

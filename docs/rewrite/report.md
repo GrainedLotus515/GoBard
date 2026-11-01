@@ -1,8 +1,25 @@
 # V2 implementation report — 2026-10-16
 
 GoBard has a working replacement core and a validated local candidate for the
-existing feature set. Strict completion remains blocked by live acceptance. SDK fixes are published
-and pinned; the local test bot now runs the SDK-enabled candidate `0b15b9e`. Exact running-image evidence is in local-2026-10-16.md. No VPS service, production cache, credentials or publisher changed.
+existing feature set. Strict completion remains blocked by live acceptance. SDK
+fixes are published and pinned; the local test bot ran the SDK-enabled candidate
+`0b15b9e` at this report's checkpoint. Exact historical running-image evidence is
+in [local-2026-10-16.md](local-2026-10-16.md). No VPS service, production cache,
+credentials or publisher changed. See [status.md](status.md) for the current
+recovery audit and final-tree verification.
+
+The 2026-10-27 release-completion pass addresses the independent review's Stop/
+transport race and registration recovery findings, adds memory-derived guild
+admission with strict operator overrides, and supplies a pinned NixOS development
+shell. Regression tests, native race/vet/helper checks, all uncached Docker
+quality/runtime gates, microbenchmarks and the four-profile short capacity run
+pass. The final concurrent 15-minute reduced/small/medium/large soak also passed
+with zero missed deadlines, worker failures or retained temporary files. Offline
+implementation and verification are complete for local candidate
+`sha256:49936adb1c655d1da7addcbd9170ade7f15270bde9e4028d2571edccb086b9a1`;
+live verification remains pending. Exact evidence and the user-driven acceptance
+boundary are recorded in [status.md](status.md); this is not a release-readiness
+or deployment claim.
 
 ## Implemented in GoBard
 

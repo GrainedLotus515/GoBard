@@ -38,9 +38,13 @@ recovery; seek and looping do not replenish this per-request source budget.
 Cancellation is cooperative and propagated through every boundary. Output Send
 must release the packet before returning and unblock on context cancellation.
 Close stops/reaps any owned processes before returning. The session joins its
-attempt before declaring shutdown complete. First owner-accepted control reason
-wins over later cancellation side effects; completion already observed by the
-owner wins over a later control. Tests must exercise both orders.
+attempt before declaring shutdown complete. An established source/codec/transport
+failure or natural completion is not overwritten by a later cancellation; the
+requested control outcome still applies when cancellation caused the return.
+Stop decides whether to retain voice from the actual terminal result and transport
+cleanup state, so a failure during Stop disconnects broken transport instead of
+being reported as a healthy stopped attempt. Completion already observed by the
+owner wins over a later control. Tests exercise both orders and blocked cleanup.
 
 ## Implemented session controls
 
@@ -109,9 +113,11 @@ listening and live reconnect/active-shutdown remain separate acceptance gates.
 
 The guild coordinator serializes Connect/Disconnect after the preceding audio
 attempt joins. Join has a 12-second budget; cleanup has a separate 3-second
-budget. Stop during a join cancels it and rejects late success. Session shutdown
-joins the transport operation and performs idempotent cleanup. A voice adapter
-owns both the returned packet output and the underlying connection.
+budget. Stop keeps a healthy established voice connection but cancels an
+in-progress join/recovery, rejects late success and cleans broken transport.
+Disconnect always leaves voice. Session shutdown joins the transport operation
+and performs idempotent cleanup. A voice adapter owns both the returned packet
+output and the underlying connection.
 
 Metadata commands reserve a slot in their session before resolution. At most 16
 reservations exist; queue-drain disconnect waits for them, including a failed

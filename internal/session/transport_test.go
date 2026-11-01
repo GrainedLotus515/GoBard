@@ -10,6 +10,7 @@ import (
 
 	"github.com/charmbracelet/log"
 
+	"github.com/GrainedLotus515/gobard/internal/failure"
 	"github.com/GrainedLotus515/gobard/internal/playback"
 )
 
@@ -240,5 +241,240 @@ func TestPendingResolutionPreventsQueueDrainDisconnect(t *testing.T) {
 	case <-closed:
 	case <-time.After(time.Second):
 		t.Fatal("drained connection not closed")
+	}
+}
+
+type stopFailureStream struct {
+	closeStarted chan struct{}
+	releaseClose chan struct{}
+	readErr      error
+}
+
+func (s *stopFailureStream) Next(_ context.Context, packet []byte) (int, error) {
+	if s.readErr != nil {
+		return 0, s.readErr
+	}
+	packet[0] = 1
+	return 1, nil
+}
+
+func (s *stopFailureStream) Close() error {
+	close(s.closeStarted)
+	<-s.releaseClose
+	return nil
+}
+
+type stopFailureSource struct {
+	stream *stopFailureStream
+}
+
+func (s stopFailureSource) Open(context.Context, playback.Request) (playback.Stream, error) {
+	return s.stream, nil
+}
+
+func TestStopAfterTransportFailureDisconnectsBrokenVoice(t *testing.T) {
+	stream := &stopFailureStream{closeStarted: make(chan struct{}), releaseClose: make(chan struct{})}
+	engine, err := playback.New(stopFailureSource{stream: stream}, log.New(io.Discard))
+	if err != nil {
+		t.Fatal(err)
+	}
+	closed := make(chan struct{}, 2)
+	s, err := NewVoice(context.Background(), "stop-transport-failure", engine, voiceFixture{
+		connect: func(context.Context, string) (playback.Output, error) {
+			return outputFunc(func(context.Context, []byte) error { return errors.New("broken transport") }), nil
+		},
+		disconnect: func(context.Context) error { closed <- struct{}{}; return nil },
+	}, log.New(io.Discard), 8)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(s.Close)
+	if _, err := s.Join(context.Background(), "voice"); err != nil {
+		t.Fatal(err)
+	}
+	tickets, err := s.Add(context.Background(), tracks("one", "two"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	<-stream.closeStarted
+	apply(t, s, Operation{Action: Stop})
+	close(stream.releaseClose)
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	result, err := tickets[0].Wait(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Outcome != playback.TransportFailure || result.Failure == nil || result.Failure.Category != failure.Transport {
+		t.Fatalf("Stop erased transport failure: %+v", result)
+	}
+	result, err = tickets[1].Wait(ctx)
+	if err != nil || result.Outcome != playback.Stopped {
+		t.Fatalf("queued request = %+v, %v", result, err)
+	}
+	if snap := apply(t, s, Operation{Action: Inspect}); snap.Connected || snap.Last.Outcome != playback.TransportFailure || len(snap.Tracks) != 0 {
+		t.Fatalf("broken voice survived Stop: %+v", snap)
+	}
+	select {
+	case <-closed:
+	case <-time.After(time.Second):
+		t.Fatal("Stop did not disconnect broken voice")
+	}
+	apply(t, s, Operation{Action: Inspect})
+	select {
+	case <-closed:
+		t.Fatal("Stop caused duplicate disconnect")
+	default:
+	}
+}
+
+func TestStopAfterCodecFailureRetainsHealthyVoice(t *testing.T) {
+	stream := &stopFailureStream{readErr: errors.New("decode failed"), closeStarted: make(chan struct{}), releaseClose: make(chan struct{})}
+	engine, err := playback.New(stopFailureSource{stream: stream}, log.New(io.Discard))
+	if err != nil {
+		t.Fatal(err)
+	}
+	closed := make(chan struct{}, 1)
+	s, err := NewVoice(context.Background(), "stop-codec-failure", engine, voiceFixture{
+		connect: func(context.Context, string) (playback.Output, error) {
+			return outputFunc(func(context.Context, []byte) error { return nil }), nil
+		},
+		disconnect: func(context.Context) error { closed <- struct{}{}; return nil },
+	}, log.New(io.Discard), 8)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(s.Close)
+	if _, err := s.Join(context.Background(), "voice"); err != nil {
+		t.Fatal(err)
+	}
+	tickets, err := s.Add(context.Background(), tracks("one", "two"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	<-stream.closeStarted
+	apply(t, s, Operation{Action: Stop})
+	close(stream.releaseClose)
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	result, err := tickets[0].Wait(ctx)
+	if err != nil || result.Outcome != playback.EncodeFailure || result.Failure == nil || result.Failure.Category != failure.Codec {
+		t.Fatalf("active request = %+v, %v", result, err)
+	}
+	result, err = tickets[1].Wait(ctx)
+	if err != nil || result.Outcome != playback.Stopped {
+		t.Fatalf("queued request = %+v, %v", result, err)
+	}
+	if snap := apply(t, s, Operation{Action: Inspect}); !snap.Connected || len(snap.Tracks) != 0 {
+		t.Fatalf("codec failure discarded healthy voice: %+v", snap)
+	}
+	select {
+	case <-closed:
+		t.Fatal("codec failure disconnected healthy voice")
+	default:
+	}
+}
+
+func TestStopKeepsHealthyVoiceConnected(t *testing.T) {
+	closed := make(chan struct{}, 1)
+	s, source := voiceTestSession(t, voiceFixture{
+		connect: func(context.Context, string) (playback.Output, error) {
+			return outputFunc(func(context.Context, []byte) error { return nil }), nil
+		},
+		disconnect: func(context.Context) error {
+			select {
+			case closed <- struct{}{}:
+			default:
+			}
+			return nil
+		},
+	})
+	if _, err := s.Join(context.Background(), "voice"); err != nil {
+		t.Fatal(err)
+	}
+	tickets, err := s.Add(context.Background(), tracks("one", "two"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = nextAttempt(t, source)
+	apply(t, s, Operation{Action: Stop})
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	for i, ticket := range tickets {
+		result, err := ticket.Wait(ctx)
+		if err != nil || result.Outcome != playback.Stopped {
+			t.Fatalf("ticket %d result = %+v, %v", i, result, err)
+		}
+	}
+	if snap := apply(t, s, Operation{Action: Inspect}); !snap.Connected || len(snap.Tracks) != 0 {
+		t.Fatalf("stop did not retain healthy voice with an empty queue: %+v", snap)
+	}
+	select {
+	case <-closed:
+		t.Fatal("stop invoked disconnect")
+	default:
+	}
+	if _, err := s.ApplyAs(context.Background(), Access{Channel: "voice"}, Operation{Action: Pause}); err == nil {
+		t.Fatal("pause accepted with an empty queue")
+	}
+}
+
+func TestRemoveLastTrackCancelsRecoveryAndDisconnects(t *testing.T) {
+	var connects atomic.Int32
+	recovering, canceled := make(chan struct{}), make(chan struct{})
+	s, source := voiceTestSession(t, voiceFixture{connect: func(ctx context.Context, _ string) (playback.Output, error) {
+		if connects.Add(1) > 1 {
+			close(recovering)
+			<-ctx.Done()
+			close(canceled)
+			return nil, ctx.Err()
+		}
+		return outputFunc(func(context.Context, []byte) error { return nil }), nil
+	}})
+	if _, err := s.Join(context.Background(), "voice"); err != nil {
+		t.Fatal(err)
+	}
+	tickets, err := s.Add(context.Background(), tracks("audio"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = nextAttempt(t, source)
+	apply(t, s, Operation{Action: VoiceLost})
+	select {
+	case <-recovering:
+	case <-time.After(time.Second):
+		t.Fatal("recovery not started")
+	}
+	apply(t, s, Operation{Action: Pause})
+	if _, err := s.ApplyAs(context.Background(), Access{Channel: "voice"}, Operation{Action: Remove, Position: 0}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-canceled:
+	case <-time.After(time.Second):
+		t.Fatal("empty queue kept reconnect alive")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	result, err := tickets[0].Wait(ctx)
+	if err != nil || result.Outcome != playback.Removed {
+		t.Fatalf("result %+v %v", result, err)
+	}
+	if snap := apply(t, s, Operation{Action: Inspect}); snap.Paused {
+		t.Fatal("empty queue retained paused state")
+	}
+}
+
+func TestManagedVoiceRejectsRawConnect(t *testing.T) {
+	s, _ := voiceTestSession(t, voiceFixture{connect: func(context.Context, string) (playback.Output, error) {
+		return outputFunc(func(context.Context, []byte) error { return nil }), nil
+	}})
+	if _, err := s.Join(context.Background(), "voice"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Apply(context.Background(), Operation{Action: Connect, Output: outputFunc(func(context.Context, []byte) error { return nil })}); err == nil {
+		t.Fatal("raw connect replaced managed voice")
 	}
 }

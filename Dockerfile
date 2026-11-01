@@ -2,7 +2,7 @@
 
 # GoBard releases are intentionally linux/amd64 only.  Pin the exact platform
 # manifests rather than mutable image tags so a rebuild has a reviewable base.
-ARG BUILD_IMAGE=golang:1.27.1-trixie@sha256:7bffdb405cd12940d2980daa49a86ef575ed4525a17ee7d0c9562547357ab46a
+ARG BUILD_IMAGE=golang:1.27.3-trixie@sha256:8aa2821993207ae840ce09e4223217efcd14e01f71525db734faf4232bd59999
 ARG RUNTIME_IMAGE=debian:trixie-slim@sha256:918311b7b6c4c6f68b232ba516584925f6c78ad82b6fd534b98979df6438e483
 
 FROM --platform=linux/amd64 ${BUILD_IMAGE} AS build-base
@@ -60,7 +60,7 @@ FROM dependencies AS test
 COPY . .
 RUN --mount=type=cache,target=/go/pkg/mod \
 	--mount=type=cache,target=/root/.cache/go-build \
-	go test -race ./... \
+	go test -race -count=1 ./... \
 		github.com/bwmarrin/discordgo \
 		github.com/disgoorg/disgo/voice \
 		github.com/disgoorg/godave/libdave \

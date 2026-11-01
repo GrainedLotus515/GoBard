@@ -2,20 +2,42 @@ package bot
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"time"
 
 	"github.com/bwmarrin/discordgo"
 )
 
+const (
+	registrationInitialBackoff = 5 * time.Second
+	registrationMaximumBackoff = 5 * time.Minute
+)
+
 func (r *Runtime) registrationLoop() {
+	var retry <-chan time.Time
+	var stopRetry func()
+	defer func() {
+		if stopRetry != nil {
+			stopRetry()
+		}
+	}()
+	failures := 0
 	for {
 		select {
 		case <-r.ctx.Done():
 			return
 		case <-r.register:
+			if retry != nil {
+				continue
+			}
+		case <-retry:
+			retry = nil
+			stopRetry = nil
 		}
 		if !r.connected.Load() {
+			r.registered.Store(false)
+			failures = 0
 			continue
 		}
 		r.registered.Store(false)
@@ -36,49 +58,65 @@ func (r *Runtime) registrationLoop() {
 		r.discord.State.RUnlock()
 		guilds := r.state.guildIDs()
 		if !validPathPart(app, 32) {
-			continue
-		}
-		if r.cfg.RegisterGlobally {
+			guilds = nil
+		} else if r.cfg.RegisterGlobally {
 			guilds = []string{""}
 		}
-		ok := true
+		ok := validPathPart(app, 32)
+		var providerDelay time.Duration
 		for _, guild := range guilds {
-			if !r.registerGuild(app, guild) {
+			retryAfter, success := r.registerGuild(app, guild)
+			if !success {
 				ok = false
 			}
+			providerDelay = max(providerDelay, retryAfter)
 			if r.ctx.Err() != nil {
 				return
 			}
 		}
 		r.registered.Store(ok)
 		if ok {
+			failures = 0
 			r.logger.Info("Commands reconciled", "event", "discord.commands", "guilds", len(guilds))
+		} else {
+			failures++
+			delay := max(registrationBackoff(failures), providerDelay)
+			retry, stopRetry = r.registrationTimer(delay)
+			r.logger.Warn("Command reconciliation retry scheduled", "event", "discord.commands", "recovery", "retry", "pass", failures, "retry_after_seconds", delay.Seconds())
 		}
 		r.presence()
 	}
 }
 
-func (r *Runtime) registerGuild(app, guild string) bool {
+func registrationBackoff(failures int) time.Duration {
+	delay := registrationInitialBackoff
+	for pass := 1; pass < failures && delay < registrationMaximumBackoff; pass++ {
+		delay = min(delay*2, registrationMaximumBackoff)
+	}
+	return delay
+}
+
+func (r *Runtime) registerGuild(app, guild string) (time.Duration, bool) {
 	path := "applications/" + app + "/commands"
 	if guild != "" {
 		if !validPathPart(guild, 32) {
-			return false
+			return 0, false
 		}
 		path = "applications/" + app + "/guilds/" + guild + "/commands"
 	}
-	for attempt := 1; attempt <= 3; attempt++ {
-		ctx, cancel := context.WithTimeout(r.ctx, 8*time.Second)
-		err := r.rest.send(ctx, http.MethodPut, path, commandDefinitions(), true)
-		cancel()
-		if err == nil {
-			return true
-		}
-		r.logger.Warn("Command registration failed", "event", "discord.commands", "guild_id", guild, "attempt", attempt, "error", err)
-		if !waitContext(r.ctx, time.Duration(attempt)*time.Second) {
-			return false
-		}
+	ctx, cancel := context.WithTimeout(r.ctx, 8*time.Second)
+	err := r.rest.send(ctx, http.MethodPut, path, commandDefinitions(), true)
+	cancel()
+	if err == nil {
+		return 0, true
 	}
-	return false
+	var retryAfter time.Duration
+	var status *discordStatus
+	if errors.As(err, &status) && status.code == http.StatusTooManyRequests {
+		retryAfter = status.retryAfter
+	}
+	r.logger.Warn("Command registration failed", "event", "discord.commands", "guild_id", guild, "recovery", "scheduled", "retry_after_seconds", retryAfter.Seconds(), "error", err)
+	return retryAfter, false
 }
 
 func (r *Runtime) presence() {

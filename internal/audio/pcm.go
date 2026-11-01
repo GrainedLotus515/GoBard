@@ -168,6 +168,11 @@ func (s *pcmStream) Close() error {
 		s.cancel()
 		_ = s.stdout.Close()
 		s.closeErr = s.wait()
+		if !s.ended {
+			// Early Close intentionally terminates FFmpeg; the resulting signal
+			// exit is not a cleanup failure.
+			s.closeErr = nil
+		}
 	})
 	return s.closeErr
 }

@@ -94,26 +94,33 @@ func New(opener Opener, logger *log.Logger) (*Engine, error) {
 	return &Engine{opener: opener, logger: logger}, nil
 }
 
+func closeStream(ctx context.Context, stream Stream, result *Result) {
+	if err := stream.Close(); err != nil && result.Failure == nil && !cancellationInduced(ctx, err) {
+		result.Failure = classify("close", failure.Cleanup, err)
+		result.Outcome = failedOutcome(result.Failure.Category)
+	}
+}
+
+func (e *Engine) finalize(ctx context.Context, started time.Time, result *Result) {
+	result.Request.Controls = nil
+	if cause := context.Cause(ctx); cause != nil && result.Failure == nil && result.Outcome != Completed {
+		var control Cancellation
+		result.Outcome = Shutdown
+		if errors.As(cause, &control) {
+			result.Outcome = control.Outcome
+		}
+	}
+	result.Elapsed = time.Since(started)
+	e.terminal(*result)
+}
+
 // Run returns only after stream cleanup and emits exactly one terminal event.
 // The caller owns the goroutine if it chooses to run this asynchronously.
 func (e *Engine) Run(ctx context.Context, request Request, output Output) (result Result) {
 	started := time.Now()
 	result.Request = request
 	result.Outcome = SourceFailure
-	defer func() {
-		result.Request.Controls = nil
-		if cause := context.Cause(ctx); cause != nil {
-			var control Cancellation
-			result.Outcome = Shutdown
-			if errors.As(cause, &control) {
-				result.Outcome = control.Outcome
-			}
-			// Cancellation-induced errors do not become spurious source failures.
-			result.Failure = nil
-		}
-		result.Elapsed = time.Since(started)
-		e.terminal(result)
-	}()
+	defer func() { e.finalize(ctx, started, &result) }()
 	if err := ctx.Err(); err != nil {
 		return result
 	}
@@ -124,6 +131,9 @@ func (e *Engine) Run(ctx context.Context, request Request, output Output) (resul
 	}
 	stream, err := e.opener.Open(ctx, request)
 	if err != nil {
+		if cancellationInduced(ctx, err) {
+			return result
+		}
 		result.Failure = classify("source", failure.Source, err)
 		result.Outcome = failedOutcome(result.Failure.Category)
 		return result
@@ -132,12 +142,7 @@ func (e *Engine) Run(ctx context.Context, request Request, output Output) (resul
 		result.Failure = failure.Wrap("source", failure.Source, errors.New("opener returned nil stream"))
 		return result
 	}
-	defer func() {
-		if err := stream.Close(); err != nil && result.Failure == nil {
-			result.Failure = classify("close", failure.Cleanup, err)
-			result.Outcome = failedOutcome(result.Failure.Category)
-		}
-	}()
+	defer closeStream(ctx, stream, &result)
 	var packet [MaxPacketBytes]byte
 	for {
 		if request.Controls.wait(ctx) != nil {
@@ -149,6 +154,9 @@ func (e *Engine) Run(ctx context.Context, request Request, output Output) (resul
 		if err != nil {
 			if errors.Is(err, io.EOF) && n == 0 && result.Frames > 0 {
 				result.Outcome = Completed
+				return result
+			}
+			if cancellationInduced(ctx, err) || ctx.Err() != nil && errors.Is(err, io.EOF) {
 				return result
 			}
 			result.Outcome = EncodeFailure
@@ -170,6 +178,9 @@ func (e *Engine) Run(ctx context.Context, request Request, output Output) (resul
 		}
 		sendStarted := time.Now()
 		if err := output.Send(ctx, packet[:n]); err != nil {
+			if cancellationInduced(ctx, err) {
+				return result
+			}
 			result.Outcome = TransportFailure
 			result.Failure = classify("output", failure.Transport, err)
 			return result
@@ -185,6 +196,10 @@ func (e *Engine) Run(ctx context.Context, request Request, output Output) (resul
 			request.Controls.frames.Add(1)
 		}
 	}
+}
+
+func cancellationInduced(ctx context.Context, err error) bool {
+	return ctx.Err() != nil && (errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded))
 }
 
 func failedOutcome(category failure.Category) Outcome {

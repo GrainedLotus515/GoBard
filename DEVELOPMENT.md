@@ -2,9 +2,14 @@
 
 ## Supported environment
 
-Use Docker for builds, tests, linting, and smoke checks. Discord voice connections require libdave, and the Dockerfile is the reproducible environment used by CI. The release target is `linux/amd64` only.
+Use Docker for release builds, tests, linting, and smoke checks. The Dockerfile is the canonical packaging environment used by CI. On NixOS, the pinned flake provides an equivalent native development shell with Go 1.27.3, CGO, libdave 1.2.1, FFmpeg, yt-dlp, Deno, and Python. The release target and Nix shell are `x86_64-linux` only.
 
 ```bash
+nix develop
+nix flake check
+nix develop --command go test -race -count=1 ./...
+nix develop --command go vet ./...
+
 make docker-test
 make docker-lint
 make docker-build
@@ -13,9 +18,9 @@ make docker-profile-check
 make docker-bench
 ```
 
-`docker-test` runs `go test -race ./...`. `docker-lint` verifies formatting without rewriting files, then runs `go vet` and the pinned golangci-lint v2 release. Both targets use Docker stages so a workstation does not need a native libdave installation.
+`docker-test` runs `go test -race -count=1 ./...` plus the consumed SDK suites. `docker-lint` verifies formatting without rewriting files, then runs `go vet` and the pinned golangci-lint v2 release. Both targets use Docker stages so a workstation does not need a native libdave installation.
 
-`docker-profile-check` renders all resource overrides and verifies their CPU, memory, cache, and yt-dlp settings. `docker-bench` runs allocation microbenchmarks, then starts deterministic small, medium, and large capacity containers for 15 minutes under their actual cgroup limits. Set `GOBARD_BENCH_DURATION=10s` only for a quick harness check. Timing results are diagnostic rather than absolute CI gates, but concurrency, cleanup, process-budget, cache-download, and allocation invariants remain enforced.
+`docker-profile-check` renders all resource overrides and verifies their CPU, memory, cache, and yt-dlp settings. `docker-bench` runs allocation microbenchmarks, then starts deterministic reduced, small, medium, and large capacity containers for 15 minutes under their actual cgroup limits. The 512 MiB reduced profile derives five guilds through the production admission formula. Set `GOBARD_BENCH_DURATION=10s` only for a quick harness check. Timing thresholds, concurrent process acquisition, cache leases, cleanup, and goroutine/resource-release invariants are enforced; results remain workload-specific capacity evidence rather than production guarantees.
 
 For an interactive local container, create `.env`, secure it, and use the local override:
 
@@ -39,7 +44,7 @@ For a file-backed Discord token, comment `DISCORD_TOKEN` in `.env`, set `DISCORD
 The Dockerfile has independent stages:
 
 - `test`: race-enabled Go test suite with libdave.
-- `bench`: deterministic player, cache, limiter, command, and YouTube benchmarks.
+- `bench`: deterministic playback, session, cache, limiter, source, and pacing benchmarks.
 - `lint`: read-only `gofmt`, vet, and golangci-lint checks.
 - `vulncheck`: reachable vulnerability analysis with govulncheck.
 - `runtime`: minimal non-root production image.
@@ -76,4 +81,6 @@ Release signing requires repository secrets `COSIGN_PRIVATE_KEY` and `COSIGN_PAS
 
 ## Native builds
 
-Native work is unsupported by the standard workflow. If you deliberately need it, install libdave with `scripts/install-libdave.sh`, configure `PKG_CONFIG_PATH` and `LD_LIBRARY_PATH`, then use Go tooling manually. Native output is not a replacement for the Docker validation gates.
+On NixOS, use `nix develop`; `flake.lock` pins nixpkgs and the flake builds the checksum-verified libdave release entirely in the Nix store. `GOTOOLCHAIN=local` prevents a silent Go toolchain substitution. The shell does not modify the host NixOS configuration or require `sudo`. Native output is not a replacement for the Docker validation gates.
+
+Other native setups are unsupported. If you deliberately use one, install libdave with `scripts/install-libdave.sh`, configure `PKG_CONFIG_PATH` and `LD_LIBRARY_PATH`, then use Go tooling manually.

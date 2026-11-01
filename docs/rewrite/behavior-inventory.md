@@ -34,7 +34,10 @@ Retain strict token/token-file exclusivity; cache directory/size; default volume
 ducking enabled/target; playlist cap (1–500); extractor concurrency (1–16);
 loopback health address; global versus guild registration; presence status,
 activity type/text/URL; debug settings. `.env.example` and config tests are the
-field-level reference. New admission/resource limits must be strict and documented.
+field-level reference. `MAX_GUILD_SESSIONS` is now an upper bound combined with
+memory-derived admission. Optional `PLAYBACK_MEMORY_LIMIT` and
+`PLAYBACK_MEMORY_HEADROOM` overrides are additive; unset values preserve startup
+while automatically reserving headroom and 48 MiB per retained guild.
 
 ## Historical and uncertain behavior
 
@@ -97,8 +100,15 @@ admission receipt, omitting the old track card and playback buttons. The player
 card is restored with current-selection metadata, progress, controls and read-only
 Queue/Refresh navigation. Permission-denied button presses now reply privately
 without replacing the shared card. Queue numbering remains stable; remaining
-counts exclude completed entries. Cards currently refresh on interaction rather
-than automatically. See [the interface contract](../discord-interface.md).
+counts exclude completed entries. One bounded observer per admitted guild keeps
+the card current. See [the interface contract](../discord-interface.md).
+
+On 2026-10-26, `/stop` was aligned with the v2 acceptance contract: it clears the
+queue and retains a healthy established voice connection instead of duplicating
+`/disconnect`. It still cancels joining/recovery and cleans broken transport.
+This deliberately changes the legacy disconnect side effect; command mapping,
+queue settlement and permissions are unchanged. Contract tests cover healthy
+Stop, cancellation during join, final-track removal and paused-state reset.
 
 The replacement interaction grammar preserves `1:30`, `90`, `90s` and `1m30s`
 seek forms, while rejecting negative/overflowing values, colon seconds above 59,

@@ -260,3 +260,27 @@ func TestAtomicPlaylistAdmissionAndValidation(t *testing.T) {
 		}
 	}
 }
+
+func TestRemovingPausedTrackDoesNotPauseNext(t *testing.T) {
+	for _, action := range []Action{Skip, Remove} {
+		t.Run(string(action), func(t *testing.T) {
+			s, source := newControlsTest(t)
+			if _, err := s.Add(context.Background(), tracks("first", "second")); err != nil {
+				t.Fatal(err)
+			}
+			first := nextAttempt(t, source)
+			apply(t, s, Operation{Action: Pause})
+			op := Operation{Action: action}
+			apply(t, s, op)
+			second := nextAttempt(t, source)
+			if second.request.MediaID != "second" {
+				t.Fatalf("next request = %+v", second.request)
+			}
+			if snap := apply(t, s, Operation{Action: Inspect}); snap.Paused {
+				t.Fatal("next request inherited paused state")
+			}
+			close(first.finish)
+			close(second.finish)
+		})
+	}
+}

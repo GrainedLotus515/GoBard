@@ -51,10 +51,12 @@ type sendFunc func(context.Context, []byte) error
 func (f sendFunc) Send(ctx context.Context, b []byte) error { return f(ctx, b) }
 
 type testStream struct {
-	frames   int
-	end      error
-	closeErr error
-	closed   int
+	frames       int
+	end          error
+	closeErr     error
+	closed       int
+	closeStarted chan struct{}
+	releaseClose chan struct{}
 }
 
 func (s *testStream) Next(_ context.Context, b []byte) (int, error) {
@@ -65,7 +67,16 @@ func (s *testStream) Next(_ context.Context, b []byte) (int, error) {
 	b[0] = 1
 	return 1, nil
 }
-func (s *testStream) Close() error { s.closed++; return s.closeErr }
+func (s *testStream) Close() error {
+	s.closed++
+	if s.closeStarted != nil {
+		close(s.closeStarted)
+	}
+	if s.releaseClose != nil {
+		<-s.releaseClose
+	}
+	return s.closeErr
+}
 
 func TestTerminalOutcomes(t *testing.T) {
 	cause := errors.New("secret=https://signed.invalid/?token=do-not-log")
@@ -129,6 +140,69 @@ func TestCancellationUnblocksStalledOutput(t *testing.T) {
 	r := <-done
 	if r.Outcome != Skipped || r.Frames != 0 || r.Failure != nil || s.closed != 1 {
 		t.Fatalf("%+v closed=%d", r, s.closed)
+	}
+}
+
+func TestCancellationDoesNotEraseEstablishedTransportFailure(t *testing.T) {
+	ctx, cancel := context.WithCancelCause(context.Background())
+	s := &testStream{frames: 1, closeStarted: make(chan struct{}), releaseClose: make(chan struct{})}
+	e, err := New(openFunc(func(context.Context, Request) (Stream, error) { return s, nil }), log.New(io.Discard))
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan Result, 1)
+	go func() {
+		done <- e.Run(ctx, Request{}, sendFunc(func(context.Context, []byte) error { return errors.New("transport lost") }))
+	}()
+	<-s.closeStarted
+	cancel(Cancellation{Outcome: Stopped})
+	close(s.releaseClose)
+	result := <-done
+	if result.Outcome != TransportFailure || result.Failure == nil || result.Failure.Category != failure.Transport {
+		t.Fatalf("cancellation replaced terminal failure: %+v", result)
+	}
+}
+
+func TestCancellationDoesNotEraseCleanupFailure(t *testing.T) {
+	ctx, cancel := context.WithCancelCause(context.Background())
+	s := &testStream{frames: 1, closeErr: errors.New("cleanup failed"), closeStarted: make(chan struct{}), releaseClose: make(chan struct{})}
+	e, err := New(openFunc(func(context.Context, Request) (Stream, error) { return s, nil }), log.New(io.Discard))
+	if err != nil {
+		t.Fatal(err)
+	}
+	entered := make(chan struct{})
+	done := make(chan Result, 1)
+	go func() {
+		done <- e.Run(ctx, Request{}, sendFunc(func(ctx context.Context, _ []byte) error {
+			close(entered)
+			<-ctx.Done()
+			return ctx.Err()
+		}))
+	}()
+	<-entered
+	cancel(Cancellation{Outcome: Skipped})
+	<-s.closeStarted
+	close(s.releaseClose)
+	result := <-done
+	if result.Outcome != EncodeFailure || result.Failure == nil || result.Failure.Category != failure.Cleanup {
+		t.Fatalf("cancellation replaced cleanup failure: %+v", result)
+	}
+}
+
+func TestCancellationAfterEOFDoesNotReplaceCompletion(t *testing.T) {
+	ctx, cancel := context.WithCancelCause(context.Background())
+	s := &testStream{frames: 1, end: io.EOF, closeStarted: make(chan struct{}), releaseClose: make(chan struct{})}
+	e, err := New(openFunc(func(context.Context, Request) (Stream, error) { return s, nil }), log.New(io.Discard))
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan Result, 1)
+	go func() { done <- e.Run(ctx, Request{}, sendFunc(func(context.Context, []byte) error { return nil })) }()
+	<-s.closeStarted
+	cancel(Cancellation{Outcome: Stopped})
+	close(s.releaseClose)
+	if result := <-done; result.Outcome != Completed || result.Failure != nil {
+		t.Fatalf("cancellation replaced natural completion: %+v", result)
 	}
 }
 

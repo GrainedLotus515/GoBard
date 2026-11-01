@@ -5,7 +5,7 @@ this pass. Check `make local-test-status` first. Record the image ID, approximat
 time, command/query or public media link, and what you saw/heard. Do not share
 tokens, private env files or signed media URLs.
 
-For the October 16 completion candidate, execute three full NF *HOPE* album
+For final acceptance of the current tree, execute three full NF *HOPE* album
 passes: two independently empty temporary test caches, then one replay of the
 second pass's warm cache. Keep the normal named test cache and production cache
 intact; coordinate isolated volumes with the operator rather than deleting them.
@@ -15,9 +15,10 @@ interruption. Cache warming is now part of successful playback, not a second
 background acquisition. The two-track source probe is not this album gate.
 
 Complete the controls/reconnect/active-shutdown rows below on the exact candidate
-and a 30-minute two-guild concurrent listening session. The SDK fixes must be
-pinned before the final reconnect/shutdown acceptance. If a guild, credential or
-listener is unavailable, leave that gate explicitly unverified.
+and a 30-minute two-guild concurrent listening session. The SDK fixes are pinned;
+their offline suites do not replace final reconnect/shutdown acceptance. If a
+guild, credential or listener is unavailable, leave that gate explicitly
+unverified.
 
 | Check | Expected result |
 | --- | --- |
@@ -25,10 +26,11 @@ listener is unavailable, leave that gate explicitly unverified.
 | Watch a full track and the transition to a queued second track | No unexplained gaps; card updates to the next track. Progress advances in 15-second steps. Report any interruption even if audio resumes. |
 | Repeat play, queue and player commands in the same channel | One shared card is edited; command receipts are private with an Open player link. No stream of new public acknowledgements. |
 | Observe an interruption or final failure | A concise explanation appears on the shared card, distinguishing attempted recovery from exhausted recovery or queue advancement. Technical error output is absent. |
+| Observe startup and, if safely reproducible, a failed registration or Gateway resume | Readiness remains false until complete command reconciliation; scheduled recovery succeeds without restarting the bot. |
 | Pause, resume, skip and repeat | Labels and repeat state follow the actual session. Paused audio stops; resume continues; skip moves once. Switch repeat off before testing natural drain. |
 | Add enough tracks for multiple queue pages | Queue/Player navigation works, long titles remain readable, positions match move/remove, and the current selection stays clear. |
 | Seek, volume, shuffle, move/remove and clear | Each acknowledgement matches its effect. Seek may restart acquisition; controls must not falsely report completion. |
-| Stop; separately disconnect and play again | Stop clears the queue and leaves voice. Disconnect preserves selection; the next play reconnects with that queue retained. |
+| Stop; separately disconnect and play again | Stop clears the queue but keeps a healthy voice connection. Disconnect preserves selection; the next play reconnects with that queue retained. |
 | Use a superseded card, then Refresh | Old mutation buttons explain privately that the player was replaced. Refresh or `/now-playing` establishes the current view. |
 | Delete the active card, then `/now-playing` | Audio continues; automatic edits stop on the deleted message. A new view resumes updates. |
 | Try a mutation outside the bot's voice channel | Private denial, no changed music or destroyed shared player. Read-only queue/player views remain available. |
@@ -44,7 +46,7 @@ provider anti-bot/authentication rejection is not fixed by trying personal cooki
 One successful song proves that observed path only. Fake-transport tests do not
 verify Discord connectivity or listening quality.
 
-The [SDK lifecycle blocker](sdk-lifecycle-review.md) requires a verified library
-fix; the user rejected a temporary exception. This checklist cannot prove private
-SDK worker joins or waive that requirement. The checklist is pending until actual
-client results are recorded.
+The focused [SDK lifecycle fixes](sdk-lifecycle-review.md) are published, pinned
+and covered by offline race tests. This checklist cannot prove native-call
+preemption or replace real DAVE reconnect/active-shutdown evidence. It remains
+pending until actual client results are recorded.

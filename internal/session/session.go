@@ -412,8 +412,9 @@ func (c *coordinator) start() {
 
 func (c *coordinator) complete(result playback.Result) {
 	c.recovery = ""
+	stopCompletion := c.stopAfter
 	defer func() {
-		if c.queue.current() == nil {
+		if !stopCompletion && c.queue.current() == nil {
 			c.drained = true
 		}
 	}()
@@ -424,6 +425,10 @@ func (c *coordinator) complete(result playback.Result) {
 	if c.stopAfter {
 		c.stopAfter = false
 		c.pending = ""
+		if result.Outcome == playback.TransportFailure || c.needDisconnect {
+			c.disconnectVoice()
+			c.connected = false
+		}
 		c.settleAll(playback.Stopped)
 		c.queue.reset()
 		c.paused = false
@@ -458,7 +463,8 @@ func (c *coordinator) complete(result playback.Result) {
 		c.settle(e, result)
 		c.queue.remove(c.queue.index)
 		c.recoveryAttempts = 0
-		if c.queue.index >= len(c.queue.entries) {
+		c.paused = false
+		if c.queue.current() == nil {
 			c.queue.reset()
 		}
 		return
@@ -488,7 +494,6 @@ func (c *coordinator) settleAll(reason playback.Outcome) {
 		result := playback.Result{Request: e.ticket.request, Outcome: reason}
 		if c.last.Request.ID == e.ticket.request.ID {
 			result = c.last
-			result.Outcome = reason
 		}
 		c.settle(e, result)
 	}

@@ -45,6 +45,8 @@ type Config struct {
 	MaxPlaylistTracks         int
 	YTDLPMaxConcurrency       int
 	MaxGuildSessions          int
+	PlaybackMemoryLimit       uint64
+	PlaybackMemoryHeadroom    uint64
 	QueueLimit                int
 	PlayCommandConcurrency    int
 	LogFormat                 string
@@ -91,6 +93,14 @@ func Load() (*Config, error) {
 		return nil, err
 	}
 	maxGuilds, err := envInt("MAX_GUILD_SESSIONS", 16, 1, 1024)
+	if err != nil {
+		return nil, err
+	}
+	memoryLimit, err := optionalByteSize("PLAYBACK_MEMORY_LIMIT")
+	if err != nil {
+		return nil, err
+	}
+	memoryHeadroom, err := optionalByteSize("PLAYBACK_MEMORY_HEADROOM")
 	if err != nil {
 		return nil, err
 	}
@@ -159,6 +169,8 @@ func Load() (*Config, error) {
 		MaxPlaylistTracks:         maxPlaylistTracks,
 		YTDLPMaxConcurrency:       ytdlpConcurrency,
 		MaxGuildSessions:          maxGuilds,
+		PlaybackMemoryLimit:       memoryLimit,
+		PlaybackMemoryHeadroom:    memoryHeadroom,
 		QueueLimit:                queueLimit,
 		PlayCommandConcurrency:    playConcurrency,
 		LogFormat:                 logFormat,
@@ -284,6 +296,19 @@ func parseListenAddr(raw string) (string, error) {
 		return "", fmt.Errorf("port must be between 1 and 65535")
 	}
 	return addr, nil
+}
+
+func optionalByteSize(name string) (uint64, error) {
+	raw, present := os.LookupEnv(name)
+	if !present {
+		return 0, nil
+	}
+	value, err := parseByteSize(raw)
+	if err != nil {
+		return 0, fmt.Errorf("invalid %s: %w", name, err)
+	}
+	// #nosec G115 -- parseByteSize returns only positive int64 values.
+	return uint64(value), nil
 }
 
 // parseByteSize accepts positive base-2 KB, MB, and GB values. It deliberately

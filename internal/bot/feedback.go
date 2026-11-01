@@ -121,7 +121,7 @@ func commandReceipt(m MappedInteraction, s session.Snapshot, accepted int) *disc
 	case "play":
 		title, message = "Added to queue", actionNotice("play", accepted)
 	case "stop":
-		title, message = "Stop requested", "Clearing the queue and leaving voice."
+		title, message = "Stop requested", "Clearing the queue and staying in voice."
 	case "disconnect":
 		title, message = "Disconnect requested", "Leaving voice with your queue retained for this session. Use `/play` to reconnect."
 	case "pause", "resume":

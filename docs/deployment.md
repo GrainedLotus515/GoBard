@@ -35,9 +35,15 @@ Settings are still process/guild-memory settings, not newly persisted state.
 
 New strict variables: `MAX_GUILD_SESSIONS=16` (1–1024), `QUEUE_LIMIT=500`
 (1–500), `PLAY_COMMAND_CONCURRENCY=4` (1–16), `LOG_FORMAT=json` (`json`/`text`).
-The guild budget counts retained sessions, including disconnected selections and
-settings. Set it explicitly for larger installations. `DEBUG_PLAYBACK` remains
-validated for deployment compatibility but has no separate logger in v2.
+`PLAYBACK_MEMORY_LIMIT` and `PLAYBACK_MEMORY_HEADROOM` are optional positive
+KB/MB/GB overrides; unset values detect the cgroup/host limit and reserve the
+greater of 256 MiB or 25%. Each retained guild reserves 48 MiB, including while
+idle or disconnected, and `MAX_GUILD_SESSIONS` remains only an upper bound. The
+smaller derived/configured limit is logged at startup as `capacity.admission`.
+Insufficient budgets fail startup; saturation rejects new guilds without evicting
+existing sessions. Restart after changing container memory or these overrides.
+`DEBUG_PLAYBACK` remains validated for deployment compatibility but has no
+separate logger in v2.
 
 Local live tests use a separately named container and a dedicated named volume.
 The stopped local `gobard-temp` container is retained; the VPS remains stopped

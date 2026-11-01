@@ -24,6 +24,7 @@ session, queue, source or playback packages.
 | Audio | Decode/encode to stereo 48 kHz Opus, 20 ms packets, fixed buffers; process wait result is part of success. |
 | Voice adapter | Connection, DAVE/encryption, packet pacing and synchronous transport acceptance; cancellation and disconnect. |
 | Cache | Byte/entry budgets, stable keys, leases and atomic publication. No ownership migration of persisted files. |
+| Capacity | Detect cgroup v1/v2 or host memory, reserve headroom, and derive the manager's guild admission bound. |
 | Observability | Charm events emitted at operation owners; allowlisted diagnostics; independent health dimensions. |
 
 Decision 2: the decoded audio slice uses synchronous pull and synchronous output.
@@ -92,6 +93,13 @@ disconnect and transport failure invalidate it. A reconnect cannot revive an
 older lookup. Trusted lifecycle calls use `Apply`; interactions use `ApplyAs`
 and `AddResolved`. The adapter must establish the connected target before lookup.
 
+Command reconciliation is owned by one adapter goroutine. A failed complete pass
+leaves readiness false and schedules another pass after exponential backoff from
+5 seconds to 5 minutes; a Discord 429 can lengthen that delay up to the HTTP
+boundary's one-hour `Retry-After` limit. Gateway Ready and Resumed events both
+request reconciliation; hints coalesce and do not reset an existing timer.
+Shutdown stops and joins pending reconciliation work.
+
 Runtime cutover decision: a guild-scoped voice capability connects/disconnects
 adapter-owned transport. The session coordinator owns the connection operation,
 its cancellation/join, and at most three transport-recovery attempts. Connection
@@ -109,5 +117,6 @@ bounded IDs and view state. A cancellable capacity-one gate serializes edits;
 no registry lock spans HTTP and no interaction token is retained. Observations
 predating a newly rendered command cannot overwrite it. A shared `netguard`
 socket helper bounds context-free SDK WebSocket writes and joins its own
-cancellation callback. It does not promise joins for private SDK workers; see
-[the SDK lifecycle completion blocker](rewrite/sdk-lifecycle-review.md).
+cancellation callback. The pinned Discord SDK exposes voice close/join and
+connection-error observation; [the lifecycle review](rewrite/sdk-lifecycle-review.md)
+records that integration and its remaining live-DAVE acceptance boundary.

@@ -25,32 +25,33 @@ import (
 // Runtime owns the Discord boundary. Sessions and sources are injected by app
 // composition and outlive Close. Event callbacks only admit bounded work.
 type Runtime struct {
-	ctx            context.Context
-	cancel         context.CancelFunc
-	cfg            *config.Config
-	logger         *log.Logger
-	discord        *discordgo.Session
-	rest           *discordHTTP
-	state          *gatewayState
-	sessions       *session.Manager
-	player         *command.Player
-	voice          atomic.Pointer[discordvoice.Manager]
-	connected      atomic.Bool
-	registered     atomic.Bool
-	sourceStatus   atomic.Uint32
-	pipelineStatus atomic.Uint32
-	delivering     atomic.Int32
-	register       chan struct{}
-	disconnected   chan struct{}
-	slots          chan struct{}
-	playSlots      chan struct{}
-	rejections     chan interactionRef
-	removals       chan string
-	mu             sync.Mutex
-	stopping       bool
-	panels         map[string]*playerPanel
-	work           sync.WaitGroup
-	once           sync.Once
+	ctx               context.Context
+	cancel            context.CancelFunc
+	cfg               *config.Config
+	logger            *log.Logger
+	discord           *discordgo.Session
+	rest              *discordHTTP
+	state             *gatewayState
+	sessions          *session.Manager
+	player            *command.Player
+	voice             atomic.Pointer[discordvoice.Manager]
+	connected         atomic.Bool
+	registered        atomic.Bool
+	sourceStatus      atomic.Uint32
+	pipelineStatus    atomic.Uint32
+	delivering        atomic.Int32
+	register          chan struct{}
+	registrationTimer func(time.Duration) (<-chan time.Time, func())
+	disconnected      chan struct{}
+	slots             chan struct{}
+	playSlots         chan struct{}
+	rejections        chan interactionRef
+	removals          chan string
+	mu                sync.Mutex
+	stopping          bool
+	panels            map[string]*playerPanel
+	work              sync.WaitGroup
+	once              sync.Once
 }
 
 func NewRuntime(parent context.Context, cfg *config.Config, sessions *session.Manager, resolver command.Resolver, logger *log.Logger) (*Runtime, error) {
@@ -68,7 +69,10 @@ func NewRuntime(parent context.Context, cfg *config.Config, sessions *session.Ma
 		return nil, failure.Wrap("discord_initialize", failure.Transport, err)
 	}
 	r := &Runtime{ctx: ctx, cancel: cancel, cfg: cfg, logger: logger, discord: d, rest: newDiscordHTTP(cfg.DiscordToken), state: newGatewayState(), removals: make(chan string, maxGatewayGuilds), sessions: sessions,
-		register: make(chan struct{}, 1), disconnected: make(chan struct{}, 1), slots: make(chan struct{}, 32), playSlots: make(chan struct{}, cfg.PlayCommandConcurrency), rejections: make(chan interactionRef, 16)}
+		register: make(chan struct{}, 1), registrationTimer: func(delay time.Duration) (<-chan time.Time, func()) {
+			timer := time.NewTimer(delay)
+			return timer.C, func() { timer.Stop() }
+		}, disconnected: make(chan struct{}, 1), slots: make(chan struct{}, 32), playSlots: make(chan struct{}, cfg.PlayCommandConcurrency), rejections: make(chan interactionRef, 16)}
 	r.player, err = command.NewPlayer(ctx, resolver, r, logger, cfg.PlayCommandConcurrency)
 	r.panels = make(map[string]*playerPanel)
 	if err != nil {
@@ -131,7 +135,7 @@ func (r *Runtime) handlers() {
 			r.readyRuntime()
 		})
 	})
-	r.discord.AddHandler(func(_ *discordgo.Session, _ *discordgo.Resumed) { r.callback(func() { r.connected.Store(true) }) })
+	r.discord.AddHandler(func(_ *discordgo.Session, _ *discordgo.Resumed) { r.callback(r.resumeRuntime) })
 	r.discord.AddHandler(func(_ *discordgo.Session, _ *discordgo.Disconnect) {
 		r.callback(func() {
 			r.connected.Store(false)
@@ -186,6 +190,10 @@ func (r *Runtime) readyRuntime() {
 		manager.SetSpeakingHandler(func(guild, user string, speaking bool) { r.callback(func() { r.speaking(guild, user, speaking) }) })
 		r.voice.Store(manager)
 	}
+	r.resumeRuntime()
+}
+
+func (r *Runtime) resumeRuntime() {
 	r.connected.Store(true)
 	r.signalRegistration()
 }

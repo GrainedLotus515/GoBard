@@ -1,5 +1,134 @@
 # Performance and budgets
 
+## Release-completion capacity — 2026-10-27
+
+Production admission now detects the effective cgroup v1/v2 or host memory limit,
+with an optional `PLAYBACK_MEMORY_LIMIT` operator override. It reserves the
+greater of 256 MiB or 25% of that limit (`PLAYBACK_MEMORY_HEADROOM` can override
+it), then budgets 48 MiB per retained guild. The effective admission limit is the
+smaller of this result and `MAX_GUILD_SESSIONS`; idle and disconnected sessions
+retain their reservations. The 48 MiB value is deliberately above the highest
+previous 33.32 MiB incremental acquisition measurement, not a claim that every
+provider/process workload has a fixed per-stream cost. Changes require restart.
+
+A 30-second concurrent four-profile run used the same i9-12900K/24-logical-CPU
+host and Linux 6.18.57, with unrelated host workloads present. The reduced profile
+derived five guilds under 512 MiB; all profiles reported zero gaps over 60 ms,
+worker failures and retained temporary files, with goroutines returning from two
+to one.
+
+| Profile | Guilds | Memory limit | CPU / quota | Peak anonymous MiB | Added anonymous MiB/guild | Maximum gap ms |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Reduced | 5 | 512 MiB | 11.41% | 62.44 | 12.17 | 21.82 |
+| Small | 4 | 1 GiB | 9.21% | 50.89 | 12.33 | 21.74 |
+| Medium | 12 | 2 GiB | 13.21% | 143.28 | 11.81 | 22.49 |
+| Large | 24 | 4 GiB | 12.65% | 282.09 | 11.69 | 21.20 |
+
+The workload includes the real acquisition ring, local extractor process tree,
+FFmpeg/libopus, cache pressure and paced fake voice. This is short offline
+evidence, not live-provider, cold-YouTube, DAVE or listener-quality proof. See
+[raw release-short results](rewrite/capacity-release-short-2026-10-27.json).
+
+`docker build --no-cache --target bench --progress=plain .` then passed on the
+same host before the long soak. Single-run samples measured limiter acquisition
+at 72.78 ns, 32 B/two allocations; cache acquire at 607.4 ns, 352 B/three
+allocations; a synthetic 1,000-frame attempt at 86,974 ns, 4,184 B/four
+allocations; and real 1,000-frame media at 219,035,683 ns, 17.53 MB/s, 118,835
+Go B/92 allocations. These are reference samples, not controlled optimization
+comparisons or total-process memory measurements.
+
+`sh ./scripts/docker-bench.sh` then ran all four profiles concurrently for 900
+seconds and exited zero. No GoBard bot or other GoBard build overlapped the
+profile measurements; unrelated host workloads remained active. Every profile
+reported zero missed 60 ms deadlines, worker failures and retained temporary
+files, with goroutines returning from two to one.
+
+| Profile | Guilds | Frames | CPU / quota | Peak cgroup MiB | Peak anonymous MiB | Added anonymous MiB/guild | Maximum gap ms |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Reduced | 5 | 224,961 | 16.18% | 160.36 | 140.93 | 27.87 | 51.72 |
+| Small | 4 | 179,992 | 12.48% | 143.73 | 113.75 | 28.04 | 24.61 |
+| Medium | 12 | 539,953 | 17.40% | 314.73 | 288.09 | 23.87 | 25.55 |
+| Large | 24 | 1,079,805 | 17.17% | 565.52 | 525.85 | 21.84 | 51.00 |
+
+Maximum first-frame latencies were 199.52/42.22/112.09/208.98 ms and maximum
+session shutdowns were 5.02/10.41/19.17/9.62 ms in profile order. The reduced
+and large maxima remain below the threshold but show that tail timing varies on
+this non-idle host; the earlier failed soak remains relevant evidence. The
+benchmark image was
+`sha256:c780e53c330b01d28fc2da4157bed938fa302355a394d6f67f4f214b6a022a7b`.
+See [raw final soak results](rewrite/capacity-release-soak-2026-10-27.json) for
+all counters, durations, limits and caveats. This is sustained offline evidence,
+not provider, Discord/DAVE, listening-quality or general streams-per-GB proof.
+
+## Recovery-audit regression — 2026-10-26
+
+The current uncommitted audit tree was measured with the pinned Go 1.27.3
+linux/amd64 toolchain on the same i9-12900K host (24 logical CPUs, 33,388,384,256
+bytes RAM, Linux 6.18.57). Microbenchmarks completed first; the 30-second 4/12/24
+profiles then ran concurrently with their configured quotas. No GoBard bot or
+quality build overlapped the profiles; unrelated host containers and interactive
+desktop/game workloads remained active, so this was not a dedicated idle host.
+The workload and limitations are the same as the acquisition soak below, with the
+obsolete synthetic process-priority pressure removed. Cache-pressure work and the
+shared process budget still execute, and provider retrieval uses a real local
+extractor subprocess rather than YouTube.
+
+| Guilds | Frames | CPU quota | CPU / quota | Peak anonymous MiB | Added anonymous MiB/guild | Maximum gap ms | Maximum session shutdown ms |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 4 | 5,992 | 2 | 11.07% | 50.87 | 12.35 | 21.81 | 4.28 |
+| 12 | 17,960 | 4 | 15.81% | 142.92 | 11.78 | 22.91 | 25.44 |
+| 24 | 35,858 | 8 | 15.58% | 281.42 | 11.66 | 50.27 | 28.23 |
+
+All three profiles reported zero gaps over 60 ms, worker failures and retained
+temporary files; goroutines returned from two to one. Maximum first-frame
+latencies were 52.27/96.88/158.14 ms. The large profile's 50.27 ms maximum gap
+stayed below the failure threshold but is not evidence of listener-perceived
+quality. See [raw short results](rewrite/capacity-short-2026-10-26.json).
+
+Single-run microbenchmarks measured limiter acquisition at 76.53 ns, 32 B/two
+allocations; cache acquire at 604.1 ns, 352 B/three allocations; and a synthetic
+1,000-frame attempt at 89,096 ns, 4,168 B/four allocations. Real 1,000-frame media
+throughput was 198,146,996 ns, 19.38 MB/s, 118,712 Go B/92 allocations. These are
+current reference samples, not controlled before/after optimization claims.
+
+The first 15-minute repeat used the same host and concurrent-profile conditions
+with no overlapping GoBard build or bot. It **failed the pacing gate**: medium
+reported one gap over 60 ms and large reported two. Small passed. CPU, memory,
+worker, cleanup and temporary-file checks passed in all profiles, and goroutines
+returned from two to one.
+
+| Guilds | Frames | CPU / quota | Peak anonymous MiB | Gaps over 60 ms | Maximum gap ms | p99 gap ms |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 4 | 179,992 | 11.53% | 113.17 | 0 | 24.17 | 20 |
+| 12 | 539,815 | 15.19% | 287.12 | 1 | 60.17 | 21 |
+| 24 | 1,079,850 | 15.11% | 523.69 | 2 | 63.06 | 21 |
+
+The threshold exceedances are marginal and rare, but their cause is unattributed;
+ordinary p99 values do not erase a failed tail-latency assertion. Unrelated host
+containers and interactive desktop/game workloads remained active, so this was
+not an idle host and the run cannot distinguish host scheduling from an
+application regression. The failed evidence is retained in
+[raw soak results](rewrite/capacity-soak-2026-10-26.json), and no capacity pass
+or listener-quality claim is made from it.
+
+An unchanged second 15-minute run then exited zero. Every profile reported zero
+missed deadlines, worker failures and retained temporary files, with goroutines
+returning from two to one.
+
+| Guilds | Frames | CPU / quota | Peak anonymous MiB | Gaps over 60 ms | Maximum gap ms | p99 gap ms |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 4 | 179,992 | 10.54% | 113.38 | 0 | 22.22 | 21 |
+| 12 | 539,964 | 14.27% | 287.41 | 0 | 23.99 | 20 |
+| 24 | 1,079,849 | 13.21% | 522.49 | 0 | 58.97 | 20 |
+
+The passing repeat used the same non-idle host conditions and workload. Its
+large-profile maximum remained close to the threshold. One run failed and one
+passed; the marginal timing variability remains unattributed, so these runs are
+not a statistically controlled capacity guarantee. See
+[raw repeat results](rewrite/capacity-soak-repeat-2026-10-26.json) for exact
+values and image identity. Controlled profiling on an idle host is the next
+diagnostic step if tighter tail-latency evidence is required.
+
 ## Acquisition soak — 2026-10-16
 
 The updated `make docker-bench` passed all three 900-second profiles. The actual
@@ -68,7 +197,7 @@ Reference slice target budgets:
 | Metadata | Maximum 500 tracks/playlist; bounded total response and field sizes |
 | Session mailbox | 32 commands; reject saturation |
 | Queue | 500 items/session; reject additions exceeding budget |
-| Guilds | Explicit finite configured admission limit; no silent eviction |
+| Guilds | Smaller of configured upper bound and memory-derived admission; 48 MiB reserved per retained guild; no silent eviction |
 | Extraction | Existing configured 1–16 shared process limit |
 | Decoder threads | One FFmpeg decoder/filter/filter-complex thread per attempt |
 | Retry | No retry inside attempt/provider; session policy only |

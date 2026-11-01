@@ -68,6 +68,23 @@ Output. The production runtime now uses this interface and core-owned recovery.
 Real DAVE delivery was exercised by the user-confirmed live playback runs;
 voice reconnect and shutdown during active audio remain external test gates.
 
+## Current protocol compatibility review
+
+The consumed path was checked against Discord's
+[current Voice Gateway documentation](https://docs.discord.com/developers/topics/voice-connections)
+on 2026-10-26. The pinned disgo fork at `7a61d29e5989` selects Voice Gateway v8,
+includes `seq_ack` in v8 heartbeats, advertises its supported DAVE version, and
+handles the DAVE transition messages. Its transport selector prefers
+`aead_aes256_gcm_rtpsize` and supports the required
+`aead_xchacha20_poly1305_rtpsize` fallback. GoBard sends the Speaking opcode
+before returning usable audio output and supplies 48 kHz stereo Opus packets.
+
+This is a source/configuration compatibility check, not a substitute for a live
+handshake. GoBard disables SDK automatic voice reconnect and creates a fresh
+core-owned connection through its finite recovery policy; SDK buffered-resume is
+not part of the consumed recovery path. Real reconnect, current DAVE negotiation,
+and audible delivery still require the authorized live acceptance gates below.
+
 ## Runtime ownership and temporary SDK limitations
 
 `internal/app` composes the source, engine, sessions and Discord runtime.

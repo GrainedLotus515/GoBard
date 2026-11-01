@@ -73,3 +73,13 @@ func TestFrameGapPercentileReportsDistribution(t *testing.T) {
 		t.Fatalf("p99=%d", p99)
 	}
 }
+
+func TestReducedProfileUsesDerivedAdmission(t *testing.T) {
+	profile, err := selectedProfile("reduced")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if profile.guilds != 5 || profile.memoryBytes != 512<<20 {
+		t.Fatalf("profile = %+v, want five guilds under 512 MiB", profile)
+	}
+}

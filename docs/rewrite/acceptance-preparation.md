@@ -24,4 +24,5 @@ The final SDK review must distinguish joins proven by GoBard from undocumented
 third-party behavior. If public SDK APIs cannot establish a guarantee, record
 the precise blocker and containment rather than implement a general Discord
 library here or claim a listening test proves it. The user rejected an exception;
-separate focused SDK fixes must be pinned and verified before strict completion.
+the focused SDK fixes are now pinned and offline-verified. Live DAVE reconnect,
+active-playback shutdown and listening acceptance remain separate final gates.

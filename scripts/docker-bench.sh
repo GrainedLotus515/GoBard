@@ -13,7 +13,7 @@ docker build --target capacity-bench -t gobard-capacity-bench:local .
 docker compose -p "$project" -f "$compose_file" up --detach --force-recreate --no-build
 
 status=0
-for service in bench-small bench-medium bench-large; do
+for service in bench-reduced bench-small bench-medium bench-large; do
 	container=$(docker compose -p "$project" -f "$compose_file" ps --all --quiet "$service")
 	code=$(docker wait "$container")
 	docker logs "$container"

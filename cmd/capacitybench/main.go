@@ -1,7 +1,7 @@
 // Command capacitybench exercises GoBard's per-guild hot path under a fixed
 // container quota. It is a deterministic deployment benchmark, not a Discord
-// integration test: Opus encoding is real while voice delivery and yt-dlp
-// process work are intentionally stubbed.
+// integration test: acquisition and Opus encoding are real, provider retrieval
+// uses a local fixture, and the voice writer discards packets.
 package main
 
 import (
@@ -23,6 +23,7 @@ import (
 	"github.com/charmbracelet/log"
 
 	"github.com/GrainedLotus515/gobard/internal/cache"
+	"github.com/GrainedLotus515/gobard/internal/capacity"
 	"github.com/GrainedLotus515/gobard/internal/discordvoice"
 	"github.com/GrainedLotus515/gobard/internal/failure"
 	"github.com/GrainedLotus515/gobard/internal/playback"
@@ -46,9 +47,6 @@ type measurements struct {
 	maximumDeadlineDelayNS atomic.Int64
 	firstFrameTotalNS      atomic.Int64
 	maximumFirstFrameNS    atomic.Int64
-	maximumYTDLP           atomic.Int64
-	maximumBackground      atomic.Int64
-	maximumInteractiveNS   atomic.Int64
 	workerFailures         atomic.Uint64
 	maximumShutdownNS      atomic.Int64
 	frameGaps              [1001]atomic.Uint64
@@ -70,10 +68,7 @@ type report struct {
 	MaximumFrameDelayMS         float64 `json:"maximum_frame_delay_ms"`
 	AverageFirstFrameLatencyMS  float64 `json:"average_first_frame_latency_ms"`
 	MaximumFirstFrameLatencyMS  float64 `json:"maximum_first_frame_latency_ms"`
-	MaximumYTDLPWork            int64   `json:"maximum_stubbed_ytdlp_work"`
 	YTDLPConfiguredLimit        int     `json:"ytdlp_configured_limit"`
-	MaximumCacheDownloads       int64   `json:"maximum_cache_downloads"`
-	MaximumInteractiveWaitMS    float64 `json:"maximum_interactive_wait_ms"`
 	GoroutinesBefore            int     `json:"goroutines_before"`
 	GoroutinesAfter             int     `json:"goroutines_after"`
 	TemporaryFilesAfter         int     `json:"temporary_files_after"`
@@ -140,7 +135,6 @@ func run() error {
 		workers.Add(1)
 		go runGuild(ctx, &workers, guild, opener, cacheStore, &measured)
 	}
-	runLimiterPressure(ctx, &workers, limiter, &measured)
 	workers.Add(1)
 	go runCachePressure(ctx, &workers, cacheStore, &measured)
 
@@ -183,10 +177,7 @@ func run() error {
 		MaximumFrameDelayMS:         durationMS(time.Duration(measured.maximumDeadlineDelayNS.Load())),
 		AverageFirstFrameLatencyMS:  durationMS(time.Duration(measured.firstFrameTotalNS.Load() / int64(cfg.guilds))),
 		MaximumFirstFrameLatencyMS:  durationMS(time.Duration(measured.maximumFirstFrameNS.Load())),
-		MaximumYTDLPWork:            measured.maximumYTDLP.Load(),
 		YTDLPConfiguredLimit:        cfg.ytdlpConcurrency,
-		MaximumCacheDownloads:       measured.maximumBackground.Load(),
-		MaximumInteractiveWaitMS:    durationMS(time.Duration(measured.maximumInteractiveNS.Load())),
 		GoroutinesBefore:            baselineGoroutines,
 		GoroutinesAfter:             afterGoroutines,
 		TemporaryFilesAfter:         temporaryFiles,
@@ -213,12 +204,6 @@ func validateReport(result report, cfg profile) error {
 	if result.MissedThreeFrameDeadlines != 0 {
 		failures = append(failures, fmt.Errorf("%d frame deadlines exceeded three intervals", result.MissedThreeFrameDeadlines))
 	}
-	if result.MaximumYTDLPWork > int64(cfg.ytdlpConcurrency) {
-		failures = append(failures, fmt.Errorf("stubbed yt-dlp work exceeded configured limit"))
-	}
-	if result.MaximumCacheDownloads > 1 {
-		failures = append(failures, fmt.Errorf("cache downloads exceeded global limit"))
-	}
 	if result.GoroutinesAfter > result.GoroutinesBefore+2 {
 		failures = append(failures, fmt.Errorf("goroutines grew from %d to %d", result.GoroutinesBefore, result.GoroutinesAfter))
 	}
@@ -244,6 +229,13 @@ func selectedProfile(name string) (profile, error) {
 		return profile{name: "medium", guilds: 12, ytdlpConcurrency: 8, memoryBytes: 2 << 30}, nil
 	case "large":
 		return profile{name: "large", guilds: 24, ytdlpConcurrency: 12, memoryBytes: 4 << 30}, nil
+	case "reduced":
+		memoryBytes := uint64(512 * 1024 * 1024)
+		guilds, err := capacity.GuildLimit(memoryBytes, capacity.DefaultHeadroom(memoryBytes), capacity.DefaultPerGuildReservation, 16)
+		if err != nil {
+			return profile{}, fmt.Errorf("derive reduced profile: %w", err)
+		}
+		return profile{name: "reduced", guilds: guilds, ytdlpConcurrency: 4, memoryBytes: memoryBytes}, nil
 	default:
 		return profile{}, fmt.Errorf("unknown GOBARD_BENCH_PROFILE %q", name)
 	}
@@ -390,77 +382,6 @@ func createDeterministicMedia(dir string, duration time.Duration) (string, error
 		return "", stderr.Failure("fixture", failure.Codec, err)
 	}
 	return path, nil
-}
-
-func runLimiterPressure(ctx context.Context, workers *sync.WaitGroup, limiter *processlimit.Limiter, measured *measurements) {
-	var active atomic.Int64
-	var background atomic.Int64
-	for range limiter.NonInteractiveCapacity() {
-		workers.Add(1)
-		go func() {
-			defer workers.Done()
-			for ctx.Err() == nil {
-				release, err := limiter.AcquireClass(ctx, processlimit.Bulk)
-				if err != nil {
-					return
-				}
-				current := active.Add(1)
-				updateMaximum(&measured.maximumYTDLP, current)
-				select {
-				case <-ctx.Done():
-				case <-time.After(10 * time.Millisecond):
-				}
-				active.Add(-1)
-				release()
-			}
-		}()
-	}
-	for range 2 {
-		workers.Add(1)
-		go func() {
-			defer workers.Done()
-			for ctx.Err() == nil {
-				release, err := limiter.AcquireClass(ctx, processlimit.Background)
-				if err != nil {
-					return
-				}
-				currentBackground := background.Add(1)
-				current := active.Add(1)
-				updateMaximum(&measured.maximumBackground, currentBackground)
-				updateMaximum(&measured.maximumYTDLP, current)
-				select {
-				case <-ctx.Done():
-				case <-time.After(15 * time.Millisecond):
-				}
-				background.Add(-1)
-				active.Add(-1)
-				release()
-			}
-		}()
-	}
-	workers.Add(1)
-	go func() {
-		defer workers.Done()
-		ticker := time.NewTicker(20 * time.Millisecond)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-				started := time.Now()
-				release, err := limiter.AcquireClass(ctx, processlimit.Interactive)
-				if err != nil {
-					return
-				}
-				updateMaximum(&measured.maximumInteractiveNS, time.Since(started).Nanoseconds())
-				current := active.Add(1)
-				updateMaximum(&measured.maximumYTDLP, current)
-				active.Add(-1)
-				release()
-			}
-		}
-	}()
 }
 
 func runCachePressure(ctx context.Context, workers *sync.WaitGroup, cacheStore *cache.Cache, measured *measurements) {

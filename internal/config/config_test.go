@@ -22,6 +22,8 @@ var configEnvKeys = []string{
 	"MAX_PLAYLIST_TRACKS",
 	"YTDLP_MAX_CONCURRENCY",
 	"MAX_GUILD_SESSIONS",
+	"PLAYBACK_MEMORY_LIMIT",
+	"PLAYBACK_MEMORY_HEADROOM",
 	"QUEUE_LIMIT",
 	"PLAY_COMMAND_CONCURRENCY",
 	"LOG_FORMAT",
@@ -86,8 +88,26 @@ func TestLoadReadsTokenFileAndAppliesDefaults(t *testing.T) {
 	if cfg.MaxPlaylistTracks != 500 || cfg.YTDLPMaxConcurrency != 4 {
 		t.Fatalf("YouTube defaults = playlist %d concurrency %d", cfg.MaxPlaylistTracks, cfg.YTDLPMaxConcurrency)
 	}
+	if cfg.PlaybackMemoryLimit != 0 || cfg.PlaybackMemoryHeadroom != 0 {
+		t.Fatalf("automatic memory settings = limit %d headroom %d, want zero", cfg.PlaybackMemoryLimit, cfg.PlaybackMemoryHeadroom)
+	}
 	if cfg.HealthListenAddr != "127.0.0.1:8080" {
 		t.Fatalf("HealthListenAddr = %q, want loopback default", cfg.HealthListenAddr)
+	}
+}
+
+func TestLoadAcceptsPlaybackMemoryOverrides(t *testing.T) {
+	cleanConfigEnvironment(t)
+	t.Setenv("DISCORD_TOKEN", "token")
+	t.Setenv("PLAYBACK_MEMORY_LIMIT", "2GB")
+	t.Setenv("PLAYBACK_MEMORY_HEADROOM", "512MB")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.PlaybackMemoryLimit != 2<<30 || cfg.PlaybackMemoryHeadroom != 512<<20 {
+		t.Fatalf("memory settings = limit %d headroom %d", cfg.PlaybackMemoryLimit, cfg.PlaybackMemoryHeadroom)
 	}
 }
 
@@ -109,6 +129,12 @@ func TestLoadRejectsMalformedValues(t *testing.T) {
 		{"too many yt-dlp processes", "YTDLP_MAX_CONCURRENCY", "17"},
 		{"zero guild budget", "MAX_GUILD_SESSIONS", "0"},
 		{"excess guild budget", "MAX_GUILD_SESSIONS", "1025"},
+		{"empty memory limit", "PLAYBACK_MEMORY_LIMIT", ""},
+		{"zero memory limit", "PLAYBACK_MEMORY_LIMIT", "0"},
+		{"malformed memory limit", "PLAYBACK_MEMORY_LIMIT", "lots"},
+		{"empty memory headroom", "PLAYBACK_MEMORY_HEADROOM", ""},
+		{"zero memory headroom", "PLAYBACK_MEMORY_HEADROOM", "0"},
+		{"malformed memory headroom", "PLAYBACK_MEMORY_HEADROOM", "lots"},
 		{"zero queue budget", "QUEUE_LIMIT", "0"},
 		{"excess queue budget", "QUEUE_LIMIT", "501"},
 		{"zero command budget", "PLAY_COMMAND_CONCURRENCY", "0"},

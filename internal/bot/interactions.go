@@ -205,7 +205,7 @@ func runtimeCard(m MappedInteraction, s session.Snapshot, accepted int) (*discor
 		return botui.BuildStatusCard(botui.StatusCardSpec{Title: "Server playback settings", Description: fmt.Sprintf("Volume: **%d%%**\nLower music while people speak: **%s**\nSpeaking volume: **%d%%**", s.Volume, ducking, s.DuckTarget), Color: botui.ColorInfo, Footer: "Settings apply until the bot restarts."}), nil
 	}
 	if m.Name == "stop" {
-		return botui.BuildStatusCard(botui.StatusCardSpec{Title: "Stopping playback", Description: "Clearing the queue and leaving voice. Use `/play` to start again.", Color: botui.ColorInfo}), nil
+		return botui.BuildStatusCard(botui.StatusCardSpec{Title: "Stopping playback", Description: "Clearing the queue and staying in voice. Use `/play` to start again.", Color: botui.ColorInfo}), nil
 	}
 	if m.Name == "disconnect" {
 		return botui.BuildStatusCard(botui.StatusCardSpec{Title: "Leaving voice", Description: "Your queue is saved for this session. Use `/play` to reconnect.", Color: botui.ColorInfo}), nil

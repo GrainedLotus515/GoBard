@@ -1,382 +1,73 @@
-# CI/CD Pipeline - GoBard
+# CI and image publishing
 
-This document describes the continuous integration and continuous deployment (CI/CD) pipeline for GoBard using Gitea Actions.
+GoBard separates source validation from image publication. Gitea runs quality
+checks only. GitHub builds, verifies, signs, and publishes the release image to
+GHCR. Neither workflow deploys or restarts a bot.
 
-## Overview
+## Gitea quality checks
 
-The GoBard project uses Gitea Actions to automatically:
-- Build and test the Go application
-- Run linting and code quality checks
-- Build Docker container images
-- Publish images to the container registry
-- Perform security vulnerability scanning
+`.gitea/workflows/go-test.yml` runs on pushes and pull requests to `main` and
+`develop`:
 
-## Workflows
+- `docker build --target test --progress=plain .` runs the race-enabled Go and
+  Discord SDK tests in the image containing libdave.
+- `make docker-profile-check` validates the small, medium, and large Compose
+  profiles and rejects a missing image.
+- `docker build --target lint --progress=plain .` checks formatting, `go vet`,
+  and the pinned golangci-lint configuration.
 
-### 1. Go Tests and Linting (`go-test.yml`)
+These checks require a Docker-capable runner. They do not use a matrix of Go
+versions, upload coverage, build release binaries, or publish packages.
 
-**Triggers:** Push to `main`/`develop` branches, Pull Requests
+## GitHub verification and publication
 
-**Jobs:**
+`.github/workflows/docker-build.yml` runs on the same branch and pull-request
+events, version tags, and manual dispatch. It repeats tests, lint, and profile
+validation, then runs reachable Go vulnerability analysis with:
 
-#### Test
-- Runs tests on multiple Go versions (1.24, 1.25)
-- Executes with race detection enabled
-- Generates code coverage reports
-- Uploads coverage to Codecov
-
-**Requirements:**
-- Go 1.24+
-- No external dependencies needed for testing
-
-#### Lint
-- Runs `golangci-lint` for code quality checks
-- Verifies code formatting with `go fmt`
-- Runs `go vet` for static analysis
-
-**Failure Conditions:**
-- Test failures on any Go version
-- Lint warnings or errors
-- Code formatting issues
-- Vet issues
-
-#### Build
-- Depends on successful test and lint jobs
-- Compiles the final binary
-- Uploads binary as artifact for 5 days
-
----
-
-### 2. Docker Build and Publish (`docker-build.yml`)
-
-**Triggers:**
-- Push to `main`/`develop` branches
-- Tagged releases (`v*`)
-- Pull Requests (build only, no push)
-
-**Jobs:**
-
-#### Build
-- Sets up Docker Buildx for multi-platform builds
-- Authenticates with Gitea Registry
-- Builds Docker image from Dockerfile
-- Pushes to registry (except for PR)
-- Uses GitHub Actions cache for build layers
-
-**Registry Configuration:**
-- Registry: `git.grainedlotus.com`
-- Image: `grainedlotus515/gobard`
-
-**Image Tags:**
-- `branch-name` - Current branch name
-- `vX.Y.Z` - Semantic versioned releases
-- `latest` - Latest stable release (main branch)
-- `testing` - Test images from any push
-- `<branch>-<commit-sha>` - Commit-specific images
-
-**Example Tags:**
-```
-git.grainedlotus.com/grainedlotus515/gobard:main
-git.grainedlotus.com/grainedlotus515/gobard:v1.0.0
-git.grainedlotus.com/grainedlotus515/gobard:latest
-git.grainedlotus.com/grainedlotus515/gobard:main-a1b2c3d4
-git.grainedlotus.com/grainedlotus515/gobard:testing
+```sh
+docker build --target vulncheck --progress=plain .
 ```
 
-#### Security Scan
-- Runs Trivy vulnerability scanner on filesystem
-- Scans for known vulnerabilities in dependencies
-- Generates SARIF report
-- Uploads results to Gitea Security tab
-- Does not block build on warnings
+The workflow builds one linux/amd64 runtime image and performs all subsequent
+checks on that local image:
 
-**Requires:**
-- `go mod` dependencies to be downloaded
+1. Verify FFmpeg, yt-dlp and its JavaScript runtime, Deno, the executable, and
+   filesystem hardening.
+2. Fail on fixed HIGH or CRITICAL findings reported by Trivy.
+3. Generate and upload an SPDX SBOM.
 
-#### Notify
-- Final status report
-- Shows image locations and tags
-- Indicates security scan results
+Pull requests stop after verification. Publication is restricted to pushes to
+`main` and `v*` tags in `GrainedLotus515/GoBard`. On those events the workflow:
 
----
+1. Confirms that `cosign.pub` matches the configured private signing key without
+   printing secret material.
+2. Pushes the verified image to a run-specific staging tag.
+3. Signs the resulting immutable digest and attaches SBOM and SLSA provenance
+   attestations with Cosign.
+4. Promotes that same digest to commit-SHA, semantic-version, and (on the default
+   branch) `latest` tags, verifying every resolved digest.
 
-## Setup Requirements
+The staging tag transports image blobs; it is not a deployment or release
+channel. Production configuration should pin a verified digest rather than
+follow a mutable tag. GHCR authentication uses the workflow's `GITHUB_TOKEN`.
+Cosign credentials are repository secrets and are not needed for local tests.
 
-### 1. Gitea Actions Runner
+## Local equivalents
 
-Ensure a Gitea Actions runner is configured and running:
+With Go, libdave, FFmpeg, yt-dlp, and their native dependencies installed, the
+Go checks can run directly. Docker is the supported reproducible path:
 
-```bash
-# Check runner status in Gitea UI:
-# Repository → Settings → Actions → Runners
+```sh
+make docker-test
+make docker-lint
+make docker-profile-check
+make docker-build
+make docker-smoke
+docker build --target vulncheck --progress=plain .
 ```
 
-**Requirements for runner:**
-- Docker daemon running and accessible
-- At least 10GB disk space
-- Go 1.25+ installed (optional, for local testing)
-
-### 2. Registry Credentials
-
-Add registry credentials as repository secrets:
-
-**In Gitea UI:**
-1. Go to Repository → Settings → Secrets
-2. Add the following secrets:
-
-- `REGISTRY_USERNAME` - Docker registry username
-- `REGISTRY_PASSWORD` - Docker registry token/password
-
-**For Gitea Container Registry:**
-```bash
-# Generate token in Gitea user settings:
-# User Settings → Security → Access Tokens → Generate New Token
-# Scopes needed: write:package, read:package
-```
-
-### 3. Dockerfile
-
-Ensure `Dockerfile` exists in repository root. The workflow uses it to build images.
-
-**Current Dockerfile location:** `./Dockerfile`
-
----
-
-## Usage
-
-### Automatic Triggers
-
-**Push to main/develop branches:**
-```bash
-git push origin main
-# → Automatically triggers both workflows
-# → Docker image built and tagged with branch name
-```
-
-**Create a release tag:**
-```bash
-git tag v1.0.0
-git push origin v1.0.0
-# → Docker image built and tagged as v1.0.0
-# → All artifacts finalized
-```
-
-**Pull Request:**
-```bash
-# Create pull request to main/develop
-# → Tests run to verify changes
-# → Docker image built (but not pushed)
-# → Linting and code quality checks run
-```
-
-### Manual Workflow Trigger
-
-In Gitea UI:
-1. Go to Repository → Actions
-2. Click workflow name
-3. Click "Run workflow"
-
----
-
-## Pipeline Status Checks
-
-### Required Checks (PR Merge Blocker)
-
-Pull requests require successful completion of:
-- ✅ Go Tests (all versions)
-- ✅ Linting (golangci-lint)
-- ✅ Code formatting (go fmt)
-- ✅ Static analysis (go vet)
-- ✅ Docker build
-
-### Optional Checks (Warning Only)
-
-- ⚠️ Security scan (Trivy)
-- ⚠️ Code coverage thresholds
-
----
-
-## Monitoring and Logs
-
-### View Workflow Runs
-
-In Gitea UI:
-1. Go to Repository → Actions
-2. Click on workflow run
-3. Click on job to expand
-4. View individual step logs
-
-### Common Issues
-
-#### Build Fails with "Docker not found"
-- Ensure Docker daemon is running on runner
-- Check runner configuration in Settings → Actions → Runners
-
-#### Registry Authentication Failed
-- Verify `REGISTRY_USERNAME` and `REGISTRY_PASSWORD` secrets are set
-- Check credentials have appropriate scopes
-- Ensure token is not expired
-
-#### Go Tests Timeout
-- Increase timeout in workflow (default: 5m per job)
-- Check for hanging tests
-- Verify test coverage is not too comprehensive
-
-#### Lint Warnings Block Merge
-- Run `golangci-lint run ./...` locally
-- Fix issues before pushing
-- Update `.golangci.yml` for custom rules
-
----
-
-## Container Image Usage
-
-### Pull Latest Image
-
-```bash
-docker pull git.grainedlotus.com/grainedlotus515/gobard:latest
-```
-
-### Run Container
-
-```bash
-# With environment file
-docker run -d \
-  --name gobard \
-  --env-file .env \
-  git.grainedlotus.com/grainedlotus515/gobard:latest
-
-# Or with individual env vars
-docker run -d \
-  --name gobard \
-  -e DISCORD_TOKEN=your_token \
-  -e YOUTUBE_API_KEY=your_key \
-  git.grainedlotus.com/grainedlotus515/gobard:latest
-```
-
-### Use in Docker Compose
-
-```yaml
-version: '3.8'
-
-services:
-  gobard:
-    image: git.grainedlotus.com/grainedlotus515/gobard:latest
-    container_name: gobard
-    restart: unless-stopped
-    env_file: .env
-    volumes:
-      - ./cache:/app/cache
-```
-
----
-
-## Performance Optimization
-
-### Cache Strategy
-
-The workflows use GitHub Actions cache to speed up builds:
-
-- **Go modules cache**: Cached between runs
-- **Docker layer cache**: Persisted via GitHub Actions cache backend
-- **Build time**: ~2-3 minutes for Docker image
-
-### Parallel Jobs
-
-Jobs run in parallel:
-- Test and Lint jobs run simultaneously
-- Build depends on both completing
-- Security Scan runs after Build
-- Notify runs last
-
-### Optimization Tips
-
-1. **Reduce test scope**: Mark integration tests with `// +build integration`
-2. **Prune dependencies**: Run `go mod tidy` regularly
-3. **Multi-stage Dockerfile**: Reduce final image size
-4. **Cache warming**: Pre-pull base images on runner
-
----
-
-## Security Considerations
-
-### Secrets Management
-
-- Registry credentials stored as encrypted secrets
-- Never commit `.env` files or tokens
-- Rotate tokens regularly (quarterly recommended)
-- Audit secret access in Gitea logs
-
-### Image Scanning
-
-- Trivy scans all build artifacts
-- Results available in Security tab
-- Automatic CVE detection and reporting
-
-### Access Control
-
-Set branch protection rules:
-1. Require all checks to pass
-2. Require pull request review
-3. Require conversation resolution
-
----
-
-## Troubleshooting
-
-### Debug Workflow
-
-Enable debug logging in Gitea Actions:
-1. Set secret: `ACTIONS_STEP_DEBUG=true`
-2. Re-run workflow
-3. View expanded logs in UI
-
-### Local Testing
-
-Run tests locally before pushing:
-
-```bash
-# Run all tests
-go test ./...
-
-# Run with verbose output
-go test -v ./...
-
-# Run linting
-golangci-lint run ./...
-
-# Build Docker image
-docker build -t gobard:test .
-```
-
-### Common Solutions
-
-| Issue | Solution |
-|-------|----------|
-| Tests fail locally but pass in CI | Clear cache: `go clean -modcache` |
-| Docker build takes too long | Check base image size, enable cache |
-| Registry push fails | Verify credentials, check network access |
-| Lint warnings inconsistent | Run locally with `golangci-lint` version from workflow |
-
----
-
-## Next Steps
-
-1. **Set up runner**: Configure Gitea Actions runner
-2. **Add secrets**: Set registry credentials
-3. **Test workflow**: Make a commit to trigger pipeline
-4. **Monitor results**: Check Actions tab for status
-5. **Iterate**: Adjust workflow based on results
-
----
-
-## Resources
-
-- [Gitea Actions Documentation](https://docs.gitea.com/usage/actions/overview)
-- [GitHub Actions Syntax](https://docs.github.com/en/actions/using-workflows/workflow-syntax-for-github-actions)
-- [Docker Build Action](https://github.com/docker/build-push-action)
-- [Trivy Security Scanner](https://github.com/aquasecurity/trivy-action)
-> Historical pre-v2 reference. Commands, dependency explanations and deployment
-> advice below may be obsolete. Use [the current README](../README.md),
-> [deployment contract](deployment.md) and [rewrite evidence](rewrite/status.md).
-
+`make docker-bench` runs offline benchmarks separately from provider and live
+Discord verification. Building or scanning an image locally never publishes it.
+See [deployment](deployment.md) for runtime constraints and
+[rewrite status](rewrite/status.md) for checks actually run on the current tree.

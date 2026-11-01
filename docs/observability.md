@@ -90,7 +90,13 @@ observes outstanding playback (including pause/preparation), metadata reservatio
 and transport work. It is -1 if inspection fails. It is not an admission lock:
 new commands can arrive after a probe. Readiness requires initialized local tools/cache,
 Gateway connection, voice adapter and reconciled commands; it never makes an
-external provider probe a requirement for an idle process.
+external provider probe a requirement for an idle process. Failed registration
+passes keep readiness false and emit `discord.commands` with the scheduled retry
+delay; later bounded reconciliation can restore readiness without a restart.
+
+`capacity.admission` is emitted once at startup with the memory source, limit,
+headroom, per-guild reservation, configured upper bound and effective guild
+limit. It contains no host identifiers or process environment values.
 
 `discord.panel` WARN reports automatic player-edit failures with safe HTTP status,
 failure count, retry delay and whether automatic updates remain enabled. No

@@ -24,20 +24,11 @@ func (c *coordinator) apply(op Operation) error {
 			c.settle(e, playback.Result{Request: e.ticket.request, Outcome: playback.Skipped})
 			c.queue.advance()
 			c.recoveryAttempts = 0
+			c.paused = false
 			c.drained = c.queue.current() == nil
 		}
 	case Stop:
-		c.disconnectVoice()
-		c.generation++
-		c.connected = false
-		if c.active != nil {
-			c.stopAfter = true
-			c.interrupt(playback.Stopped)
-		} else {
-			c.settleAll(playback.Stopped)
-			c.queue.reset()
-			c.paused = false
-		}
+		c.stop()
 	case Disconnect:
 		c.disconnectVoice()
 		c.generation++
@@ -75,6 +66,22 @@ func (c *coordinator) apply(op Operation) error {
 	return nil
 }
 
+func (c *coordinator) stop() {
+	if !c.connected || c.transportCancel != nil || c.retry != nil || c.needDisconnect {
+		c.disconnectVoice()
+		c.connected = false
+	}
+	c.generation++
+	if c.active != nil {
+		c.stopAfter = true
+		c.interrupt(playback.Stopped)
+		return
+	}
+	c.settleAll(playback.Stopped)
+	c.queue.reset()
+	c.paused = false
+}
+
 func (c *coordinator) pause(action Action) error {
 	if c.queue.current() == nil {
 		return errors.New("nothing is playing")
@@ -94,8 +101,14 @@ func (c *coordinator) connect(op Operation) error {
 	if len(op.Channel) > 32 {
 		return errors.New("invalid voice channel")
 	}
+	if c.voice != nil {
+		return errors.New("managed voice requires join")
+	}
 	if c.active != nil {
 		return errors.New("cannot replace active output")
+	}
+	if c.transportCancel != nil || c.needDisconnect || c.retry != nil {
+		return ErrBusy
 	}
 	if op.Output == nil {
 		return errors.New("output required")
@@ -186,14 +199,17 @@ func (c *coordinator) remove(position int) error {
 	if position < 0 || position >= len(c.queue.entries) {
 		return errors.New("invalid queue position")
 	}
-	if position == c.queue.index && c.active != nil {
-		c.interrupt(playback.Removed)
-		return nil
+	if position == c.queue.index {
+		c.paused = false
+		if c.active != nil {
+			c.interrupt(playback.Removed)
+			return nil
+		}
 	}
 	e := &c.queue.entries[position]
 	c.settle(e, playback.Result{Request: e.ticket.request, Outcome: playback.Removed})
 	c.queue.remove(position)
-	if c.queue.index >= len(c.queue.entries) {
+	if c.queue.current() == nil {
 		c.queue.reset()
 		c.drained = true
 	}
