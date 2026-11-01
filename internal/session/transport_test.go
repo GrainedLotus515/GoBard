@@ -84,7 +84,7 @@ func TestObservedVoiceLossRecoversPausedAttempt(t *testing.T) {
 		t.Fatal(err)
 	}
 	<-joined
-	if _, err := s.Add(context.Background(), []Track{{Provider: "fixture", MediaID: "audio"}}); err != nil {
+	if _, err := s.Add(context.Background(), []Track{{Provider: "fixture", MediaID: "audio", Duration: time.Minute}}); err != nil {
 		t.Fatal(err)
 	}
 	select {
@@ -122,7 +122,7 @@ func TestSkipLastTrackCancelsRecoveryAndDisconnects(t *testing.T) {
 	if _, err := s.Join(context.Background(), "voice"); err != nil {
 		t.Fatal(err)
 	}
-	tickets, err := s.Add(context.Background(), []Track{{MediaID: "audio"}})
+	tickets, err := s.Add(context.Background(), []Track{{MediaID: "audio", Duration: time.Minute}})
 	if err != nil {
 		t.Fatal(err)
 	}

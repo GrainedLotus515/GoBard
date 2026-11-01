@@ -18,7 +18,7 @@ import (
 
 func TestCapacityWorkloadUsesRealAudioAndJoins(t *testing.T) {
 	dir := t.TempDir()
-	path, err := createDeterministicMedia(dir, time.Second)
+	path, err := createDeterministicMedia(dir, time.Second, 64)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -45,7 +45,7 @@ func TestCapacityWorkloadUsesRealAudioAndJoins(t *testing.T) {
 	var measured measurements
 	var workers sync.WaitGroup
 	workers.Add(1)
-	go runGuild(ctx, &workers, 0, opener, store, &measured)
+	go runGuild(ctx, &workers, 0, opener, store, &measured, nil)
 	done := make(chan struct{})
 	go func() { workers.Wait(); close(done) }()
 	select {
@@ -71,5 +71,22 @@ func TestFrameGapPercentileReportsDistribution(t *testing.T) {
 	measured.frameGaps[1000].Store(1)
 	if p99 := frameGapPercentile(&measured, 99); p99 != 40 {
 		t.Fatalf("p99=%d", p99)
+	}
+}
+
+func TestReportRejectsUndeliveredGuildsAndStarvedInteractiveWork(t *testing.T) {
+	cfg := profile{guilds: 4, ytdlpConcurrency: 4}
+	r := report{StartedGuilds: 3, Frames: 100, AdmissionMode: "runtime", InteractiveCompletions: 1}
+	if err := validateReport(r, cfg); err == nil {
+		t.Fatal("partial startup passed")
+	}
+	r.StartedGuilds = 4
+	r.InteractiveCompletions = 0
+	if err := validateReport(r, cfg); err == nil {
+		t.Fatal("interactive starvation passed")
+	}
+	r.InteractiveCompletions = 1
+	if err := validateReport(r, cfg); err != nil {
+		t.Fatal(err)
 	}
 }

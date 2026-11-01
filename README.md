@@ -7,9 +7,9 @@ It does not support Spotify, SponsorBlock, YouTube API keys, arbitrary audio URL
 This rewrite branch starts the v2 runtime. Offline playback/race/quality gates
 and real YouTube/Discord audio with source recovery to pipeline completion are
 verified, with a successful listening rerun. Live controls and voice reconnect
-remain test gates. Private SDK lifecycle limitations block strict completion
-until a library fix is verified; the user rejected a temporary exception.
-Listening tests cannot establish strict worker joins.
+remain test gates. The SDK worker-join fixes are now pinned and covered by the
+Docker race suite; live DAVE reconnect and shutdown during encrypted audio
+still require acceptance on the exact candidate.
 See [rewrite status](docs/rewrite/status.md)
 before considering a rollout. No v2 image has been published or deployed to the VPS.
 
@@ -88,6 +88,8 @@ GoBard validates supplied values at startup and exits on invalid configuration. 
 | `MAX_PLAYLIST_TRACKS` | `500` | Integer from 1 to 500. |
 | `YTDLP_MAX_CONCURRENCY` | `4` | Shared integer cap from 1 to 16 for every yt-dlp path: metadata, playlist work, cache downloads, and streaming fallback. |
 | `MAX_GUILD_SESSIONS` | `16` | Retained guild-session limit, 1–1024; increase explicitly for larger deployments. |
+| `MEMORY_BUDGET` | auto | Optional positive byte size (KB/MB/GB); lowers the visible RAM/cgroup budget. |
+| `MAX_ACTIVE_STREAMS` | auto | Optional positive stream cap, no higher than derived memory/extractor capacity. |
 | `QUEUE_LIMIT` | `500` | Maximum tracks per guild, 1–500. |
 | `PLAY_COMMAND_CONCURRENCY` | `4` | Concurrent play operations, 1–16; saturation rejects with a retry-later response. |
 | `LOG_FORMAT` | `json` | Charm JSON or `text` with identical safe event semantics. |
@@ -130,13 +132,13 @@ docker compose -f docker-compose.yml -f docker-compose.large.yml up -d
 
 For a local checkout, use `make docker-run-medium` or `make docker-run-large`. The existing `GOBARD_CPUS`, `GOBARD_MEMORY_LIMIT`, and `GOBARD_PIDS_LIMIT` variables still override a profile. `GOBARD_PROFILE_YTDLP_MAX_CONCURRENCY` and `GOBARD_PROFILE_CACHE_LIMIT` override its media-process and cache defaults.
 
-Resource profiles are workload targets. V2 additionally enforces `MAX_GUILD_SESSIONS` (default 16; the large Compose profile defaults to 32). `GOBARD_PROFILE_MAX_GUILD_SESSIONS` overrides the profile budget. Offline measurements and their limitations are recorded in [docs/performance.md](docs/performance.md).
+Resource profiles are workload targets. `MAX_GUILD_SESSIONS` bounds retained state (default 16; the large Compose profile defaults to 32). Active streams have a separate memory-derived limit, also capped to leave one extractor slot for metadata when possible. `GOBARD_PROFILE_MAX_GUILD_SESSIONS` overrides the retained-session budget. See [runtime admission](docs/deployment.md#runtime-memory-admission) and [measurement limits](docs/performance.md).
 
 ## Commands and access
 
 Commands are guild-only. `/play` accepts a search query or an exact HTTPS YouTube URL (`youtube.com`, `www.youtube.com`, `music.youtube.com`, or `youtu.be`); other URLs are rejected.
 
-`/queue` and `/now-playing` are read-only. Playback controls and queue mutations require the caller to be in the bot’s active voice channel. Changing `/config` requires the `Manage Guild` permission. `/disconnect` intentionally leaves voice while preserving the queue; the next `/play` reconnects and resumes the preserved queue before appending the new request. `/stop` clears the queue and disconnects.
+`/queue` and `/now-playing` are read-only. Playback controls and queue mutations require the caller to be in the bot’s active voice channel. Changing `/config` requires the `Manage Guild` permission. `/disconnect` leaves voice and retains the queue. Finite seekable tracks resume after their last delivered packet on the next `/play`; an interrupted live or unknown-duration track ends and the queue advances. Automatic voice recovery uses the same position policy. `/stop` clears the queue and disconnects.
 
 Available controls include `/play`, `/pause`, `/resume`, `/skip`, `/stop`, `/disconnect`, `/queue`, `/now-playing`, `/clear`, `/shuffle`, `/loop`, `/volume`, `/seek`, `/fseek`, `/move`, `/remove`, and `/config`.
 

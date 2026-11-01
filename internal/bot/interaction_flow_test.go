@@ -89,7 +89,7 @@ func TestInteractionFlowPlayConcurrentControlsAndStop(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	manager, err := session.NewManager(context.Background(), engine, 2, 10, session.Defaults{Volume: 100})
+	manager, err := session.NewManager(context.Background(), engine, 2, 2, 10, session.Defaults{Volume: 100})
 	if err != nil {
 		t.Fatal(err)
 	}

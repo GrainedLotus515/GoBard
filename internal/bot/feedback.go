@@ -31,6 +31,8 @@ func commandFailure(err error) *discordgo.MessageEmbed {
 		title, message = "The queue is full", "Remove some upcoming tracks or wait for the queue to advance, then add your music again."
 	case errors.Is(err, session.ErrGuildLimit):
 		title, message = "No session available", "The bot has reached its server-session limit. Ask the bot operator to review capacity."
+	case errors.Is(err, session.ErrStreamLimit):
+		title, message = "All playback capacity is in use", "Try again after another server finishes playback. The bot operator can review its memory budget."
 	case errors.Is(err, session.ErrSuperseded):
 		title, message = "Request canceled by a newer command", "Playback was stopped or disconnected while this request was being prepared. Use `/play` again if you still want it."
 	case errors.Is(err, context.DeadlineExceeded):
@@ -38,8 +40,7 @@ func commandFailure(err error) *discordgo.MessageEmbed {
 	case errors.Is(err, context.Canceled), errors.Is(err, session.ErrClosed), errors.Is(err, command.ErrClosed):
 		title, message = "Request interrupted", "The session is closing or the request was canceled. Check `/now-playing` before sending it again."
 	default:
-		var f *failure.Error
-		if errors.As(err, &f) {
+		if f := failure.From(err); f != nil {
 			title, message = "Couldn't play this request", failureMessage(f)
 		}
 	}
@@ -123,7 +124,7 @@ func commandReceipt(m MappedInteraction, s session.Snapshot, accepted int) *disc
 	case "stop":
 		title, message = "Stop requested", "Clearing the queue and leaving voice."
 	case "disconnect":
-		title, message = "Disconnect requested", "Leaving voice with your queue retained for this session. Use `/play` to reconnect."
+		title, message = "Disconnect requested", "Leaving voice. Seekable tracks resume where delivery stopped; live or unknown-length tracks end. The remaining queue is kept. Use `/play` to reconnect."
 	case "pause", "resume":
 		if s.Paused {
 			title = "Playback paused"

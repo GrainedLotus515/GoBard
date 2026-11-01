@@ -108,7 +108,7 @@ func runtimeFixture(t *testing.T) *Runtime {
 	if err != nil {
 		t.Fatal(err)
 	}
-	manager, err := session.NewManager(context.Background(), engine, 2, 20, session.Defaults{Volume: 100, DuckTarget: 70})
+	manager, err := session.NewManager(context.Background(), engine, 2, 2, 20, session.Defaults{Volume: 100, DuckTarget: 70})
 	if err != nil {
 		t.Fatal(err)
 	}

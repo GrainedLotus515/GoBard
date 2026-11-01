@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+
+	"github.com/GrainedLotus515/gobard/internal/capacity"
 )
 
 const (
@@ -45,6 +47,7 @@ type Config struct {
 	MaxPlaylistTracks         int
 	YTDLPMaxConcurrency       int
 	MaxGuildSessions          int
+	Capacity                  capacity.Budget
 	QueueLimit                int
 	PlayCommandConcurrency    int
 	LogFormat                 string
@@ -91,6 +94,10 @@ func Load() (*Config, error) {
 		return nil, err
 	}
 	maxGuilds, err := envInt("MAX_GUILD_SESSIONS", 16, 1, 1024)
+	if err != nil {
+		return nil, err
+	}
+	budget, err := loadCapacity(maxGuilds, ytdlpConcurrency)
 	if err != nil {
 		return nil, err
 	}
@@ -159,6 +166,7 @@ func Load() (*Config, error) {
 		MaxPlaylistTracks:         maxPlaylistTracks,
 		YTDLPMaxConcurrency:       ytdlpConcurrency,
 		MaxGuildSessions:          maxGuilds,
+		Capacity:                  budget,
 		QueueLimit:                queueLimit,
 		PlayCommandConcurrency:    playConcurrency,
 		LogFormat:                 logFormat,
@@ -208,6 +216,25 @@ func loadDiscordToken() (token string, tokenFile string, err error) {
 	default:
 		return "", "", fmt.Errorf("exactly one of DISCORD_TOKEN or DISCORD_TOKEN_FILE is required")
 	}
+}
+
+func loadCapacity(guilds, extractors int) (capacity.Budget, error) {
+	var memoryOverride int64
+	var err error
+	if raw, ok := os.LookupEnv("MEMORY_BUDGET"); ok {
+		memoryOverride, err = parseByteSize(raw)
+		if err != nil {
+			return capacity.Budget{}, fmt.Errorf("invalid MEMORY_BUDGET: %w", err)
+		}
+	}
+	var streams int
+	if _, ok := os.LookupEnv("MAX_ACTIVE_STREAMS"); ok {
+		streams, err = envInt("MAX_ACTIVE_STREAMS", 0, 1, 64)
+		if err != nil {
+			return capacity.Budget{}, err
+		}
+	}
+	return capacity.Plan(capacity.Discover(), memoryOverride, streams, guilds, extractors)
 }
 
 func envOrDefault(key, defaultValue string) string {

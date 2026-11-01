@@ -140,17 +140,8 @@ func (p *Player) terminal(a Admission, err error, elapsed time.Duration) {
 		p.logger.Info("Command canceled", append(fields, "outcome", "canceled")...)
 		return
 	}
-	var f *failure.Error
-	if errors.As(err, &f) {
-		// Preserve the provider's more specific diagnosis without logging causes.
-		for {
-			var inner *failure.Error
-			if !errors.As(f.Cause, &inner) {
-				break
-			}
-			f = inner
-		}
-		p.logger.Error("Command failed", append(fields, "outcome", "failed", "stage", f.Stage, "category", f.Category, "reason", f.Reason, "fingerprint", f.Fingerprint, "exit_code", f.ExitCode)...)
+	if f := failure.From(err); f != nil {
+		p.logger.Error("Command failed", append(fields, "outcome", "failed", "stage", f.Stage, "category", f.Category, "reason", f.Reason, "guidance", f.Guidance(), "fingerprint", f.Fingerprint, "exit_code", f.ExitCode)...)
 		return
 	}
 	reason := "invalid_operation"
@@ -163,6 +154,8 @@ func (p *Player) terminal(a Admission, err error, elapsed time.Duration) {
 		reason = "queue_full"
 	case errors.Is(err, session.ErrBusy):
 		reason = "session_busy"
+	case errors.Is(err, session.ErrStreamLimit):
+		reason = "stream_capacity"
 	}
 	p.logger.Info("Command rejected", append(fields, "outcome", "rejected", "reason", reason)...)
 }

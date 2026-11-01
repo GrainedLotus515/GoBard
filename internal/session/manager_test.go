@@ -23,7 +23,7 @@ func TestBusyObservationIncludesPausedWorkAndFailsClosed(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	m, err := NewManager(ctx, engine, 1, 4, Defaults{Volume: 100, DuckTarget: 70})
+	m, err := NewManager(ctx, engine, 1, 1, 4, Defaults{Volume: 100, DuckTarget: 70})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -66,7 +66,7 @@ func TestManagerAdmissionDefaultsAndShutdown(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	m, err := NewManager(context.Background(), engine, 4, 8, Defaults{Volume: 65, Ducking: true, DuckTarget: 25})
+	m, err := NewManager(context.Background(), engine, 4, 4, 8, Defaults{Volume: 65, Ducking: true, DuckTarget: 25})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -109,7 +109,7 @@ func TestManagerConcurrentCreateRemoveClose(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		m, err := NewManager(context.Background(), engine, 2, 8, Defaults{Volume: 100, DuckTarget: 70})
+		m, err := NewManager(context.Background(), engine, 2, 2, 8, Defaults{Volume: 100, DuckTarget: 70})
 		if err != nil {
 			t.Fatal(err)
 		}

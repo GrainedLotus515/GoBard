@@ -98,9 +98,10 @@ func (o *Output) Send(ctx context.Context, packet []byte) error {
 	if err := o.conn.SetWriteDeadline(deadline); err != nil {
 		return failure.Wrap("output", failure.Transport, err)
 	}
-	sentAt := time.Now()
 	n, err := o.conn.Write(packet)
-	o.next = nextPacketDeadline(o.next, sentAt)
+	// Acceptance time includes time blocked in Write. Using its start time
+	// lets a successful slow write leave an already-expired deadline.
+	o.next = nextPacketDeadline(o.next, time.Now())
 	if err != nil {
 		return failure.Wrap("output", failure.Transport, err)
 	}

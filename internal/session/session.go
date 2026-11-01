@@ -75,24 +75,24 @@ type Session struct {
 }
 
 func New(parent context.Context, id string, engine *playback.Engine, output playback.Output, capacity int) (*Session, error) {
-	return newSession(parent, id, engine, output, nil, nil, capacity)
+	return newSession(parent, id, engine, output, nil, nil, nil, capacity)
 }
 
 func NewVoice(parent context.Context, id string, engine *playback.Engine, voice Voice, logger *log.Logger, capacity int) (*Session, error) {
 	if voice == nil || logger == nil {
 		return nil, errors.New("voice and logger required")
 	}
-	return newSession(parent, id, engine, nil, voice, logger, capacity)
+	return newSession(parent, id, engine, nil, voice, logger, nil, capacity)
 }
 
-func newSession(parent context.Context, id string, engine *playback.Engine, output playback.Output, voice Voice, logger *log.Logger, capacity int) (*Session, error) {
+func newSession(parent context.Context, id string, engine *playback.Engine, output playback.Output, voice Voice, logger *log.Logger, slots chan struct{}, capacity int) (*Session, error) {
 	if parent == nil || id == "" || len(id) > 64 || engine == nil || output == nil && voice == nil || capacity < 1 || capacity > MaxQueue {
 		return nil, errors.New("invalid session dependencies or capacity")
 	}
 	// #nosec G118 -- Session.Close owns cancellation; parent also terminates run.
 	ctx, cancel := context.WithCancel(parent)
 	s := &Session{ctx: ctx, cancel: cancel, done: make(chan struct{}), commands: make(chan command, MailboxCapacity), changed: make(chan struct{}, 1)}
-	c := &coordinator{session: s, id: id + "/" + rand.Text(), engine: engine, output: output, connected: output != nil, voice: voice, logger: logger,
+	c := &coordinator{session: s, id: id + "/" + rand.Text(), engine: engine, output: output, connected: output != nil, voice: voice, logger: logger, streamSlots: slots,
 		queue:   queue{entries: make([]entry, 0, capacity), index: -1, capacity: capacity},
 		results: make(chan playback.Result, 1), volume: 100, duckTarget: 70, speakers: make(map[string]bool), reservations: make(map[string]struct{}), transportResults: make(chan transportResult, 1)}
 	go c.run()
@@ -273,14 +273,22 @@ type coordinator struct {
 	retry                 <-chan time.Time
 	dirty                 bool
 	recovery              string
+	streamSlots           chan struct{}
+	streamHeld            bool
 }
 
 func (c *coordinator) run() {
 	defer close(c.session.done)
+	defer c.releaseStream()
 	defer c.closeVoice()
 	c.dirty = true
 	for {
 		c.driveTransport()
+		// Keep the lease through attempt cleanup, pause, seek and recovery.
+		// A retained disconnected queue is cheap state, not an active stream.
+		if c.active == nil && (c.queue.current() == nil || (!c.connected && c.retry == nil && c.transportKind != "recover" && c.transportKind != "connect")) {
+			c.releaseStream()
+		}
 		if c.active == nil && c.connected && c.transportCancel == nil && c.queue.current() != nil && c.session.ctx.Err() == nil {
 			c.start()
 			c.dirty = true
@@ -370,6 +378,9 @@ func (c *coordinator) add(tracks []Track, commandID string) response {
 	if len(c.queue.entries)+len(tracks) > c.queue.capacity {
 		return response{err: ErrFull}
 	}
+	if (c.connected || c.transportKind == "connect" || c.transportKind == "recover") && !c.acquireStream() {
+		return response{err: ErrStreamLimit}
+	}
 	tickets := make([]*Ticket, 0, len(tracks))
 	for _, track := range tracks {
 		c.sequence++
@@ -448,7 +459,20 @@ func (c *coordinator) complete(result playback.Result) {
 			c.scheduleRecovery()
 		}
 		c.connected = false
-		return
+		// Both automatic recovery and a later explicit reconnect must resume
+		// after accepted packets. Unknown-duration/live media cannot be safely
+		// sought; finish that request instead of silently replaying its prefix.
+		if e != nil && !e.track.Live && e.track.Duration > 0 {
+			delivered := timeForFrames(result.Frames)
+			remaining := e.track.Duration - result.Request.Offset
+			if remaining > delivered {
+				e.ticket.request.Offset = result.Request.Offset + delivered
+				return
+			}
+		}
+		// Reaching the declared end is not proof of source completion. Keep
+		// the explicit interruption outcome and advance, even with loop on.
+		result.Outcome = reason
 	case playback.Stopped:
 		c.settleAll(playback.Stopped)
 		c.queue.reset()
