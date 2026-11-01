@@ -9,6 +9,7 @@ Healthy Stop retains voice, established failures survive racing Stop, and finite
 voice recovery resumes after delivered frames. Registration retries and the
 pinned Nix shell are retained. The limiter remains one shared channel; benchmark
 interactive probes measure slot availability without synthetic priority classes.
+Fresh integration checks are recorded in [merge-candidate validation](merge-candidate-2026-11-01.md).
 Historical measurements below apply only to their recorded candidate.
 Live acceptance remains pending and this PR does not authorize deployment.
 
