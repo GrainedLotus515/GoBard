@@ -62,6 +62,10 @@ func (c *coordinator) join(cmd command) {
 		return
 	}
 	c.channel = cmd.joinChannel
+	if c.queue.current() != nil && !c.acquireStream() {
+		cmd.reply <- response{err: ErrStreamLimit}
+		return
+	}
 	c.joinReply = cmd.reply
 	c.recoveryAttempts = 0
 	c.drained = false
@@ -136,7 +140,7 @@ func (c *coordinator) transportComplete(result transportResult) {
 		c.output = nil
 		clear(c.speakers)
 		if result.err != nil {
-			c.logger.Warn("Voice cleanup failed", "event", "voice.cleanup", "session_id", c.id, "category", failure.Transport)
+			c.logVoiceFailure("Voice cleanup failed", "voice.cleanup", result.err, kind)
 		}
 		return
 	}
@@ -155,7 +159,7 @@ func (c *coordinator) transportComplete(result transportResult) {
 			c.joinReply <- response{err: failure.Wrap("voice_join", failure.Transport, result.err)}
 			c.joinReply = nil
 		}
-		c.logger.Warn("Voice connection failed", "event", "voice.connection", "session_id", c.id, "category", failure.Transport, "attempt", c.recoveryAttempts, "recovery", kind)
+		c.logVoiceFailure("Voice connection failed", "voice.connection", result.err, kind)
 		if kind == "recover" {
 			c.scheduleRecovery()
 		} else {
@@ -230,6 +234,11 @@ func (c *coordinator) closeVoice() {
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(c.session.ctx), 3*time.Second)
 	defer cancel()
 	if err := c.voice.Disconnect(ctx); err != nil {
-		c.logger.Warn("Voice shutdown cleanup failed", "event", "voice.cleanup", "session_id", c.id, "category", failure.Transport)
+		c.logVoiceFailure("Voice shutdown cleanup failed", "voice.cleanup", err, "shutdown")
 	}
+}
+
+func (c *coordinator) logVoiceFailure(message, event string, err error, kind string) {
+	f := failure.Wrap("voice", failure.Transport, err)
+	c.logger.Warn(message, "event", event, "session_id", c.id, "request_id", c.last.Request.ID, "attempt_id", c.last.Request.AttemptID, "category", f.Category, "reason", f.Reason, "guidance", f.Guidance(), "fingerprint", f.Fingerprint, "attempt", c.recoveryAttempts, "recovery", kind)
 }

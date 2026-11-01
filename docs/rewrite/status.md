@@ -1,4 +1,19 @@
-# Rewrite status — 2026-10-26
+# Rewrite status — 2026-11-01
+
+## Consolidated merge candidate
+
+The recovery edits and quality-fix branch are integrated on `v2-rewrite`.
+The November 1 active-stream budget supersedes the October 27 retained-guild
+formula; [migration](../deployment.md) documents the rejected pre-release names.
+Healthy Stop retains voice, established failures survive racing Stop, and finite
+voice recovery resumes after delivered frames. Registration retries and the
+pinned Nix shell are retained. The limiter remains one shared channel; benchmark
+interactive probes measure slot availability without synthetic priority classes.
+Historical measurements below apply only to their recorded candidate.
+Live acceptance remains pending and this PR does not authorize deployment.
+
+## Historical October 26–27 audit
+
 
 ## Recovery and verification checkpoint
 
@@ -117,7 +132,32 @@ nix flake check --print-build-logs
 git diff --check
 ```
 
-## Existing-commitment completion work
+## Current offline quality-fix candidate
+
+The independent [review](quality-review-2026-11-01.md) reproduced three defects
+at `25a8161` and identified runtime admission/diagnostic gaps. Its original
+artifacts are copied here unchanged; new execution evidence is separate in
+[quality-fix validation](quality-fixes-2026-11-01.md).
+
+Implementation commit `a2f6bf3` preserves delivered offsets across voice recovery and intentional
+disconnect, prevents bursts after slow successful transport writes, preserves
+specific wrapped metadata classifications, derives active-stream admission from
+memory/extractor capacity, and logs safe actionable reason/guidance fields.
+Finite request/attempt identity and control priorities remain owned by sessions.
+Live/unknown-duration interruptions end that selection instead of replaying it.
+
+This work is offline only. It has not updated or inspected the existing local
+bot, accessed a VPS, changed credentials, published an image, or touched real
+media caches. All local-bot/image claims below are historical observations at
+their recorded checkpoints, not a claim about today's running state.
+
+The missing SDK join API blocker is superseded by `0b15b9e` and its pinned SDK
+regressions. Exact remaining live gates are DAVE reconnect, shutdown during
+active encrypted audio, UI/permissions, 30-minute two-guild listening, and two
+isolated cold plus one warm full NF *HOPE* album passes on the approved candidate.
+Offline fake transport cannot verify audibility. Full acceptance is still open.
+
+## Historical existing-commitment completion work (October 16)
 
 - `de47336`: bounded 8 MiB acquisition, preparation/first-packet deadline,
   attempt-owned canceled/joined workers, early extractor-slot release and one
@@ -174,7 +214,8 @@ seconds of encoded audio. See [evidence and limits](live-2026-10-15.md).
 The diagnostic patch adds safe public track IDs and specific HTTP 403/missing
 format reasons without changing recovery policy. It does **not** establish or
 fix the cause of the two historical startup failures. Streaming reliability
-remains an open issue alongside the strict SDK lifecycle blocker.
+remains an open issue. The SDK join-API blocker present at that checkpoint was
+subsequently addressed by the pinned fixes noted above; live DAVE acceptance remains open.
 
 The diagnostic patch passed `make docker-test` (race suite and five local-test
 helper checks), `make docker-lint` (formatting/vet, zero lint issues), and
@@ -323,9 +364,7 @@ at that historical checkpoint.
 
 The [acceptance checklist](acceptance-checklist.md) consolidates the remaining
 client tests. Live acceptance is not complete until those gates are resolved.
-No automatic VPS rollout or image publication is authorized. New local commits
-also remain blocked by the missing Git identity recorded above.
+No automatic VPS rollout or image publication is authorized.
 
-User changes to `AGENTS.md`, removal of `CLAUDE.md`, and the pre-existing
-untracked `ERROR_4006_ANALYSIS.md` / `PARALLEL_COMMAND_REGISTRATION.md` remain
-untouched and outside rewrite commits.
+The consolidated candidate includes the engineering instructions and historical
+analysis documents; machine-local assistant permissions remain untracked.

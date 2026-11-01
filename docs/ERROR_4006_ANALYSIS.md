@@ -1,5 +1,10 @@
 # Voice Gateway Error 4006 — "Session is no longer valid"
 
+> Historical pre-v2 analysis. Its implementation paths and dependency claims
+> are not the current runtime contract. See [architecture](architecture.md),
+> [Discord adapter](discord-adapter.md), and [rewrite status](rewrite/status.md).
+
+
 ## Summary
 
 When a second `/play` command is issued while a track is already playing, the Discord voice gateway closes the connection with **close code 4006 ("Session is no longer valid")**. This kills audio playback for the current track and prevents the next track from playing until the bot reconnects.

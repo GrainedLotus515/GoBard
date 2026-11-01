@@ -34,10 +34,10 @@ Retain strict token/token-file exclusivity; cache directory/size; default volume
 ducking enabled/target; playlist cap (1–500); extractor concurrency (1–16);
 loopback health address; global versus guild registration; presence status,
 activity type/text/URL; debug settings. `.env.example` and config tests are the
-field-level reference. `MAX_GUILD_SESSIONS` is now an upper bound combined with
-memory-derived admission. Optional `PLAYBACK_MEMORY_LIMIT` and
-`PLAYBACK_MEMORY_HEADROOM` overrides are additive; unset values preserve startup
-while automatically reserving headroom and 48 MiB per retained guild.
+field-level reference. `MAX_GUILD_SESSIONS` bounds retained sessions; active
+streams have separate memory/extractor admission. Optional `MEMORY_BUDGET` and
+`MAX_ACTIVE_STREAMS` can reduce capacity. See [migration](../deployment.md#runtime-memory-admission)
+for the reserve formula and superseded pre-release settings.
 
 ## Historical and uncertain behavior
 

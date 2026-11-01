@@ -1,122 +1,84 @@
 package capacity
 
 import (
-	"errors"
-	"io/fs"
+	"os"
+	"strconv"
 	"testing"
 )
 
-const testMeminfo = "MemTotal:       33554432 kB\nMemFree:        1024 kB\n"
-
-func memoryFixture(t *testing.T, files map[string]string) func(string) ([]byte, error) {
-	t.Helper()
-	return func(name string) ([]byte, error) {
-		if name == "/proc/meminfo" {
-			return []byte(testMeminfo), nil
-		}
-		if data, ok := files[name]; ok {
-			return []byte(data), nil
-		}
-		return nil, fs.ErrNotExist
-	}
-}
-
-func TestDetectMemoryLimitCgroupV2(t *testing.T) {
-	readFile := memoryFixture(t, map[string]string{
-		"/proc/self/cgroup":                     "0::/docker/test\n",
-		"/proc/self/mountinfo":                  "26 23 0:26 / /sys/fs/cgroup rw,relatime - cgroup2 cgroup rw\n",
-		"/sys/fs/cgroup/docker/test/memory.max": "1073741824\n",
-	})
-	limit, err := detectMemoryLimit(readFile)
-	if err != nil || limit.Bytes != 1<<30 || limit.Source != "cgroup-v2" {
-		t.Fatalf("limit = %+v, %v", limit, err)
-	}
-}
-
-func TestDetectMemoryLimitCgroupV1NestedMount(t *testing.T) {
-	readFile := memoryFixture(t, map[string]string{
-		"/proc/self/cgroup":                                "4:cpu,cpuacct:/other\n3:memory:/docker/test\n",
-		"/proc/self/mountinfo":                             "31 23 0:31 /docker /sys/fs/cgroup/memory rw,relatime - cgroup cgroup rw,memory\n",
-		"/sys/fs/cgroup/memory/test/memory.limit_in_bytes": "2147483648\n",
-	})
-	limit, err := detectMemoryLimit(readFile)
-	if err != nil || limit.Bytes != 2<<30 || limit.Source != "cgroup-v1" {
-		t.Fatalf("limit = %+v, %v", limit, err)
-	}
-}
-
-func TestDetectMemoryLimitFallsBackToHost(t *testing.T) {
-	for name, files := range map[string]map[string]string{
-		"no controller": {},
-		"unlimited": {
-			"/proc/self/cgroup":         "0::/\n",
-			"/proc/self/mountinfo":      "26 23 0:26 / /sys/fs/cgroup rw - cgroup2 cgroup rw\n",
-			"/sys/fs/cgroup/memory.max": "max\n",
-		},
-		"v1 sentinel": {
-			"/proc/self/cgroup":                           "3:memory:/\n",
-			"/proc/self/mountinfo":                        "31 23 0:31 / /sys/fs/cgroup/memory rw - cgroup cgroup rw,memory\n",
-			"/sys/fs/cgroup/memory/memory.limit_in_bytes": "9223372036854771712\n",
-		},
+func TestMemoryDiscovery(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		files  map[string]string
+		want   int64
+		source string
+	}{
+		{"missing", nil, FallbackMemory, "fallback"},
+		{"host", map[string]string{"/proc/meminfo": "MemTotal: 2097152 kB\n"}, 2 << 30, "host"},
+		{"container", map[string]string{
+			"/proc/meminfo": "MemTotal: 67108864 kB", "/proc/self/cgroup": "0::/", "/proc/self/mountinfo": "1 2 0:3 /docker/id /sys/fs/cgroup rw - cgroup2 cgroup rw",
+			"/sys/fs/cgroup/memory.max": "1073741824"}, 1 << 30, "cgroup"},
+		{"nested ancestor", map[string]string{
+			"/proc/self/cgroup": "0::/tenant/child", "/proc/self/mountinfo": "1 2 0:3 / /sys/fs/cgroup rw - cgroup2 cgroup rw",
+			"/sys/fs/cgroup/tenant/child/memory.max": "max", "/sys/fs/cgroup/tenant/memory.max": "536870912", "/sys/fs/cgroup/memory.max": "2147483648"}, 512 * MiB, "cgroup"},
+		{"high watermark", map[string]string{
+			"/proc/self/cgroup": "0::/", "/proc/self/mountinfo": "1 2 0:3 / /sys/fs/cgroup rw - cgroup2 cgroup rw",
+			"/sys/fs/cgroup/memory.max": "1073741824", "/sys/fs/cgroup/memory.high": "805306368"}, 768 * MiB, "cgroup"},
+		{"v1 subtree", map[string]string{
+			"/proc/self/cgroup": "4:cpu:/other\n5:memory:/tenant/child", "/proc/self/mountinfo": "1 2 0:3 /tenant /memory rw - cgroup cgroup rw,memory",
+			"/memory/child/memory.limit_in_bytes": "9223372036854771712", "/memory/memory.limit_in_bytes": "1073741824"}, 1 << 30, "cgroup"},
+		{"unlimited", map[string]string{
+			"/proc/meminfo": "MemTotal: 2097152 kB", "/proc/self/cgroup": "0::/", "/proc/self/mountinfo": "1 2 0:3 / /sys/fs/cgroup rw - cgroup2 cgroup rw",
+			"/sys/fs/cgroup/memory.max": "max"}, 2 << 30, "host"},
+		{"malformed", map[string]string{"/proc/meminfo": "MemTotal: 9223372036854775807 kB", "/proc/self/cgroup": "bad", "/proc/self/mountinfo": "bad"}, FallbackMemory, "fallback"},
+		{"zero limit", map[string]string{
+			"/proc/self/cgroup": "0::/", "/proc/self/mountinfo": "1 2 0:3 / /sys/fs/cgroup rw - cgroup2 cgroup rw",
+			"/sys/fs/cgroup/memory.max": "0"}, 1, "cgroup"},
 	} {
-		t.Run(name, func(t *testing.T) {
-			limit, err := detectMemoryLimit(memoryFixture(t, files))
-			if err != nil || limit.Bytes != 33554432*1024 || limit.Source != "host" {
-				t.Fatalf("limit = %+v, %v", limit, err)
+		t.Run(tc.name, func(t *testing.T) {
+			got := discover(func(name string) ([]byte, error) {
+				value, ok := tc.files[name]
+				if !ok {
+					return nil, os.ErrNotExist
+				}
+				return []byte(value), nil
+			})
+			if got.Bytes != tc.want || got.Source != tc.source {
+				t.Fatalf("got %+v", got)
 			}
 		})
 	}
 }
 
-func TestDetectMemoryLimitRejectsInvalidInput(t *testing.T) {
-	readFile := memoryFixture(t, map[string]string{
-		"/proc/self/cgroup":         "0::/\n",
-		"/proc/self/mountinfo":      "26 23 0:26 / /sys/fs/cgroup rw - cgroup2 cgroup rw\n",
-		"/sys/fs/cgroup/memory.max": "zero\n",
-	})
-	if _, err := detectMemoryLimit(readFile); err == nil {
-		t.Fatal("malformed cgroup limit accepted")
-	}
-	if _, err := detectMemoryLimit(func(string) ([]byte, error) { return nil, errors.New("read failed") }); err == nil {
-		t.Fatal("host read failure ignored")
-	}
-}
-
-func TestGuildLimitUsesMemoryAndConfiguredBounds(t *testing.T) {
-	for _, test := range []struct {
-		name       string
-		limit      uint64
-		configured int
-		expected   int
-	}{
-		{"small", 1 << 30, 16, 16},
-		{"medium configured cap", 2 << 30, 16, 16},
-		{"large configured cap", 4 << 30, 32, 32},
-		{"reduced memory", 512 * mib, 16, 5},
-		{"count cap", 4 << 30, 2, 2},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			got, err := GuildLimit(test.limit, DefaultHeadroom(test.limit), DefaultPerGuildReservation, test.configured)
-			if err != nil || got != test.expected {
-				t.Fatalf("limit = %d, %v; want %d", got, err, test.expected)
+func TestCapacityHeadroomAndOverrides(t *testing.T) {
+	for _, tc := range []struct {
+		ram  int64
+		want int
+	}{{512 * MiB, 1}, {1 << 30, 3}, {2 << 30, 3}, {4 << 30, 3}} {
+		t.Run(strconv.FormatInt(tc.ram, 10), func(t *testing.T) {
+			budget, err := Plan(Memory{tc.ram, "cgroup"}, 0, 0, 16, 4)
+			if err != nil || budget.Streams != tc.want || budget.Reserved+int64(budget.Streams)*StreamMemory > tc.ram {
+				t.Fatalf("%+v %v", budget, err)
 			}
 		})
 	}
-}
-
-func TestGuildLimitRejectsInsufficientOrInvalidBudget(t *testing.T) {
-	for _, test := range []struct {
-		limit, headroom, perGuild uint64
-		configured                int
+	for _, tc := range []struct {
+		memory                   Memory
+		override                 int64
+		streams, guilds, workers int
+		valid                    bool
 	}{
-		{256 * mib, 256 * mib, DefaultPerGuildReservation, 16},
-		{1 << 30, 1 << 30, DefaultPerGuildReservation, 16},
-		{1 << 30, 0, 0, 16},
-		{1 << 30, 0, DefaultPerGuildReservation, 0},
-		{1 << 30, 0, DefaultPerGuildReservation, 1025},
+		{Memory{1 << 30, "host"}, 512 * MiB, 1, 16, 4, true},
+		{Memory{1 << 30, "cgroup"}, 2 << 30, 1, 16, 4, false},
+		{Memory{FallbackMemory, "fallback"}, 1 << 30, 2, 16, 4, true},
+		{Memory{256 * MiB, "cgroup"}, 0, 0, 16, 4, false},
+		{Memory{1 << 30, "cgroup"}, 0, 5, 16, 4, false},
+		{Memory{1 << 30, "cgroup"}, 0, 0, 1024, 4, false},
+		{Memory{512 * MiB, "cgroup"}, 0, 0, 16, 16, false},
 	} {
-		if _, err := GuildLimit(test.limit, test.headroom, test.perGuild, test.configured); err == nil {
-			t.Fatalf("accepted invalid budget: %+v", test)
+		_, err := Plan(tc.memory, tc.override, tc.streams, tc.guilds, tc.workers)
+		if (err == nil) != tc.valid {
+			t.Fatalf("%+v: %v", tc, err)
 		}
 	}
 }

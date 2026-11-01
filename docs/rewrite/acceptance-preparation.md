@@ -24,5 +24,10 @@ The final SDK review must distinguish joins proven by GoBard from undocumented
 third-party behavior. If public SDK APIs cannot establish a guarantee, record
 the precise blocker and containment rather than implement a general Discord
 library here or claim a listening test proves it. The user rejected an exception;
-the focused SDK fixes are now pinned and offline-verified. Live DAVE reconnect,
-active-playback shutdown and listening acceptance remain separate final gates.
+separate focused SDK fixes must be pinned and verified before strict completion.
+
+November 1 reconciliation: those fixes are now pinned at `0b15b9e` and covered by
+the Docker dependency race suites. The former absent-API blocker is resolved.
+The quality-fix pass performs offline work only; it does not authorize the helper
+actions described above. Live DAVE reconnect/active shutdown and the client,
+two-guild and album checks in [acceptance](acceptance-checklist.md) remain pending.

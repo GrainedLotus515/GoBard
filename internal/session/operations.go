@@ -113,6 +113,9 @@ func (c *coordinator) connect(op Operation) error {
 	if op.Output == nil {
 		return errors.New("output required")
 	}
+	if c.queue.current() != nil && !c.acquireStream() {
+		return ErrStreamLimit
+	}
 	c.output, c.channel, c.connected = op.Output, op.Channel, true
 	return nil
 }

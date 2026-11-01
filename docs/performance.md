@@ -1,8 +1,20 @@
 # Performance and budgets
 
-## Release-completion capacity — 2026-10-27
+## November 1 review-fix evidence
 
-Production admission now detects the effective cgroup v1/v2 or host memory limit,
+The new [quality-fix report](rewrite/quality-fixes-2026-11-01.md) preserves the
+baseline regressions, short-profile comparisons, a failed long-source stress
+probe and admitted-capacity high-bitrate runs. Runtime admission now uses visible
+memory and extractor capacity; historical 4/12/24-guild fixture counts below are
+stress workloads, not the runtime's admission promise. The benchmark supports
+`GOBARD_BENCH_ADMISSION=runtime`, `GOBARD_BENCH_INPUT_KBPS=256` and
+`GOBARD_BENCH_MEDIA_DURATION=20m` to exercise cold backpressure with a fixture
+larger than the 8 MiB ring. Its default `stress` mode retains fixed profile counts
+for like-for-like historical checks. Both modes use real acquisition/codec/pacing
+and explicitly fake provider/voice endpoints.
+## Historical release-completion capacity — 2026-10-27
+
+The October 27 candidate derived admission from the effective cgroup v1/v2 or host memory limit,
 with an optional `PLAYBACK_MEMORY_LIMIT` operator override. It reserves the
 greater of 256 MiB or 25% of that limit (`PLAYBACK_MEMORY_HEADROOM` can override
 it), then budgets 48 MiB per retained guild. The effective admission limit is the
@@ -62,7 +74,7 @@ not provider, Discord/DAVE, listening-quality or general streams-per-GB proof.
 
 ## Recovery-audit regression — 2026-10-26
 
-The current uncommitted audit tree was measured with the pinned Go 1.27.3
+The October 26 audit tree was measured with the pinned Go 1.27.3
 linux/amd64 toolchain on the same i9-12900K host (24 logical CPUs, 33,388,384,256
 bytes RAM, Linux 6.18.57). Microbenchmarks completed first; the 30-second 4/12/24
 profiles then ran concurrently with their configured quotas. No GoBard bot or
@@ -197,7 +209,7 @@ Reference slice target budgets:
 | Metadata | Maximum 500 tracks/playlist; bounded total response and field sizes |
 | Session mailbox | 32 commands; reject saturation |
 | Queue | 500 items/session; reject additions exceeding budget |
-| Guilds | Smaller of configured upper bound and memory-derived admission; 48 MiB reserved per retained guild; no silent eviction |
+| Guilds | Configured retained-session bound; separate memory/extractor-derived active-stream cap; no silent eviction |
 | Extraction | Existing configured 1–16 shared process limit |
 | Decoder threads | One FFmpeg decoder/filter/filter-complex thread per attempt |
 | Retry | No retry inside attempt/provider; session policy only |

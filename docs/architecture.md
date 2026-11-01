@@ -56,7 +56,10 @@ across open, read and finalization, rather than treating all close errors as
 codec errors. These are ownership/correctness changes, not performance claims.
 
 Metadata now lives in the SDK-independent `internal/media` value type. The
-session manager bounds admitted guilds and joins constructors/removals before
+session manager bounds retained guilds and separately admits active streams
+using the startup memory/extractor budget. Stream slots remain owned through
+attempt cleanup, pause and recovery, then release on drain/disconnect; idle guild
+state does not consume a stream slot. The manager joins constructors/removals before
 shutdown; it never holds its registry mutex across joins or external calls.
 Adapter-owned outputs outlive their sessions and are closed after the manager.
 

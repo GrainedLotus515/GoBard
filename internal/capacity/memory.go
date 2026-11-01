@@ -1,188 +1,169 @@
-// Package capacity discovers memory budgets and derives bounded playback admission.
+// Package capacity derives conservative admission budgets from visible memory
+// limits. It does not predict audibility or replace CPU/provider acceptance.
 package capacity
 
 import (
-	"errors"
 	"fmt"
-	"io/fs"
-	"math"
 	"os"
 	"path"
 	"strconv"
 	"strings"
 )
 
-const (
-	mib = uint64(1024 * 1024)
-	// DefaultPerGuildReservation covers one uncached stream and its bounded
-	// session state. It is rounded above observed concurrent acquisition costs.
-	DefaultPerGuildReservation = 48 * mib
-	defaultMinimumHeadroom     = 256 * mib
-)
+const MiB int64 = 1 << 20
+const FallbackMemory = 512 * MiB
+const StreamMemory = 128 * MiB
 
-type MemoryLimit struct {
-	Bytes  uint64
+type Memory struct {
+	Bytes  int64
 	Source string
 }
 
-func DefaultHeadroom(limit uint64) uint64 {
-	return max(defaultMinimumHeadroom, limit/4)
-}
+func Discover() Memory { return discover(os.ReadFile) }
 
-func GuildLimit(limit, headroom, perGuild uint64, configured int) (int, error) {
-	if configured < 1 || configured > 1024 || perGuild == 0 {
-		return 0, errors.New("invalid playback capacity configuration")
-	}
-	if limit <= headroom || limit-headroom < perGuild {
-		return 0, errors.New("memory budget cannot fund one playback guild")
-	}
-	available := (limit - headroom) / perGuild
-	if available > 1024 {
-		available = 1024
-	}
-	return min(configured, int(available)), nil
-}
-
-func DetectMemoryLimit() (MemoryLimit, error) {
-	return detectMemoryLimit(os.ReadFile)
-}
-
-func detectMemoryLimit(readFile func(string) ([]byte, error)) (MemoryLimit, error) {
-	host, err := readHostMemory(readFile)
-	if err != nil {
-		return MemoryLimit{}, err
-	}
-	cgroupData, err := readFile("/proc/self/cgroup")
-	if err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
-			return MemoryLimit{Bytes: host, Source: "host"}, nil
+// Consider host RAM and every visible ancestor in each memory cgroup mount.
+// A private cgroup namespace may hide ancestors; those require an operator
+// budget. Missing/unlimited cgroups still retain the host RAM ceiling.
+func discover(read func(string) ([]byte, error)) Memory {
+	var result Memory
+	include := func(n int64, source string) {
+		if n > 0 && (result.Bytes == 0 || n < result.Bytes) {
+			result = Memory{n, source}
 		}
-		return MemoryLimit{}, fmt.Errorf("read process cgroup: %w", err)
 	}
-	kind, processPath := cgroupProcessPath(string(cgroupData))
-	if kind == "" {
-		return MemoryLimit{Bytes: host, Source: "host"}, nil
-	}
-	mountData, err := readFile("/proc/self/mountinfo")
-	if err != nil {
-		return MemoryLimit{}, fmt.Errorf("read cgroup mounts: %w", err)
-	}
-	mountPoint, mountRoot, err := cgroupMount(string(mountData), kind)
-	if err != nil {
-		return MemoryLimit{}, err
-	}
-	filename := "memory.max"
-	if kind == "memory" {
-		filename = "memory.limit_in_bytes"
-	}
-	limitPath := path.Join(mountPoint, cgroupRelativePath(mountRoot, processPath), filename)
-	data, err := readFile(limitPath)
-	if err != nil {
-		return MemoryLimit{}, fmt.Errorf("read %s memory limit: %w", kind, err)
-	}
-	limit, finite, err := parseCgroupLimit(string(data))
-	if err != nil {
-		return MemoryLimit{}, fmt.Errorf("parse %s memory limit: %w", kind, err)
-	}
-	if finite && limit < host {
-		source := "cgroup-v2"
-		if kind == "memory" {
-			source = "cgroup-v1"
-		}
-		return MemoryLimit{Bytes: limit, Source: source}, nil
-	}
-	return MemoryLimit{Bytes: host, Source: "host"}, nil
-}
-
-func readHostMemory(readFile func(string) ([]byte, error)) (uint64, error) {
-	data, err := readFile("/proc/meminfo")
-	if err != nil {
-		return 0, fmt.Errorf("read host memory: %w", err)
-	}
-	for line := range strings.Lines(string(data)) {
+	meminfo := optionalRead(read, "/proc/meminfo")
+	for line := range strings.SplitSeq(string(meminfo), "\n") {
 		fields := strings.Fields(line)
-		if len(fields) != 3 || fields[0] != "MemTotal:" || fields[2] != "kB" {
-			continue
-		}
-		value, err := strconv.ParseUint(fields[1], 10, 64)
-		if err != nil || value == 0 || value > math.MaxUint64/1024 {
-			return 0, errors.New("invalid MemTotal")
-		}
-		return value * 1024, nil
-	}
-	return 0, errors.New("MemTotal not found")
-}
-
-func cgroupProcessPath(data string) (string, string) {
-	for line := range strings.Lines(data) {
-		line = strings.TrimSpace(line)
-		parts := strings.Split(line, ":")
-		if len(parts) != 3 || !strings.HasPrefix(parts[2], "/") {
-			continue
-		}
-		if parts[0] == "0" && parts[1] == "" {
-			return "cgroup2", parts[2]
-		}
-		for controller := range strings.SplitSeq(parts[1], ",") {
-			if controller == "memory" {
-				return "memory", parts[2]
+		if len(fields) == 3 && fields[0] == "MemTotal:" && fields[2] == "kB" {
+			n, err := strconv.ParseInt(fields[1], 10, 64)
+			if err == nil && n > 0 && n <= (1<<63-1)/1024 {
+				include(n*1024, "host")
 			}
 		}
 	}
-	return "", ""
+	groups := optionalRead(read, "/proc/self/cgroup")
+	mounts := optionalRead(read, "/proc/self/mountinfo")
+	for line := range strings.SplitSeq(string(mounts), "\n") {
+		scanMount(read, line, string(groups), include)
+	}
+	if result.Bytes == 0 {
+		return Memory{FallbackMemory, "fallback"}
+	}
+	return result
 }
 
-func cgroupMount(data, kind string) (string, string, error) {
-	for line := range strings.Lines(data) {
-		left, right, found := strings.Cut(line, " - ")
-		if !found {
+func optionalRead(read func(string) ([]byte, error), name string) []byte {
+	data, err := read(name)
+	if err != nil {
+		return nil
+	}
+	return data
+}
+
+func scanMount(read func(string) ([]byte, error), line, groups string, include func(int64, string)) {
+	parts := strings.Split(line, " - ")
+	if len(parts) != 2 {
+		return
+	}
+	left, right := strings.Fields(parts[0]), strings.Fields(parts[1])
+	if len(left) < 5 || len(right) < 3 {
+		return
+	}
+	v2 := right[0] == "cgroup2"
+	if !v2 && (right[0] != "cgroup" || !hasField(right[2], "memory")) {
+		return
+	}
+	root, mount := unescape(left[3]), unescape(left[4])
+	for group := range strings.SplitSeq(groups, "\n") {
+		fields := strings.SplitN(group, ":", 3)
+		if len(fields) != 3 || (v2 && fields[1] != "") || (!v2 && !hasField(fields[1], "memory")) {
 			continue
 		}
-		rightFields := strings.Fields(right)
-		leftFields := strings.Fields(left)
-		if len(rightFields) < 3 || len(leftFields) < 5 {
+		member := path.Clean(fields[2])
+		var relative string
+		switch {
+		case member == "/": // namespace root corresponds to the mount root
+		case member == root:
+		case root == "/":
+			relative = strings.TrimPrefix(member, "/")
+		case strings.HasPrefix(member, root+"/"):
+			relative = strings.TrimPrefix(member, root+"/")
+		default:
 			continue
 		}
-		matches := kind == "cgroup2" && rightFields[0] == "cgroup2"
-		if kind == "memory" && rightFields[0] == "cgroup" {
-			for _, field := range append(leftFields[5:], rightFields[2:]...) {
-				for option := range strings.SplitSeq(field, ",") {
-					if option == "memory" {
-						matches = true
-					}
-				}
+		files := []string{"memory.limit_in_bytes"}
+		if v2 {
+			files = []string{"memory.max", "memory.high"}
+		}
+		scanAncestors(read, mount, relative, files, include)
+	}
+}
+
+func scanAncestors(read func(string) ([]byte, error), mount, relative string, files []string, include func(int64, string)) {
+	for dir := path.Join(mount, relative); ; dir = path.Dir(dir) {
+		for _, file := range files {
+			data, err := read(path.Join(dir, file))
+			if err != nil {
+				continue
+			}
+			n, err := strconv.ParseInt(strings.TrimSpace(string(data)), 10, 64)
+			// v1 uses a near-MaxInt64 sentinel for unlimited.
+			if err == nil && n >= 0 && n < 1<<60 {
+				include(max(n, 1), "cgroup")
 			}
 		}
-		if matches {
-			return leftFields[4], leftFields[3], nil
+		if dir == mount || dir == "/" {
+			break
 		}
 	}
-	return "", "", fmt.Errorf("%s memory cgroup mount not found", kind)
 }
 
-func cgroupRelativePath(root, processPath string) string {
-	if root != "/" {
-		if processPath == root {
-			return "/"
-		}
-		if relative, found := strings.CutPrefix(processPath, root+"/"); found {
-			return "/" + relative
+func hasField(list, value string) bool {
+	for field := range strings.SplitSeq(list, ",") {
+		if field == value {
+			return true
 		}
 	}
-	return processPath
+	return false
+}
+func unescape(value string) string {
+	return strings.NewReplacer(`\040`, " ", `\011`, "\t", `\012`, "\n", `\134`, `\`).Replace(value)
 }
 
-func parseCgroupLimit(data string) (uint64, bool, error) {
-	value := strings.TrimSpace(data)
-	if value == "max" {
-		return 0, false, nil
+type Budget struct {
+	Memory   Memory
+	Reserved int64
+	Streams  int
+}
+
+// Plan reserves heap/native/cache headroom, bounded metadata workers and
+// retained guild state before assigning conservative per-stream allowances.
+// Explicit values may reduce the detected budget, never overcommit it.
+func Plan(memory Memory, override int64, streams, guilds, extractors int) (Budget, error) {
+	if memory.Bytes <= 0 || override < 0 || streams < 0 || streams > 64 || guilds < 1 || guilds > 1024 || extractors < 1 || extractors > 16 {
+		return Budget{}, fmt.Errorf("invalid capacity settings")
 	}
-	limit, err := strconv.ParseUint(value, 10, 64)
-	if err != nil || limit == 0 {
-		return 0, false, errors.New("expected a positive byte limit or max")
+	if override > 0 {
+		if memory.Source != "fallback" && override > memory.Bytes {
+			return Budget{}, fmt.Errorf("MEMORY_BUDGET exceeds visible memory limit")
+		}
+		memory = Memory{override, "operator"}
 	}
-	if limit >= 1<<60 {
-		return 0, false, nil
+	// Four MiB per retained guild covers 500 maximum-sized Track values,
+	// tickets, queue snapshots and bounded Discord state with allocator slack.
+	reserved := max(192*MiB, memory.Bytes/4) + int64(extractors)*32*MiB + int64(guilds)*4*MiB
+	available := (memory.Bytes - reserved) / StreamMemory
+	if memory.Bytes < reserved+StreamMemory {
+		return Budget{}, fmt.Errorf("memory budget cannot safely admit one stream; reduce retained sessions or extractor concurrency, or increase the container memory limit")
 	}
-	return limit, true, nil
+	// A long cold source can hold its extractor slot until near playback end.
+	// Keep one slot for metadata when possible; warm fixtures alone hide this.
+	limit := int(min(available, 64, int64(guilds), int64(max(1, extractors-1))))
+	if streams > limit {
+		return Budget{}, fmt.Errorf("MAX_ACTIVE_STREAMS exceeds memory/extractor-derived capacity of %d", limit)
+	}
+	if streams > 0 {
+		limit = streams
+	}
+	return Budget{memory, reserved, limit}, nil
 }

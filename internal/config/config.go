@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+
+	"github.com/GrainedLotus515/gobard/internal/capacity"
 )
 
 const (
@@ -45,8 +47,7 @@ type Config struct {
 	MaxPlaylistTracks         int
 	YTDLPMaxConcurrency       int
 	MaxGuildSessions          int
-	PlaybackMemoryLimit       uint64
-	PlaybackMemoryHeadroom    uint64
+	Capacity                  capacity.Budget
 	QueueLimit                int
 	PlayCommandConcurrency    int
 	LogFormat                 string
@@ -96,11 +97,7 @@ func Load() (*Config, error) {
 	if err != nil {
 		return nil, err
 	}
-	memoryLimit, err := optionalByteSize("PLAYBACK_MEMORY_LIMIT")
-	if err != nil {
-		return nil, err
-	}
-	memoryHeadroom, err := optionalByteSize("PLAYBACK_MEMORY_HEADROOM")
+	budget, err := loadCapacity(maxGuilds, ytdlpConcurrency)
 	if err != nil {
 		return nil, err
 	}
@@ -169,8 +166,7 @@ func Load() (*Config, error) {
 		MaxPlaylistTracks:         maxPlaylistTracks,
 		YTDLPMaxConcurrency:       ytdlpConcurrency,
 		MaxGuildSessions:          maxGuilds,
-		PlaybackMemoryLimit:       memoryLimit,
-		PlaybackMemoryHeadroom:    memoryHeadroom,
+		Capacity:                  budget,
 		QueueLimit:                queueLimit,
 		PlayCommandConcurrency:    playConcurrency,
 		LogFormat:                 logFormat,
@@ -220,6 +216,30 @@ func loadDiscordToken() (token string, tokenFile string, err error) {
 	default:
 		return "", "", fmt.Errorf("exactly one of DISCORD_TOKEN or DISCORD_TOKEN_FILE is required")
 	}
+}
+
+func loadCapacity(guilds, extractors int) (capacity.Budget, error) {
+	for _, name := range []string{"PLAYBACK_MEMORY_LIMIT", "PLAYBACK_MEMORY_HEADROOM"} {
+		if _, present := os.LookupEnv(name); present {
+			return capacity.Budget{}, fmt.Errorf("%s was replaced by MEMORY_BUDGET and MAX_ACTIVE_STREAMS; remove the old setting and review runtime memory admission", name)
+		}
+	}
+	var memoryOverride int64
+	var err error
+	if raw, ok := os.LookupEnv("MEMORY_BUDGET"); ok {
+		memoryOverride, err = parseByteSize(raw)
+		if err != nil {
+			return capacity.Budget{}, fmt.Errorf("invalid MEMORY_BUDGET: %w", err)
+		}
+	}
+	var streams int
+	if _, ok := os.LookupEnv("MAX_ACTIVE_STREAMS"); ok {
+		streams, err = envInt("MAX_ACTIVE_STREAMS", 0, 1, 64)
+		if err != nil {
+			return capacity.Budget{}, err
+		}
+	}
+	return capacity.Plan(capacity.Discover(), memoryOverride, streams, guilds, extractors)
 }
 
 func envOrDefault(key, defaultValue string) string {
@@ -296,19 +316,6 @@ func parseListenAddr(raw string) (string, error) {
 		return "", fmt.Errorf("port must be between 1 and 65535")
 	}
 	return addr, nil
-}
-
-func optionalByteSize(name string) (uint64, error) {
-	raw, present := os.LookupEnv(name)
-	if !present {
-		return 0, nil
-	}
-	value, err := parseByteSize(raw)
-	if err != nil {
-		return 0, fmt.Errorf("invalid %s: %w", name, err)
-	}
-	// #nosec G115 -- parseByteSize returns only positive int64 values.
-	return uint64(value), nil
 }
 
 // parseByteSize accepts positive base-2 KB, MB, and GB values. It deliberately

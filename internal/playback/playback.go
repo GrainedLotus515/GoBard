@@ -214,8 +214,7 @@ func failedOutcome(category failure.Category) Outcome {
 }
 
 func classify(stage string, category failure.Category, err error) *failure.Error {
-	var classified *failure.Error
-	if errors.As(err, &classified) {
+	if classified := failure.From(err); classified != nil {
 		return classified
 	}
 	return failure.Wrap(stage, category, err)
@@ -230,7 +229,7 @@ func (e *Engine) terminal(r Result) {
 		fields = append(fields, "track_id", r.Request.TrackID)
 	}
 	if r.Failure != nil {
-		fields = append(fields, "stage", r.Failure.Stage, "category", r.Failure.Category, "reason", r.Failure.Reason, "fingerprint", r.Failure.Fingerprint, "exit_code", r.Failure.ExitCode)
+		fields = append(fields, "stage", r.Failure.Stage, "category", r.Failure.Category, "reason", r.Failure.Reason, "guidance", r.Failure.Guidance(), "fingerprint", r.Failure.Fingerprint, "exit_code", r.Failure.ExitCode)
 		e.logger.Error("Playback failed", fields...)
 		return
 	}

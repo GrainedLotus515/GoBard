@@ -37,15 +37,19 @@ type Manager struct {
 	stopping                 bool
 	work                     sync.WaitGroup
 	closeOnce                sync.Once
+	streamSlots              chan struct{}
 }
 
-func NewManager(parent context.Context, engine *playback.Engine, maxGuilds, queueCapacity int, defaults Defaults) (*Manager, error) {
+func NewManager(parent context.Context, engine *playback.Engine, maxGuilds, maxStreams, queueCapacity int, defaults Defaults) (*Manager, error) {
+	if maxStreams < 1 || maxStreams > 64 || maxStreams > maxGuilds {
+		return nil, errors.New("invalid active stream capacity")
+	}
 	if parent == nil || engine == nil || maxGuilds < 1 || maxGuilds > 1024 || queueCapacity < 1 || queueCapacity > MaxQueue || defaults.Volume < 0 || defaults.Volume > 100 || defaults.DuckTarget < 0 || defaults.DuckTarget > 100 {
 		return nil, errors.New("invalid session manager configuration")
 	}
 	// #nosec G118 -- Manager.Close cancels and joins every admitted session.
 	ctx, cancel := context.WithCancel(parent)
-	return &Manager{ctx: ctx, cancel: cancel, engine: engine, defaults: defaults, maxGuilds: maxGuilds, queueCapacity: queueCapacity, entries: make(map[string]*managedSession)}, nil
+	return &Manager{ctx: ctx, cancel: cancel, engine: engine, defaults: defaults, maxGuilds: maxGuilds, queueCapacity: queueCapacity, entries: make(map[string]*managedSession), streamSlots: make(chan struct{}, maxStreams)}, nil
 }
 
 // Create admits a new guild. A rejected output remains caller-owned. Concurrent
@@ -55,14 +59,18 @@ func (m *Manager) Create(guild string, output playback.Output) (*Session, error)
 	if guild == "" || len(guild) > 64 || output == nil {
 		return nil, errors.New("guild and output required")
 	}
-	return m.create(guild, func() (*Session, error) { return New(m.ctx, guild, m.engine, output, m.queueCapacity) })
+	return m.create(guild, func() (*Session, error) {
+		return newSession(m.ctx, guild, m.engine, output, nil, nil, m.streamSlots, m.queueCapacity)
+	})
 }
 
 func (m *Manager) CreateVoice(guild string, voice Voice, logger *log.Logger) (*Session, error) {
 	if guild == "" || len(guild) > 64 || voice == nil || logger == nil {
 		return nil, errors.New("guild, voice and logger required")
 	}
-	return m.create(guild, func() (*Session, error) { return NewVoice(m.ctx, guild, m.engine, voice, logger, m.queueCapacity) })
+	return m.create(guild, func() (*Session, error) {
+		return newSession(m.ctx, guild, m.engine, nil, voice, logger, m.streamSlots, m.queueCapacity)
+	})
 }
 
 func (m *Manager) create(guild string, construct func() (*Session, error)) (*Session, error) {

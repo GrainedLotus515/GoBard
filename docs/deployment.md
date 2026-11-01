@@ -35,15 +35,65 @@ Settings are still process/guild-memory settings, not newly persisted state.
 
 New strict variables: `MAX_GUILD_SESSIONS=16` (1–1024), `QUEUE_LIMIT=500`
 (1–500), `PLAY_COMMAND_CONCURRENCY=4` (1–16), `LOG_FORMAT=json` (`json`/`text`).
-`PLAYBACK_MEMORY_LIMIT` and `PLAYBACK_MEMORY_HEADROOM` are optional positive
-KB/MB/GB overrides; unset values detect the cgroup/host limit and reserve the
-greater of 256 MiB or 25%. Each retained guild reserves 48 MiB, including while
-idle or disconnected, and `MAX_GUILD_SESSIONS` remains only an upper bound. The
-smaller derived/configured limit is logged at startup as `capacity.admission`.
-Insufficient budgets fail startup; saturation rejects new guilds without evicting
-existing sessions. Restart after changing container memory or these overrides.
+The pre-release `PLAYBACK_MEMORY_LIMIT` and `PLAYBACK_MEMORY_HEADROOM` settings
+are superseded by `MEMORY_BUDGET` and `MAX_ACTIVE_STREAMS` below. Startup rejects
+the old names rather than silently ignoring an operator's limit. Remove them,
+review the new reserve formula, and set a smaller memory/stream budget if needed.
+There is no direct headroom override; retained sessions and active streams are
+budgeted separately. Restart after changing container memory or these settings.
 `DEBUG_PLAYBACK` remains validated for deployment compatibility but has no
 separate logger in v2.
+
+## Runtime memory admission
+
+At startup, GoBard takes the smallest visible host RAM, cgroup v2 `memory.max`
+or `memory.high`, or v1 `memory.limit_in_bytes`, walking visible ancestor limits.
+Unlimited values do not override a smaller limit. If no usable limit is visible,
+the fallback is 512 MiB. Hidden ancestor quotas cannot be discovered through a
+private cgroup namespace; set a smaller `MEMORY_BUDGET` when needed. Detection is
+a startup snapshot: recreate after quota/config changes. This is an admission
+policy, not a dynamic OOM prevention guarantee or a Go heap limit.
+
+The reserved budget is `max(192 MiB, RAM/4) + 32 MiB × extractor concurrency +
+4 MiB × retained guild limit`. The base covers Go/native/global cache and tmpfs
+headroom; worker space covers metadata/extractor work. The guild allowance covers
+500 bounded metadata entries, tickets, snapshots and adapter state. Each active
+stream then receives a conservative 128 MiB allowance for acquisition, FFmpeg,
+libopus/DAVE, extractor and allocator overhead. These are planning allowances,
+not measured exact costs. The review's short local fixtures measured roughly
+12–19 MiB anonymous memory per guild; those omit real provider/DAVE overhead and
+full-ring pressure, so they cannot justify a streams-per-GB promise.
+
+The final cap is the minimum of available stream allowances, retained guilds,
+64, and `max(1, YTDLP_MAX_CONCURRENCY - 1)`. A long cold source can retain an
+extractor slot until near its end, so short fixtures do not justify admitting
+more cold streams than extractor capacity. With concurrency 1, metadata may wait
+behind the sole stream. Defaults at 512 MiB/1 GiB admit 1/3 streams respectively;
+the normal medium/large extractor settings admit at most 7/11. CPU, provider and
+live listening still need independent validation.
+
+Optional `MEMORY_BUDGET` accepts the same positive byte syntax as `CACHE_LIMIT`;
+it cannot exceed a detected limit (it may replace the unavailable-limit fallback).
+Optional `MAX_ACTIVE_STREAMS` must be a positive integer no larger than the
+derived cap. Empty, zero, over-budget or insufficient-memory settings fail
+startup with an actionable error. Existing `MAX_GUILD_SESSIONS` keeps its meaning;
+it does not grant the same number of concurrent streams. Raising retained state
+also consumes headroom. The `capacity.configured` event records the chosen budget.
+
+Queue admission rejects excess active streams atomically with private feedback.
+Existing admitted queues retain their slot through pause, seek and bounded
+recovery; stop, completed drain, intentional disconnect and exhausted recovery
+release only after the attempt joins. Reconnecting a retained queue reacquires
+capacity. Idle retained sessions consume no stream slot. The configured disk
+`CACHE_LIMIT` is not an in-memory allocation; cgroup file-cache charges and other
+processes remain operational uncertainties.
+
+Failure logs retain correlation IDs, category, bounded fingerprint/exit code,
+allowlisted OS/network/codec reason and fixed operator `guidance`. Contextual
+wrapping preserves the originating classification for both logs and Discord
+feedback. Unknown diagnostics give stage-specific investigation guidance;
+arbitrary stderr, URLs, cookies, credentials and metadata are never copied into
+those fields. A fingerprint groups failures but cannot reconstruct their cause.
 
 Local live tests use a separately named container and a dedicated named volume.
 The stopped local `gobard-temp` container is retained; the VPS remains stopped

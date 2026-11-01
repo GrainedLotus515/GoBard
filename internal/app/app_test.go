@@ -10,6 +10,7 @@ import (
 
 	"github.com/charmbracelet/log"
 
+	"github.com/GrainedLotus515/gobard/internal/capacity"
 	"github.com/GrainedLotus515/gobard/internal/config"
 )
 
@@ -40,7 +41,7 @@ func TestNewAppliesMemoryDerivedAdmission(t *testing.T) {
 		MaxPlaylistTracks:         1,
 		YTDLPMaxConcurrency:       1,
 		MaxGuildSessions:          16,
-		PlaybackMemoryLimit:       512 << 20,
+		Capacity:                  capacity.Budget{Memory: capacity.Memory{Bytes: 512 << 20, Source: "operator"}, Reserved: 288 << 20, Streams: 1},
 		QueueLimit:                1,
 		PlayCommandConcurrency:    1,
 		HealthListenAddr:          "127.0.0.1:8080",
@@ -55,14 +56,14 @@ func TestNewAppliesMemoryDerivedAdmission(t *testing.T) {
 	if err := json.Unmarshal(output.Bytes(), &event); err != nil {
 		t.Fatalf("decode capacity log %q: %v", output.String(), err)
 	}
-	if event["event"] != "capacity.admission" || event["memory_source"] != "operator" || event["effective_guild_limit"] != float64(5) {
+	if event["event"] != "capacity.configured" || event["memory_source"] != "operator" || event["active_streams"] != float64(1) || event["retained_sessions"] != float64(16) {
 		t.Fatalf("capacity event = %#v", event)
 	}
 }
 
-func TestNewRejectsUnfundableMemoryBudget(t *testing.T) {
+func TestNewRejectsMissingStreamBudget(t *testing.T) {
 	stubRuntimeTools(t)
-	cfg := &config.Config{PlaybackMemoryLimit: 256 << 20, MaxGuildSessions: 16}
+	cfg := &config.Config{MaxGuildSessions: 16}
 	application, err := New(context.Background(), cfg, log.New(&bytes.Buffer{}))
 	if err == nil || application != nil {
 		t.Fatal("unfundable memory budget was accepted")

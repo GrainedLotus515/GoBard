@@ -37,6 +37,7 @@
           deno
           ffmpeg
           gcc
+          gnumake
           go_1_27
           libogg
           libopus

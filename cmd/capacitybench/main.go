@@ -43,10 +43,13 @@ type profile struct {
 
 type measurements struct {
 	frames                 atomic.Uint64
+	startedGuilds          atomic.Int64
 	missedDeadlines        atomic.Uint64
 	maximumDeadlineDelayNS atomic.Int64
 	firstFrameTotalNS      atomic.Int64
 	maximumFirstFrameNS    atomic.Int64
+	maximumInteractiveNS   atomic.Int64
+	interactiveCompletions atomic.Int64
 	workerFailures         atomic.Uint64
 	maximumShutdownNS      atomic.Int64
 	frameGaps              [1001]atomic.Uint64
@@ -54,6 +57,10 @@ type measurements struct {
 
 type report struct {
 	AcquisitionWorkload         string  `json:"acquisition_workload"`
+	AdmissionMode               string  `json:"admission_mode"`
+	RuntimeStreamLimit          int     `json:"runtime_stream_limit"`
+	FixtureBytes                int64   `json:"fixture_bytes"`
+	StartedGuilds               int64   `json:"started_guilds"`
 	Profile                     string  `json:"profile"`
 	DurationSeconds             float64 `json:"duration_seconds"`
 	SimultaneousGuilds          int     `json:"simultaneous_guilds"`
@@ -69,6 +76,8 @@ type report struct {
 	AverageFirstFrameLatencyMS  float64 `json:"average_first_frame_latency_ms"`
 	MaximumFirstFrameLatencyMS  float64 `json:"maximum_first_frame_latency_ms"`
 	YTDLPConfiguredLimit        int     `json:"ytdlp_configured_limit"`
+	MaximumInteractiveWaitMS    float64 `json:"maximum_interactive_wait_ms"`
+	InteractiveCompletions      int64   `json:"interactive_completions"`
 	GoroutinesBefore            int     `json:"goroutines_before"`
 	GoroutinesAfter             int     `json:"goroutines_after"`
 	TemporaryFilesAfter         int     `json:"temporary_files_after"`
@@ -109,9 +118,24 @@ func run() error {
 	if err := seedCache(cacheStore); err != nil {
 		return err
 	}
-	mediaPath, err := createDeterministicMedia(tempDir, duration+time.Second)
+	bitrate, mediaDuration, err := fixtureSettings(duration)
 	if err != nil {
 		return err
+	}
+	mediaPath, err := createDeterministicMedia(tempDir, mediaDuration, bitrate)
+	if err != nil {
+		return err
+	}
+	fixture, err := os.Stat(mediaPath)
+	if err != nil {
+		return err
+	}
+	mode, budget, err := benchmarkAdmission(cfg)
+	if err != nil {
+		return err
+	}
+	if mode == "runtime" {
+		cfg.guilds = budget.Streams
 	}
 
 	if err := os.Setenv("GOBARD_BENCH_MEDIA", mediaPath); err != nil {
@@ -130,16 +154,33 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	var manager *session.Manager
+	if mode == "runtime" {
+		engine, err := playback.New(opener, log.New(io.Discard))
+		if err != nil {
+			return err
+		}
+		manager, err = session.NewManager(ctx, engine, max(16, cfg.guilds), budget.Streams, 8, session.Defaults{Volume: 100})
+		if err != nil {
+			return err
+		}
+		defer manager.Close()
+	}
 	var workers sync.WaitGroup
 	for guild := range cfg.guilds {
 		workers.Add(1)
-		go runGuild(ctx, &workers, guild, opener, cacheStore, &measured)
+		go runGuild(ctx, &workers, guild, opener, cacheStore, &measured, manager)
 	}
 	workers.Add(1)
 	go runCachePressure(ctx, &workers, cacheStore, &measured)
+	workers.Add(1)
+	go runInteractiveProbe(ctx, &workers, limiter, &measured)
 
 	startedAt := time.Now()
 	workers.Wait()
+	if manager != nil {
+		manager.Close()
+	}
 	elapsed := time.Since(startedAt)
 	endCPU, _ := readCPUUsage()
 	memory := <-peakMemory
@@ -162,7 +203,8 @@ func run() error {
 
 	frames := measured.frames.Load()
 	result := report{
-		AcquisitionWorkload:         "offline extractor -> 8 MiB ring -> FFmpeg -> 128 kbit/s Opus -> paced fake voice; 64 kbit/s input",
+		AcquisitionWorkload: fmt.Sprintf("offline extractor -> 8 MiB ring -> FFmpeg -> 128 kbit/s Opus -> paced fake voice; %d kbit/s input", bitrate),
+		AdmissionMode:       mode, RuntimeStreamLimit: budget.Streams, FixtureBytes: fixture.Size(), StartedGuilds: measured.startedGuilds.Load(),
 		Profile:                     cfg.name,
 		DurationSeconds:             elapsed.Seconds(),
 		SimultaneousGuilds:          cfg.guilds,
@@ -175,9 +217,11 @@ func run() error {
 		PeakMemoryPercentOfLimit:    percent(float64(memory.total), float64(cfg.memoryBytes)),
 		MissedThreeFrameDeadlines:   measured.missedDeadlines.Load(),
 		MaximumFrameDelayMS:         durationMS(time.Duration(measured.maximumDeadlineDelayNS.Load())),
-		AverageFirstFrameLatencyMS:  durationMS(time.Duration(measured.firstFrameTotalNS.Load() / int64(cfg.guilds))),
+		AverageFirstFrameLatencyMS:  durationMS(time.Duration(measured.firstFrameTotalNS.Load() / max(1, measured.startedGuilds.Load()))),
 		MaximumFirstFrameLatencyMS:  durationMS(time.Duration(measured.maximumFirstFrameNS.Load())),
 		YTDLPConfiguredLimit:        cfg.ytdlpConcurrency,
+		MaximumInteractiveWaitMS:    durationMS(time.Duration(measured.maximumInteractiveNS.Load())),
+		InteractiveCompletions:      measured.interactiveCompletions.Load(),
 		GoroutinesBefore:            baselineGoroutines,
 		GoroutinesAfter:             afterGoroutines,
 		TemporaryFilesAfter:         temporaryFiles,
@@ -193,8 +237,45 @@ func run() error {
 	return validateReport(result, cfg)
 }
 
+func fixtureSettings(duration time.Duration) (int, time.Duration, error) {
+	bitrate := 64
+	var err error
+	if raw := os.Getenv("GOBARD_BENCH_INPUT_KBPS"); raw != "" {
+		bitrate, err = strconv.Atoi(raw)
+		if err != nil || (bitrate != 64 && bitrate != 256) {
+			return 0, 0, errors.New("GOBARD_BENCH_INPUT_KBPS must be 64 or 256")
+		}
+	}
+	mediaDuration := duration + time.Second
+	if raw := os.Getenv("GOBARD_BENCH_MEDIA_DURATION"); raw != "" {
+		mediaDuration, err = time.ParseDuration(raw)
+		if err != nil || mediaDuration < duration || mediaDuration > time.Hour {
+			return 0, 0, errors.New("fixture duration must cover the run and be at most one hour")
+		}
+	}
+	return bitrate, mediaDuration, nil
+}
+
+func benchmarkAdmission(cfg profile) (string, capacity.Budget, error) {
+	mode := os.Getenv("GOBARD_BENCH_ADMISSION")
+	if mode == "" {
+		mode = "stress"
+	}
+	if mode != "stress" && mode != "runtime" {
+		return "", capacity.Budget{}, errors.New("GOBARD_BENCH_ADMISSION must be stress or runtime")
+	}
+	budget, err := capacity.Plan(capacity.Discover(), 0, 0, max(16, cfg.guilds), cfg.ytdlpConcurrency)
+	return mode, budget, err
+}
+
 func validateReport(result report, cfg profile) error {
 	var failures []error
+	if result.StartedGuilds != int64(cfg.guilds) || result.Frames == 0 {
+		failures = append(failures, fmt.Errorf("only %d of %d guilds delivered audio", result.StartedGuilds, cfg.guilds))
+	}
+	if result.AdmissionMode == "runtime" && result.InteractiveCompletions == 0 {
+		failures = append(failures, errors.New("no interactive work completed under runtime admission"))
+	}
 	if result.AverageCPUPercentOfQuota >= 80 {
 		failures = append(failures, fmt.Errorf("average CPU %.2f%% is not below 80%% of quota", result.AverageCPUPercentOfQuota))
 	}
@@ -230,12 +311,7 @@ func selectedProfile(name string) (profile, error) {
 	case "large":
 		return profile{name: "large", guilds: 24, ytdlpConcurrency: 12, memoryBytes: 4 << 30}, nil
 	case "reduced":
-		memoryBytes := uint64(512 * 1024 * 1024)
-		guilds, err := capacity.GuildLimit(memoryBytes, capacity.DefaultHeadroom(memoryBytes), capacity.DefaultPerGuildReservation, 16)
-		if err != nil {
-			return profile{}, fmt.Errorf("derive reduced profile: %w", err)
-		}
-		return profile{name: "reduced", guilds: guilds, ytdlpConcurrency: 4, memoryBytes: memoryBytes}, nil
+		return profile{name: "reduced", guilds: 5, ytdlpConcurrency: 4, memoryBytes: 512 << 20}, nil
 	default:
 		return profile{}, fmt.Errorf("unknown GOBARD_BENCH_PROFILE %q", name)
 	}
@@ -243,7 +319,7 @@ func selectedProfile(name string) (profile, error) {
 
 // runGuild exercises the actual v2 coordinator, decoder, encoder, controls and
 // cancellation path. Only network delivery and provider work are simulated.
-func runGuild(ctx context.Context, workers *sync.WaitGroup, guild int, opener playback.Opener, cacheStore *cache.Cache, measured *measurements) {
+func runGuild(ctx context.Context, workers *sync.WaitGroup, guild int, opener playback.Opener, cacheStore *cache.Cache, measured *measurements, manager *session.Manager) {
 	defer workers.Done()
 	engine, err := playback.New(opener, log.New(io.Discard))
 	if err != nil {
@@ -261,7 +337,12 @@ func runGuild(ctx context.Context, workers *sync.WaitGroup, guild int, opener pl
 		}
 	}()
 	output := &probeOutput{started: time.Now(), measured: measured, cache: cacheStore, guild: guild, delivery: delivery}
-	target, err := session.New(ctx, fmt.Sprintf("bench-%d", guild), engine, output, 8)
+	var target *session.Session
+	if manager == nil {
+		target, err = session.New(ctx, fmt.Sprintf("bench-%d", guild), engine, output, 8)
+	} else {
+		target, err = manager.Create(fmt.Sprintf("bench-%d", guild), output)
+	}
 	if err != nil {
 		measured.workerFailures.Add(1)
 		return
@@ -316,6 +397,7 @@ func (o *probeOutput) Send(ctx context.Context, packet []byte) error {
 	}
 	now := time.Now()
 	if o.frames == 0 {
+		o.measured.startedGuilds.Add(1)
 		latency := now.Sub(o.started).Nanoseconds()
 		o.measured.firstFrameTotalNS.Add(latency)
 		updateMaximum(&o.measured.maximumFirstFrameNS, latency)
@@ -364,7 +446,7 @@ func frameGapPercentile(m *measurements, percentile uint64) int {
 	return 1000
 }
 
-func createDeterministicMedia(dir string, duration time.Duration) (string, error) {
+func createDeterministicMedia(dir string, duration time.Duration, bitrate int) (string, error) {
 	path := filepath.Join(dir, "deterministic.opus")
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -373,7 +455,7 @@ func createDeterministicMedia(dir string, duration time.Duration) (string, error
 		"ffmpeg",
 		"-nostdin", "-hide_banner", "-loglevel", "error",
 		"-f", "lavfi", "-i", "sine=frequency=997:sample_rate=48000",
-		"-t", strconv.FormatFloat(duration.Seconds(), 'f', 3, 64), "-ac", "2", "-c:a", "libopus", "-b:a", "64k", "-vbr", "off", "-y", path,
+		"-t", strconv.FormatFloat(duration.Seconds(), 'f', 3, 64), "-ac", "2", "-c:a", "libopus", "-b:a", strconv.Itoa(bitrate)+"k", "-vbr", "off", "-y", path,
 	)
 	var stderr failure.Diagnostic
 	cmd.Stderr = &stderr
@@ -382,6 +464,29 @@ func createDeterministicMedia(dir string, duration time.Duration) (string, error
 		return "", stderr.Failure("fixture", failure.Codec, err)
 	}
 	return path, nil
+}
+
+// Probe the shared extractor budget while real media acquisition holds slots.
+// This measures slot availability, not provider metadata request latency.
+func runInteractiveProbe(ctx context.Context, workers *sync.WaitGroup, limiter *processlimit.Limiter, measured *measurements) {
+	defer workers.Done()
+	ticker := time.NewTicker(20 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			started := time.Now()
+			release, err := limiter.Acquire(ctx)
+			updateMaximum(&measured.maximumInteractiveNS, time.Since(started).Nanoseconds())
+			if err != nil {
+				return
+			}
+			measured.interactiveCompletions.Add(1)
+			release()
+		}
+	}
 }
 
 func runCachePressure(ctx context.Context, workers *sync.WaitGroup, cacheStore *cache.Cache, measured *measurements) {

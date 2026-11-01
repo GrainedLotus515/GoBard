@@ -1,5 +1,10 @@
 # Parallel Command Registration Implementation Summary
 
+> Historical pre-v2 analysis. Its implementation paths and dependency claims
+> are not the current runtime contract. See [architecture](architecture.md),
+> [Discord adapter](discord-adapter.md), and [rewrite status](rewrite/status.md).
+
+
 ## Overview
 Successfully implemented parallel command registration with goroutines and rate limit handling to resolve the 3+ minute command registration delay.
 

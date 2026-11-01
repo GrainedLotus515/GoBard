@@ -5,14 +5,12 @@ package app
 import (
 	"context"
 	"errors"
-	"fmt"
 	"os/exec"
 
 	"github.com/charmbracelet/log"
 
 	"github.com/GrainedLotus515/gobard/internal/bot"
 	"github.com/GrainedLotus515/gobard/internal/cache"
-	"github.com/GrainedLotus515/gobard/internal/capacity"
 	"github.com/GrainedLotus515/gobard/internal/config"
 	"github.com/GrainedLotus515/gobard/internal/health"
 	"github.com/GrainedLotus515/gobard/internal/playback"
@@ -34,23 +32,6 @@ func New(ctx context.Context, cfg *config.Config, logger *log.Logger) (*App, err
 			return nil, errors.New("required runtime tool unavailable: " + name)
 		}
 	}
-	memory := capacity.MemoryLimit{Bytes: cfg.PlaybackMemoryLimit, Source: "operator"}
-	if memory.Bytes == 0 {
-		detected, err := capacity.DetectMemoryLimit()
-		if err != nil {
-			return nil, fmt.Errorf("discover playback memory budget: %w", err)
-		}
-		memory = detected
-	}
-	headroom := cfg.PlaybackMemoryHeadroom
-	if headroom == 0 {
-		headroom = capacity.DefaultHeadroom(memory.Bytes)
-	}
-	guildLimit, err := capacity.GuildLimit(memory.Bytes, headroom, capacity.DefaultPerGuildReservation, cfg.MaxGuildSessions)
-	if err != nil {
-		return nil, fmt.Errorf("derive playback admission: %w", err)
-	}
-	logger.Info("Playback capacity derived", "event", "capacity.admission", "memory_source", memory.Source, "memory_limit_bytes", memory.Bytes, "memory_headroom_bytes", headroom, "guild_reservation_bytes", capacity.DefaultPerGuildReservation, "configured_guild_limit", cfg.MaxGuildSessions, "effective_guild_limit", guildLimit)
 	store, err := cache.NewCache(cfg.CacheDir, cfg.CacheLimit)
 	if err != nil {
 		return nil, err
@@ -68,7 +49,8 @@ func New(ctx context.Context, cfg *config.Config, logger *log.Logger) (*App, err
 	if err != nil {
 		return nil, err
 	}
-	sessions, err := session.NewManager(ctx, engine, guildLimit, cfg.QueueLimit, session.Defaults{Volume: cfg.DefaultVolume, Ducking: cfg.ReduceVolumeOnVoice, DuckTarget: cfg.ReduceVolumeOnVoiceTarget})
+	logger.Info("Runtime capacity", "event", "capacity.configured", "memory_bytes", cfg.Capacity.Memory.Bytes, "memory_source", cfg.Capacity.Memory.Source, "reserved_bytes", cfg.Capacity.Reserved, "active_streams", cfg.Capacity.Streams, "retained_sessions", cfg.MaxGuildSessions)
+	sessions, err := session.NewManager(ctx, engine, cfg.MaxGuildSessions, cfg.Capacity.Streams, cfg.QueueLimit, session.Defaults{Volume: cfg.DefaultVolume, Ducking: cfg.ReduceVolumeOnVoice, DuckTarget: cfg.ReduceVolumeOnVoiceTarget})
 	if err != nil {
 		return nil, err
 	}

@@ -10,7 +10,7 @@ Reference contracts for the replacement:
   and one terminal event are published after cleanup.
 * Session: idle → active ↔ paused → idle/disconnected → closed. Only the owner
   mutates selection. Skip/removal bypass loop; completion may repeat; source
-  exhausted source failures advance; stop clears; intentional disconnect preserves queue.
+  exhausted source failures advance; stop clears; disconnect retains safely resumable queue state.
 * Transport: disconnected → connecting → ready → failed/closing → disconnected.
   No attempt success implies human audibility; delivered frames mean output
   accepted complete packets.
@@ -53,7 +53,9 @@ queue capacity is validated at construction (1–500). Display metadata has
 per-field byte bounds. Snapshots copy the queue. Completed entries retain their
 display positions until the queue drains, preserving the previous indexing.
 Loop retries only successful completion. Skip/removal bypass loop; seek creates
-a new attempt for the same request; disconnect/transport failure retain selection.
+a new attempt for the same request; disconnect/transport failure retain finite
+seekable selection at its delivered position. Live/unknown-duration media ends
+on interruption and advances, because safe seeking cannot be established.
 The managed voice path supplies a new output through the finite reconnect policy
 below. The fixture constructor requires an explicitly supplied output.
 
@@ -122,10 +124,25 @@ output and the underlying connection.
 Metadata commands reserve a slot in their session before resolution. At most 16
 reservations exist; queue-drain disconnect waits for them, including a failed
 lookup. Stop/disconnect still invalidate the admission generation immediately.
-Transport failure retains the selected request and permits at most three
+Transport failure retains a finite seekable request and permits at most three
 reconnect attempts, with 0/1/2-second delays. Successful connection alone does
-not reset this budget: replay failures consume it too. A completed/advanced
+not reset this budget: repeated partial failures consume it too. A completed/advanced
 request resets the budget. Exhaustion retains the queue and disconnects.
+
+After the failed attempt joins, its accepted frame count advances that attempt's
+offset by 20 ms per frame, including after a nonzero seek. Request identity is
+retained; every resume gets a distinct attempt identity and terminal event.
+Intentional disconnect uses the same position accounting but never automatically
+reconnects. At or beyond declared duration, settle the interruption outcome and
+advance even if repeat is enabled; do not pretend an interrupted source completed.
+Live/unknown-duration tracks also settle and advance instead of replaying.
+Stop supersedes pending recovery; other racing controls retain the first accepted
+transition. Delivered means transport acceptance, not human audibility.
+
+The output media clock uses successful Write completion time. Ordinary timer
+jitter preserves phase; a delayed successful write or long pause rebases the
+next packet so it cannot immediately catch up in a burst. Native write deadlines,
+cancellation and the concurrent Close join barrier remain unchanged.
 
 Session Changes notifications have capacity one and coalesce. Inspect does not
 produce another notification. These are UI hints, not terminal accounting;

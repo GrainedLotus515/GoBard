@@ -1,0 +1,115 @@
+diff --git a/internal/bot/review_regression_test.go b/internal/bot/review_regression_test.go
+new file mode 100644
+--- /dev/null
++++ b/internal/bot/review_regression_test.go
+@@ -0,0 +1,31 @@
++package bot
++
++import (
++	"errors"
++	"strings"
++	"testing"
++
++	"github.com/GrainedLotus515/gobard/internal/failure"
++)
++
++func TestReviewWrappedMetadataFailureKeepsActionableGuidance(t *testing.T) {
++	for _, tc := range []struct {
++		name string
++		category failure.Category
++		want string
++	}{
++		{"authentication", failure.Authentication, "provider refused access"},
++		{"rate limit", failure.Throttled, "limiting requests"},
++		{"unavailable", failure.Unavailable, "unavailable from its provider"},
++	} {
++		t.Run(tc.name, func(t *testing.T) {
++			cause := failure.Wrap("metadata", tc.category, errors.New("private provider diagnostic"))
++			// command.Player.Play adds this context to resolver failures.
++			err := failure.Wrap("metadata", failure.Source, cause)
++			card := commandFailure(err)
++			if !strings.Contains(card.Description, tc.want) {
++				t.Fatalf("lost classified metadata guidance: %q, want %q", card.Description, tc.want)
++			}
++		})
++	}
++}
+diff --git a/internal/discordvoice/review_regression_test.go b/internal/discordvoice/review_regression_test.go
+new file mode 100644
+--- /dev/null
++++ b/internal/discordvoice/review_regression_test.go
+@@ -0,0 +1,32 @@
++package discordvoice
++
++import (
++	"context"
++	"testing"
++	"time"
++)
++
++type reviewDelayedWriter struct{ accepted []time.Time }
++
++func (*reviewDelayedWriter) SetWriteDeadline(time.Time) error { return nil }
++func (*reviewDelayedWriter) Close() error { return nil }
++func (w *reviewDelayedWriter) Write(b []byte) (int, error) {
++	if len(w.accepted) == 0 {
++		time.Sleep(80 * time.Millisecond)
++	}
++	w.accepted = append(w.accepted, time.Now())
++	return len(b), nil
++}
++
++func TestReviewNoBurstAfterSuccessfulSlowWrite(t *testing.T) {
++	w := &reviewDelayedWriter{}
++	o, err := NewOutput(w)
++	if err != nil { t.Fatal(err) }
++	t.Cleanup(func() { _ = o.Close() })
++	for range 2 {
++		if err := o.Send(context.Background(), []byte{1}); err != nil { t.Fatal(err) }
++	}
++	if gap := w.accepted[1].Sub(w.accepted[0]); gap < 9*time.Millisecond {
++		t.Fatalf("successful slow Write caused packet burst: acceptance gap=%v", gap)
++	}
++}
+diff --git a/internal/session/review_regression_test.go b/internal/session/review_regression_test.go
+new file mode 100644
+--- /dev/null
++++ b/internal/session/review_regression_test.go
+@@ -0,0 +1,37 @@
++package session
++
++import (
++	"context"
++	"testing"
++	"time"
++
++	"github.com/GrainedLotus515/gobard/internal/playback"
++)
++
++func TestReviewTransportRecoveryPreservesDeliveredPosition(t *testing.T) {
++	s, source := voiceTestSession(t, voiceFixture{connect: func(context.Context, string) (playback.Output, error) {
++		return outputFunc(func(context.Context, []byte) error { return nil }), nil
++	}})
++	if _, err := s.Join(context.Background(), "voice"); err != nil {
++		t.Fatal(err)
++	}
++	if _, err := s.Add(context.Background(), tracks("audio")); err != nil {
++		t.Fatal(err)
++	}
++	first := nextAttempt(t, source)
++	deadline := time.Now().Add(time.Second)
++	for apply(t, s, Operation{Action: Inspect}).Frames == 0 {
++		if time.Now().After(deadline) {
++			t.Fatal("no audio delivered")
++		}
++		time.Sleep(time.Millisecond)
++	}
++	apply(t, s, Operation{Action: VoiceLost})
++	second := nextAttempt(t, source)
++	if second.request.ID != first.request.ID {
++		t.Fatal("recovery replaced the logical request")
++	}
++	if second.request.Offset < playback.FrameDuration {
++		t.Fatalf("voice recovery replays delivered audio: offset=%v, want >=%v", second.request.Offset, playback.FrameDuration)
++	}
++}
