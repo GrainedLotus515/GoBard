@@ -93,8 +93,12 @@ func TestCancelSaturatedAcquisitionJoinsAndAbortsScratch(t *testing.T) {
 	}
 	start := time.Now()
 	cancel()
-	_ = stream.Close()
-	_ = stream.Close()
+	if err := stream.Close(); err != nil {
+		t.Fatalf("intentional close failed: %v", err)
+	}
+	if err := stream.Close(); err != nil {
+		t.Fatalf("repeated close failed: %v", err)
+	}
 	if time.Since(start) > 3*time.Second {
 		t.Fatal("shutdown exceeded process join budget")
 	}
@@ -239,4 +243,62 @@ func TestExtractorSlotReleasedBeforeBufferedPlaybackEnds(t *testing.T) {
 		t.Fatal("completed extractor still held capacity", err)
 	}
 	release()
+}
+
+func TestCloseRetainsEstablishedAcquisitionFailure(t *testing.T) {
+	marker := filepath.Join(t.TempDir(), "finish")
+	quoted := "'" + strings.ReplaceAll(marker, "'", "'\"'\"'") + "'"
+	o := fakeExtractor(t, strings.Replace(testAudio, "duration=0.1", "duration=10", 1)+"while [ ! -f "+quoted+" ]; do sleep 0.01; done\nexit 7\n")
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	stream, err := o.Open(ctx, playback.Request{MediaID: testMediaURL})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stream.Close()
+	if err := os.WriteFile(marker, nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	s, ok := stream.(*extractorStream)
+	if !ok {
+		t.Fatal("unexpected stream implementation")
+	}
+	select {
+	case <-s.acquired:
+	case <-ctx.Done():
+		t.Fatal("extractor did not finish")
+	}
+	cancel()
+	err = stream.Close()
+	f := failure.From(err)
+	if f == nil || f.ExitCode != 7 {
+		t.Fatalf("lost established acquisition failure: %v", err)
+	}
+}
+
+func TestControlCancellationDuringUncachedAudio(t *testing.T) {
+	o := fakeExtractor(t, strings.Replace(testAudio, "duration=0.1", "duration=10", 1)+"sleep 60 &\nwait\n")
+	parent, stop := context.WithTimeout(t.Context(), 5*time.Second)
+	defer stop()
+	ctx, cancel := context.WithCancelCause(parent)
+	defer cancel(nil)
+	engine, err := playback.New(o, log.New(io.Discard))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var timer *time.Timer
+	defer func() {
+		if timer != nil {
+			timer.Stop()
+		}
+	}()
+	result := engine.Run(ctx, playback.Request{MediaID: testMediaURL}, acquisitionOutput(func(context.Context, []byte) error {
+		if timer == nil {
+			timer = time.AfterFunc(50*time.Millisecond, func() { cancel(playback.Cancellation{Outcome: playback.Skipped}) })
+		}
+		return nil
+	}))
+	if result.Outcome != playback.Skipped || result.Failure != nil || result.Frames == 0 {
+		t.Fatalf("%+v", result)
+	}
 }

@@ -67,6 +67,9 @@ func (c *coordinator) apply(op Operation) error {
 }
 
 func (c *coordinator) stop() {
+	// Stop replaces natural-drain policy, including a drain held open by an
+	// outstanding metadata reservation.
+	c.drained = false
 	if !c.connected || c.transportCancel != nil || c.retry != nil || c.needDisconnect {
 		c.disconnectVoice()
 		c.connected = false

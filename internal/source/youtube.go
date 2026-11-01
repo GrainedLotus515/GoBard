@@ -215,9 +215,23 @@ func (s *extractorStream) acquire(release func(), store *cache.Cache, key string
 		<-joined
 	}
 	release()
+	if s.ctx.Err() != nil {
+		var exitErr *exec.ExitError
+		if errors.Is(processErr, context.Canceled) || errors.Is(processErr, context.DeadlineExceeded) ||
+			errors.As(processErr, &exitErr) && exitErr.ExitCode() == -1 {
+			// The owned process group is killed on cancellation. Its signal exit
+			// is teardown, not a new source failure. Nonzero normal exits remain
+			// authoritative even when cancellation races Wait.
+			processErr = nil
+		}
+	}
 	if processErr != nil {
 		s.acquireErr = s.stderr.Failure("acquire", failure.Source, processErr)
-	} else if readErr != nil {
+	} else if cause := failure.From(context.Cause(s.ctx)); cause != nil {
+		// Preserve acquisition read/finalization failures that canceled the
+		// child themselves, including the bounded finalization deadline.
+		s.acquireErr = cause
+	} else if readErr != nil && s.ctx.Err() == nil {
 		s.acquireErr = failure.Wrap("acquire_read", failure.Source, readErr)
 	}
 }

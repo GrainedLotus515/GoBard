@@ -74,8 +74,11 @@ func (c *coordinator) join(cmd command) {
 
 func (c *coordinator) resolution(cmd command) {
 	if cmd.release != "" {
+		generation, exists := c.reservations[cmd.release]
 		delete(c.reservations, cmd.release)
-		if c.queue.current() == nil && c.connected {
+		// Superseded or repeated cleanup has no authority to end the voice
+		// connection retained by a later Stop.
+		if exists && generation == c.generation && c.queue.current() == nil && c.connected {
 			c.drained = true
 		}
 		cmd.reply <- response{}
@@ -89,7 +92,7 @@ func (c *coordinator) resolution(cmd command) {
 		cmd.reply <- response{err: ErrBusy}
 		return
 	}
-	c.reservations[cmd.reserve] = struct{}{}
+	c.reservations[cmd.reserve] = c.generation
 	cmd.reply <- response{snapshot: c.snapshot()}
 }
 

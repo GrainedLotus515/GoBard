@@ -80,3 +80,25 @@ Opening this PR does not deploy or publish an image. A later merge to main
 triggers the existing GHCR publishing workflow; production rollout still needs
 explicit authorization. No live infrastructure, credentials, existing local bot
 or real cache was modified.
+
+## PR review follow-up
+
+The three findings on PR #4 were reproduced before correction:
+
+- Wrapped explicit Skip/Stop/Seek/Disconnect causes returned by dependencies
+  were classified as failures during open, read, send and close. Playback now
+  matches the attempt's own control cause while retaining unrelated failures.
+- Canceling saturated acquisition made the extractor's owned signal termination
+  a cleanup failure. Expected termination is now excluded; normal nonzero exits,
+  previously established failures and internal finalization timeouts remain
+  authoritative. Repeated Close still joins and releases scratch/process slots.
+- A pending lookup could disconnect healthy voice after Stop. Resolution
+  reservations now retain their generation, and Stop clears prior natural-drain
+  intent. Superseded or duplicate cleanup cannot restore that drain intent.
+
+The new regressions failed on `93cf42d` and passed after correction. The full
+native race suite, ten repeated focused race runs (including real uncached
+source cancellation), Docker application/SDK/helper tests and Docker lint passed.
+Existing failure-preservation, startup-timeout and normal queue-drain tests also
+pass. Local logs are in `/tmp/gobard-pr4-review/`. No new performance or live
+acceptance claim is made; CI/review must assess the pushed follow-up commit.

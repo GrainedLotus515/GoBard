@@ -3,6 +3,7 @@ package session
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"sync/atomic"
 	"testing"
@@ -476,5 +477,43 @@ func TestManagedVoiceRejectsRawConnect(t *testing.T) {
 	}
 	if _, err := s.Apply(context.Background(), Operation{Action: Connect, Output: outputFunc(func(context.Context, []byte) error { return nil })}); err == nil {
 		t.Fatal("raw connect replaced managed voice")
+	}
+}
+
+func TestStopRetainsVoiceAfterSupersededLookupCleanup(t *testing.T) {
+	for _, drainFirst := range []bool{false, true} {
+		t.Run(fmt.Sprint(drainFirst), func(t *testing.T) {
+			var disconnected atomic.Int32
+			s, source := voiceTestSession(t, voiceFixture{
+				connect: func(context.Context, string) (playback.Output, error) {
+					return outputFunc(func(context.Context, []byte) error { return nil }), nil
+				},
+				disconnect: func(context.Context) error { disconnected.Add(1); return nil },
+			})
+			if _, err := s.Join(t.Context(), "voice"); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := s.BeginResolution(t.Context(), Access{Channel: "voice"}, "pending"); err != nil {
+				t.Fatal(err)
+			}
+			if drainFirst {
+				tickets, err := s.Add(t.Context(), tracks("one"))
+				if err != nil {
+					t.Fatal(err)
+				}
+				first := nextAttempt(t, source)
+				close(first.finish)
+				if _, err := tickets[0].Wait(t.Context()); err != nil {
+					t.Fatal(err)
+				}
+			}
+			apply(t, s, Operation{Action: Stop})
+			s.EndResolution("pending")
+			s.EndResolution("pending") // Duplicate cleanup cannot acquire drain authority.
+			snap := apply(t, s, Operation{Action: Inspect})
+			if !snap.Connected || snap.Busy || len(snap.Tracks) != 0 || disconnected.Load() != 0 {
+				t.Fatalf("Stop lost healthy idle voice: %+v", snap)
+			}
+		})
 	}
 }

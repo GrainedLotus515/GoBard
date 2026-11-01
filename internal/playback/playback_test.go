@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"strings"
 	"testing"
@@ -216,6 +217,63 @@ func BenchmarkAttempt(b *testing.B) {
 	for b.Loop() {
 		if r := e.Run(context.Background(), Request{}, output); r.Frames != 1000 {
 			b.Fatal(r)
+		}
+	}
+}
+
+// Exercise the cause propagation used by the source adapter, including wrappers.
+type causeStream struct {
+	next  func(context.Context, []byte) (int, error)
+	close func() error
+}
+
+func (s causeStream) Next(ctx context.Context, p []byte) (int, error) { return s.next(ctx, p) }
+func (s causeStream) Close() error                                    { return s.close() }
+
+func TestControlCauseReturnedByDependency(t *testing.T) {
+	for _, outcome := range []Outcome{Skipped, Stopped, Seeked, Disconnected} {
+		for _, stage := range []string{"open", "read", "send", "close"} {
+			t.Run(string(outcome)+"/"+stage, func(t *testing.T) {
+				ctx, cancel := context.WithCancelCause(t.Context())
+				defer cancel(nil)
+				interrupted := func() error {
+					cancel(Cancellation{Outcome: outcome})
+					return fmt.Errorf("dependency: %w", context.Cause(ctx))
+				}
+				stream := causeStream{
+					next: func(context.Context, []byte) (int, error) {
+						if stage == "read" {
+							return 0, interrupted()
+						}
+						return 1, nil
+					},
+					close: func() error {
+						if stage == "close" {
+							return interrupted()
+						}
+						return nil
+					},
+				}
+				engine, err := New(openFunc(func(context.Context, Request) (Stream, error) {
+					if stage == "open" {
+						return nil, interrupted()
+					}
+					return stream, nil
+				}), log.New(io.Discard))
+				if err != nil {
+					t.Fatal(err)
+				}
+				result := engine.Run(ctx, Request{}, sendFunc(func(context.Context, []byte) error {
+					if stage == "close" {
+						cancel(Cancellation{Outcome: outcome})
+						return ctx.Err()
+					}
+					return interrupted()
+				}))
+				if result.Outcome != outcome || result.Failure != nil {
+					t.Fatalf("%+v", result)
+				}
+			})
 		}
 	}
 }

@@ -94,7 +94,7 @@ func newSession(parent context.Context, id string, engine *playback.Engine, outp
 	s := &Session{ctx: ctx, cancel: cancel, done: make(chan struct{}), commands: make(chan command, MailboxCapacity), changed: make(chan struct{}, 1)}
 	c := &coordinator{session: s, id: id + "/" + rand.Text(), engine: engine, output: output, connected: output != nil, voice: voice, logger: logger, streamSlots: slots,
 		queue:   queue{entries: make([]entry, 0, capacity), index: -1, capacity: capacity},
-		results: make(chan playback.Result, 1), volume: 100, duckTarget: 70, speakers: make(map[string]bool), reservations: make(map[string]struct{}), transportResults: make(chan transportResult, 1)}
+		results: make(chan playback.Result, 1), volume: 100, duckTarget: 70, speakers: make(map[string]bool), reservations: make(map[string]uint64), transportResults: make(chan transportResult, 1)}
 	go c.run()
 	return s, nil
 }
@@ -261,7 +261,7 @@ type coordinator struct {
 	last                  playback.Result
 	voice                 Voice
 	logger                *log.Logger
-	reservations          map[string]struct{}
+	reservations          map[string]uint64
 	drained               bool
 	transportResults      chan transportResult
 	transportCancel       context.CancelFunc

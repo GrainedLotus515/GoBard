@@ -199,7 +199,17 @@ func (e *Engine) Run(ctx context.Context, request Request, output Output) (resul
 }
 
 func cancellationInduced(ctx context.Context, err error) bool {
-	return ctx.Err() != nil && (errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded))
+	if ctx.Err() == nil {
+		return false
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	// Sources may return the explicit control cause rather than ctx.Err().
+	// Match that cause, not any error that happened to race cancellation.
+	cause := context.Cause(ctx)
+	var control Cancellation
+	return errors.As(cause, &control) && errors.Is(err, cause)
 }
 
 func failedOutcome(category failure.Category) Outcome {

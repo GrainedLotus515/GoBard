@@ -124,6 +124,9 @@ output and the underlying connection.
 Metadata commands reserve a slot in their session before resolution. At most 16
 reservations exist; queue-drain disconnect waits for them, including a failed
 lookup. Stop/disconnect still invalidate the admission generation immediately.
+Reservations retain their admitting generation; superseded or duplicate lookup
+cleanup cannot disconnect the healthy voice connection retained by Stop. Stop
+also clears any earlier natural-drain intent held open by those reservations.
 Transport failure retains a finite seekable request and permits at most three
 reconnect attempts, with 0/1/2-second delays. Successful connection alone does
 not reset this budget: repeated partial failures consume it too. A completed/advanced
@@ -147,3 +150,11 @@ cancellation and the concurrent Close join barrier remain unchanged.
 Session Changes notifications have capacity one and coalesce. Inspect does not
 produce another notification. These are UI hints, not terminal accounting;
 Engine remains the authoritative attempt-result owner.
+
+Control cancellation returned as the attempt's explicit cause (including a
+wrapped cause) is recognized during open, read, send and cleanup. Unrelated
+errors remain failures even if they race cancellation. The extractor's signal
+exit after owned cancellation is expected teardown, while an observed nonzero
+normal exit, acquisition read error or finalization deadline remains a source
+failure. Close joins the extractor and releases scratch/cache/process resources
+before the one authoritative terminal result is emitted.
