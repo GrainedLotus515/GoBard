@@ -131,6 +131,12 @@ func commandDefinitions() []*discordgo.ApplicationCommand {
 			Options: []*discordgo.ApplicationCommandOption{
 				{
 					Type:        discordgo.ApplicationCommandOptionSubCommand,
+					Name:        "set-player-channel",
+					Description: "Keep the player in this text channel, or follow play requests",
+					Options:     []*discordgo.ApplicationCommandOption{{Type: discordgo.ApplicationCommandOptionBoolean, Name: "enabled", Description: "Anchor here when enabled; follow play requests when disabled", Required: true}},
+				},
+				{
+					Type:        discordgo.ApplicationCommandOptionSubCommand,
 					Name:        "set-reduce-vol-when-voice",
 					Description: "Enable/disable volume reduction when someone speaks",
 					Options: []*discordgo.ApplicationCommandOption{

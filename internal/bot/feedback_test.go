@@ -107,6 +107,7 @@ func TestDeletedPlayerRecreatedOnlyByExplicitRequest(t *testing.T) {
 		t.Fatal(methods, p.message)
 	}
 	methods = nil
+	p.digest = [32]byte{} // Force a changed view so the observer discovers deletion.
 	r.updatePanel(r.ctx, "guild", session.Snapshot{Current: -1}, time.Now().Add(time.Minute))
 	r.updatePanel(r.ctx, "guild", session.Snapshot{Current: -1}, time.Now().Add(2*time.Minute))
 	if strings.Join(methods, ",") != "PATCH" {
