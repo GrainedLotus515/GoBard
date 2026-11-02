@@ -401,7 +401,7 @@ Cache acquire measured 873.8 ns, 352 B/three allocations; interactive limiter
 95.85 ns, 64 B/two allocations. No controlled speedup is claimed. The workload
 does not exercise Discord UI HTTP, real DAVE or provider networking.
 
-Automatic player state adds one bounded panel per admitted guild, two IDs of at
+Automatic player state adds one bounded panel per admitted guild, three IDs (message, channel and optional anchor) of at
 most 32 bytes, one view value, a 32-byte digest and a capacity-one ownership gate.
 There is no message history. As of October 16, each observer owns one editor
 worker and a capacity-one hint channel, canceled and joined at session removal.

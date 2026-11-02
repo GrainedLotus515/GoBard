@@ -18,15 +18,17 @@ import (
 // into command/session packages. Name is one of the registered command names;
 // Operation is applied through Session.ApplyAs, not the trusted lifecycle API.
 type MappedInteraction struct {
-	Guild, User string
-	Channel     string
-	Message     string
-	Name        string
-	Query       string
-	Operation   session.Operation
-	ManageGuild bool
-	Component   bool
-	Page        int
+	Guild, User          string
+	Channel              string
+	Message              string
+	Name                 string
+	Query                string
+	Operation            session.Operation
+	ManageGuild          bool
+	Component            bool
+	Page                 int
+	PlayerChannelSetting bool
+	AnchorPlayer         bool
 }
 
 func requireGuildMemberInteraction(i *discordgo.InteractionCreate) error {
@@ -219,6 +221,16 @@ func mapCommandOptions(out MappedInteraction, options commandOptions) (MappedInt
 
 func mapConfiguration(out MappedInteraction, sub *discordgo.ApplicationCommandInteractionDataOption) (MappedInteraction, error) {
 	switch sub.Name {
+	case "set-player-channel":
+		if len(sub.Options) != 1 || sub.Options[0] == nil {
+			return out, errors.New("invalid configuration options")
+		}
+		o := sub.Options[0]
+		value, ok := o.Value.(bool)
+		if o.Name != "enabled" || o.Type != discordgo.ApplicationCommandOptionBoolean || !ok || len(o.Options) != 0 || !validPathPart(out.Channel, 32) {
+			return out, errors.New("invalid configuration value")
+		}
+		out.PlayerChannelSetting, out.AnchorPlayer = true, value
 	case "show":
 		if len(sub.Options) != 0 {
 			return out, errors.New("unexpected configuration options")

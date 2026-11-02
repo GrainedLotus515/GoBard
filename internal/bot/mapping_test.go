@@ -175,3 +175,19 @@ func FuzzMapInteraction(f *testing.F) {
 		}
 	})
 }
+
+func TestMapPlayerChannelSetting(t *testing.T) {
+	for _, enabled := range []bool{true, false} {
+		option := &discordgo.ApplicationCommandInteractionDataOption{Name: "enabled", Type: discordgo.ApplicationCommandOptionBoolean, Value: enabled}
+		i := interactionFixture("config", &discordgo.ApplicationCommandInteractionDataOption{Name: "set-player-channel", Type: discordgo.ApplicationCommandOptionSubCommand, Options: []*discordgo.ApplicationCommandInteractionDataOption{option}})
+		i.ChannelID = "music"
+		got, err := MapInteraction(i)
+		if err != nil || !got.PlayerChannelSetting || got.AnchorPlayer != enabled {
+			t.Fatal(got, err)
+		}
+		option.Value = "true"
+		if _, err := MapInteraction(i); err == nil {
+			t.Fatal("invalid setting accepted")
+		}
+	}
+}
