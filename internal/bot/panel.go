@@ -105,6 +105,28 @@ func panelEdit(m MappedInteraction, s session.Snapshot, accepted int) *discordgo
 	return &discordgo.WebhookEdit{Embeds: &[]*discordgo.MessageEmbed{embed}, Components: &components, AllowedMentions: noAllowedMentions()}
 }
 
+// refreshPanelSnapshot reads state that another command may have advanced
+// while this response waited, then hides a failure the user already dismissed
+// with stop or disconnect. The caller must hold p.
+func (r *Runtime) refreshPanelSnapshot(ctx context.Context, p *playerPanel, m MappedInteraction, s session.Snapshot) session.Snapshot {
+	if target, ok := r.sessions.Get(m.Guild); ok {
+		if fresh, err := target.Apply(ctx, session.Operation{Action: session.Inspect}); err == nil {
+			s = fresh
+		}
+	}
+	if m.Name == "stop" || m.Name == "disconnect" {
+		p.dismissedAttempt = s.Last.Request.AttemptID
+	}
+	if m.Name == "play" {
+		p.dismissedAttempt = ""
+	}
+	if p.dismissedAttempt != "" && s.Last.Request.AttemptID == p.dismissedAttempt {
+		s.Last.Failure = nil
+		s.Recovery = ""
+	}
+	return s
+}
+
 func (r *Runtime) renderInteraction(ctx context.Context, ref interactionRef, m MappedInteraction, s session.Snapshot, accepted int, operationErr error) error {
 	p := r.panel(m.Guild)
 	if m.Name == "config" || operationErr != nil {
@@ -118,22 +140,7 @@ func (r *Runtime) renderInteraction(ctx context.Context, ref interactionRef, m M
 		if m.Component && (p.message != m.Message || p.channel != m.Channel) {
 			return r.rest.send(ctx, http.MethodPost, "webhooks/"+ref.app+"/"+ref.token, &discordgo.WebhookParams{Embeds: []*discordgo.MessageEmbed{commandFailure(errStalePlayer)}, Flags: discordgo.MessageFlagsEphemeral, AllowedMentions: noAllowedMentions()}, false)
 		}
-		// Another command may have advanced state while this response waited.
-		if target, ok := r.sessions.Get(m.Guild); ok {
-			if fresh, err := target.Apply(ctx, session.Operation{Action: session.Inspect}); err == nil {
-				s = fresh
-			}
-		}
-		if m.Name == "stop" || m.Name == "disconnect" {
-			p.dismissedAttempt = s.Last.Request.AttemptID
-		}
-		if m.Name == "play" {
-			p.dismissedAttempt = ""
-		}
-		if p.dismissedAttempt != "" && s.Last.Request.AttemptID == p.dismissedAttempt {
-			s.Last.Failure = nil
-			s.Recovery = ""
-		}
+		s = r.refreshPanelSnapshot(ctx, p, m, s)
 	}
 	if !m.Component {
 		return r.renderCommand(ctx, ref, m, s, accepted, operationErr, p)
@@ -259,7 +266,9 @@ func (r *Runtime) showPanel(ctx context.Context, m MappedInteraction, s session.
 }
 
 func panelDigest(edit *discordgo.WebhookEdit) [32]byte {
-	data, _ := json.Marshal(edit) // Only concrete Discord card types are constructed here.
+	// Cards built here hold only strings, integers, embeds, and components and
+	// never set attachments, so encoding cannot fail.
+	data, _ := json.Marshal(edit) //nolint:errcheck // See above.
 	return sha256.Sum256(data)
 }
 
