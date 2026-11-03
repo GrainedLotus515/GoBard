@@ -27,6 +27,8 @@ type playerPanel struct {
 	next             time.Time
 	failures         int
 	dismissedAttempt string
+	anchor           string
+	suspended        bool
 }
 
 func (p *playerPanel) acquire(ctx context.Context) error {
@@ -62,18 +64,18 @@ func (r *Runtime) panel(guild string) *playerPanel {
 }
 
 func (r *Runtime) checkPlayer(ctx context.Context, m MappedInteraction) error {
-	if !m.Component || m.Operation.Action == session.Inspect {
+	if !m.Component {
 		return nil
 	}
 	p := r.panel(m.Guild)
 	if p == nil {
-		return nil
+		return errStalePlayer
 	}
 	if err := p.acquire(ctx); err != nil {
 		return err
 	}
 	defer p.release()
-	if p.message != "" && m.Message != p.message {
+	if p.message == "" || m.Message != p.message || m.Channel != p.channel {
 		return errStalePlayer
 	}
 	return nil
@@ -87,6 +89,7 @@ func panelView(m MappedInteraction) MappedInteraction {
 }
 
 func panelEdit(m MappedInteraction, s session.Snapshot, accepted int) *discordgo.WebhookEdit {
+	s.Position = s.Position.Truncate(15 * time.Second)
 	embed, components := runtimeCard(m, s, accepted)
 	if notice := playbackFeedback(s); notice != nil && m.Name != "stop" && m.Name != "disconnect" {
 		if s.Current < 0 && m.Name != "queue" {
@@ -102,6 +105,28 @@ func panelEdit(m MappedInteraction, s session.Snapshot, accepted int) *discordgo
 	return &discordgo.WebhookEdit{Embeds: &[]*discordgo.MessageEmbed{embed}, Components: &components, AllowedMentions: noAllowedMentions()}
 }
 
+// refreshPanelSnapshot reads state that another command may have advanced
+// while this response waited, then hides a failure the user already dismissed
+// with stop or disconnect. The caller must hold p.
+func (r *Runtime) refreshPanelSnapshot(ctx context.Context, p *playerPanel, m MappedInteraction, s session.Snapshot) session.Snapshot {
+	if target, ok := r.sessions.Get(m.Guild); ok {
+		if fresh, err := target.Apply(ctx, session.Operation{Action: session.Inspect}); err == nil {
+			s = fresh
+		}
+	}
+	if m.Name == "stop" || m.Name == "disconnect" {
+		p.dismissedAttempt = s.Last.Request.AttemptID
+	}
+	if m.Name == "play" {
+		p.dismissedAttempt = ""
+	}
+	if p.dismissedAttempt != "" && s.Last.Request.AttemptID == p.dismissedAttempt {
+		s.Last.Failure = nil
+		s.Recovery = ""
+	}
+	return s
+}
+
 func (r *Runtime) renderInteraction(ctx context.Context, ref interactionRef, m MappedInteraction, s session.Snapshot, accepted int, operationErr error) error {
 	p := r.panel(m.Guild)
 	if m.Name == "config" || operationErr != nil {
@@ -112,22 +137,10 @@ func (r *Runtime) renderInteraction(ctx context.Context, ref interactionRef, m M
 			return err
 		}
 		defer p.release()
-		// Another command may have advanced state while this response waited.
-		if target, ok := r.sessions.Get(m.Guild); ok {
-			if fresh, err := target.Apply(ctx, session.Operation{Action: session.Inspect}); err == nil {
-				s = fresh
-			}
+		if m.Component && (p.message != m.Message || p.channel != m.Channel) {
+			return r.rest.send(ctx, http.MethodPost, "webhooks/"+ref.app+"/"+ref.token, &discordgo.WebhookParams{Embeds: []*discordgo.MessageEmbed{commandFailure(errStalePlayer)}, Flags: discordgo.MessageFlagsEphemeral, AllowedMentions: noAllowedMentions()}, false)
 		}
-		if m.Name == "stop" || m.Name == "disconnect" {
-			p.dismissedAttempt = s.Last.Request.AttemptID
-		}
-		if m.Name == "play" {
-			p.dismissedAttempt = ""
-		}
-		if p.dismissedAttempt != "" && s.Last.Request.AttemptID == p.dismissedAttempt {
-			s.Last.Failure = nil
-			s.Recovery = ""
-		}
+		s = r.refreshPanelSnapshot(ctx, p, m, s)
 	}
 	if !m.Component {
 		return r.renderCommand(ctx, ref, m, s, accepted, operationErr, p)
@@ -146,11 +159,12 @@ func (r *Runtime) renderInteraction(ctx context.Context, ref interactionRef, m M
 	}
 	// An already-admitted control on a superseded view may finish, but must
 	// never replace the newer tracked view. Its old response remains a snapshot.
-	if m.Component && p.message != "" && p.message != message && m.Operation.Action != session.Inspect {
+	if m.Component && p.message != "" && p.message != message {
 		return nil
 	}
 	p.channel, p.message, p.view = m.Channel, message, panelView(m)
-	p.digest = [32]byte{}
+	p.digest = panelDigest(edit)
+	p.suspended = false
 	p.next, p.failures = time.Now().Add(3*time.Second), 0
 	return nil
 }
@@ -175,41 +189,87 @@ func (r *Runtime) renderCommand(ctx context.Context, ref interactionRef, m Mappe
 	case m.Name == "queue" || m.Name == "now-playing":
 		card, _ = runtimeCard(m, s, accepted)
 	}
+	if m.Name == "config" && operationErr == nil {
+		location := "Follow play requests"
+		if settings := r.panel(m.Guild); settings != nil {
+			if err := settings.acquire(ctx); err != nil {
+				return err
+			}
+			if settings.anchor != "" {
+				location = "<#" + settings.anchor + ">"
+			}
+			settings.release()
+		}
+		card.Description += "\nPlayer channel: **" + location + "**"
+		if m.PlayerChannelSetting {
+			card.Description += "\nThe next `/play` uses this setting."
+		}
+	}
 	return r.rest.send(ctx, http.MethodPatch, "webhooks/"+ref.app+"/"+ref.token+"/messages/@original", &discordgo.WebhookEdit{Embeds: &[]*discordgo.MessageEmbed{card}, Components: &[]discordgo.MessageComponent{}, AllowedMentions: noAllowedMentions()}, false)
 }
 
-// showPanel edits the existing message, or creates one for an explicit view
-// request. A 404 permits exactly one replacement POST; other errors return.
+// showPanel keeps one bot-owned message through voice disconnects. Only play
+// follows a different channel; read-only views never relocate an existing card.
+// The caller owns the panel gate across retirement and creation.
 func (r *Runtime) showPanel(ctx context.Context, m MappedInteraction, s session.Snapshot, p *playerPanel) error {
 	viewRequest := m.Name == "play" || m.Name == "queue" || m.Name == "now-playing"
 	view := p.view
 	if viewRequest {
 		view = panelView(m)
 	}
-	create := viewRequest && (p.message == "" || p.channel != m.Channel)
+	channel := p.channel
+	if channel == "" || m.Name == "play" {
+		channel = m.Channel
+	}
+	if p.anchor != "" && (m.Name == "play" || p.message == "") {
+		channel = p.anchor
+	}
+	if !validPathPart(channel, 32) {
+		return errors.New("player channel unavailable")
+	}
 	edit := panelEdit(view, s, 0)
-	if !create && p.message != "" {
+	if p.message != "" && channel != p.channel {
+		retired := panelEdit(MappedInteraction{}, session.Snapshot{Current: -1}, 0)
+		retired.Embeds = &[]*discordgo.MessageEmbed{botui.BuildStatusCard(botui.StatusCardSpec{Title: "Player moved", Description: "Playback requested in <#" + channel + ">. Use `/now-playing` to find the active player.", Color: botui.ColorInfo})}
+		err := r.rest.send(ctx, http.MethodPatch, "channels/"+p.channel+"/messages/"+p.message, retired, true)
+		var status *discordStatus
+		if err != nil && (!errors.As(err, &status) || status.code != http.StatusNotFound) {
+			return err
+		}
+		p.channel, p.message = channel, ""
+	}
+	if p.message != "" {
+		if m.Name != "now-playing" && !p.suspended && panelDigest(edit) == p.digest {
+			p.view = view
+			return nil
+		}
 		err := r.rest.send(ctx, http.MethodPatch, "channels/"+p.channel+"/messages/"+p.message, edit, true)
 		var status *discordStatus
 		if !viewRequest || !errors.As(err, &status) || status.code != http.StatusNotFound {
 			if err == nil {
-				p.view, p.digest = view, [32]byte{}
+				p.view, p.digest, p.suspended = view, panelDigest(edit), false
 			}
 			return err
 		}
-		p.message, create = "", true
+		p.message = ""
 	}
-	if !create {
+	if !viewRequest {
 		return nil
 	}
-	if !validPathPart(m.Channel, 32) {
-		return errors.New("player channel unavailable")
-	}
-	message, err := r.rest.request(ctx, http.MethodPost, "channels/"+m.Channel+"/messages", edit, true, true)
+	// Suppress notifications even when a new card is necessary.
+	payload := &discordgo.MessageSend{Embeds: *edit.Embeds, Components: *edit.Components, AllowedMentions: noAllowedMentions(), Flags: discordgo.MessageFlagsSuppressNotifications}
+	message, err := r.rest.request(ctx, http.MethodPost, "channels/"+channel+"/messages", payload, true, true)
 	if err == nil {
-		p.channel, p.message, p.view, p.digest = m.Channel, message, view, [32]byte{}
+		p.channel, p.message, p.view, p.digest, p.suspended = channel, message, view, panelDigest(edit), false
 	}
 	return err
+}
+
+func panelDigest(edit *discordgo.WebhookEdit) [32]byte {
+	// Cards built here hold only strings, integers, embeds, and components and
+	// never set attachments, so encoding cannot fail.
+	data, _ := json.Marshal(edit) //nolint:errcheck // See above.
+	return sha256.Sum256(data)
 }
 
 func (r *Runtime) updatePanel(parent context.Context, guild string, s session.Snapshot, now time.Time) {
@@ -223,25 +283,20 @@ func (r *Runtime) updatePanel(parent context.Context, guild string, s session.Sn
 		return
 	}
 	defer p.release()
-	if p.message == "" || now.Before(p.next) {
+	if p.message == "" || p.suspended || now.Before(p.next) {
 		return
 	}
-	s.Position = s.Position.Truncate(15 * time.Second)
 	if p.dismissedAttempt != "" && s.Last.Request.AttemptID == p.dismissedAttempt {
 		s.Last.Failure = nil
 		s.Recovery = ""
 	}
 	edit := panelEdit(p.view, s, 0)
-	data, err := json.Marshal(edit)
-	if err != nil {
-		return
-	}
-	digest := sha256.Sum256(data)
+	digest := panelDigest(edit)
 	if digest == p.digest {
 		return
 	}
 	ctx, cancel := context.WithTimeout(parent, 8*time.Second)
-	err = r.rest.send(ctx, http.MethodPatch, "channels/"+p.channel+"/messages/"+p.message, edit, true)
+	err := r.rest.send(ctx, http.MethodPatch, "channels/"+p.channel+"/messages/"+p.message, edit, true)
 	cancel()
 	if err == nil {
 		p.digest = digest
@@ -264,21 +319,53 @@ func (r *Runtime) panelResult(guild string, p *playerPanel, now time.Time, err e
 		if status.code == http.StatusTooManyRequests {
 			p.next = now.Add(max(status.retryAfter, 30*time.Second))
 			if status.retryAfter >= time.Hour {
-				p.message = ""
+				p.suspended = true
 			}
 		}
 		if status.code == http.StatusNotFound || status.code == http.StatusForbidden {
-			p.message = ""
+			p.suspended = true
 		}
 	}
 	if p.failures >= 3 {
-		p.message = ""
+		p.suspended = true
 	}
 	if r.ctx.Err() == nil {
 		code := 0
 		if status != nil {
 			code = status.code
 		}
-		r.logger.Warn("Player update unavailable", "event", "discord.panel", "guild_id", guild, "failures", p.failures, "automatic_updates", p.message != "", "http_status", code, "retry_after_seconds", p.next.Sub(now).Seconds(), "error", err)
+		r.logger.Warn("Player update unavailable", "event", "discord.panel", "guild_id", guild, "failures", p.failures, "automatic_updates", p.message != "" && !p.suspended, "http_status", code, "retry_after_seconds", p.next.Sub(now).Seconds(), "error", err)
 	}
+}
+
+// Presentation settings stay in the Discord adapter, alongside the message
+// identity. Like the existing playback settings, they last until restart.
+func (r *Runtime) setPlayerChannel(ctx context.Context, m MappedInteraction) (session.Snapshot, int, error) {
+	if !m.ManageGuild {
+		return session.Snapshot{}, 0, session.ErrManageGuild
+	}
+	if !validPathPart(m.Channel, 32) {
+		return session.Snapshot{}, 0, errors.New("player channel unavailable")
+	}
+	target, err := r.guild(m.Guild)
+	if err != nil {
+		return session.Snapshot{}, 0, err
+	}
+	s, err := target.Apply(ctx, session.Operation{Action: session.Inspect})
+	if err != nil {
+		return s, 0, err
+	}
+	p := r.panel(m.Guild)
+	if p == nil {
+		return s, 0, session.ErrClosed
+	}
+	if err := p.acquire(ctx); err != nil {
+		return s, 0, err
+	}
+	defer p.release()
+	p.anchor = ""
+	if m.AnchorPlayer {
+		p.anchor = m.Channel
+	}
+	return s, 0, nil
 }

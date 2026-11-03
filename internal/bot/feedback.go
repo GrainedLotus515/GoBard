@@ -20,7 +20,7 @@ func commandFailure(err error) *discordgo.MessageEmbed {
 	title, message := "Couldn't apply that command", "Check the queue position or command values, then try again."
 	switch {
 	case errors.Is(err, errStalePlayer):
-		title, message = "This player has moved", "Use the newest player card, or `/now-playing` to bring it here."
+		title, message = "This player has moved", "Use `/now-playing` to find the active player."
 	case errors.Is(err, session.ErrVoiceAccess):
 		title, message = "Join the music channel", "Join the bot's voice channel to change playback. If it isn't connected, join a voice channel and use `/play`."
 	case errors.Is(err, session.ErrManageGuild):

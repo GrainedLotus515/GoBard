@@ -26,25 +26,36 @@ seconds apart and identical views are suppressed. Controls and Refresh fetch a
 fresh snapshot. This is sampled progress, not a continuously running clock.
 
 Slash commands receive compact private receipts with an Open player link when a
-shared card exists. `/play`, `/queue` and `/now-playing` reuse that card in the
-same channel; they no longer create a public reply for every invocation. A view
-request in a different channel establishes the active card there. Read-only
-requests before a session exists return a private idle/empty view.
+shared card exists. `/play`, `/queue` and `/now-playing` reuse that card. Voice
+idle/disconnect and a later rejoin retain the same message. Only a successful
+`/play` request in another text channel moves it: the old message becomes a
+“Player moved” notice with no controls before a quiet replacement is created.
+If retiring the old message fails (other than deletion), relocation stops and
+the private receipt reports the UI failure. Queue checks, refreshes and skips
+never relocate an existing player. New cards suppress Discord notifications;
+ordinary state changes only edit the card. Identical command and observer views
+are suppressed; `/now-playing` explicitly refreshes even an unchanged view.
 
-Mutation buttons on older
-messages return a private explanation; read-only navigation can refresh and adopt
-an older message. The adapter retains bounded channel/message IDs, not interaction
-tokens or message history. Views are not persisted across bot restarts: use
-`/now-playing` to establish a new one.
+A moderator with Manage Server can run `/config set-player-channel enabled:true`
+in the desired text channel to anchor the player there. `enabled:false` restores
+following play requests. The setting takes effect on the next `/play` (or first
+card creation) and appears in `/config show`. Like existing playback settings,
+it lasts until bot restart. No designated channel is required by default.
 
-Deleted or forbidden messages stop updating. Other failures use at most three
-attempts, with 30/60/90-second backoff; HTTP 429 respects the server delay with a
-30-second minimum. Delays of an hour or more suspend updates. Manual refresh can
-establish a new view. A failed UI edit never stops audio or advances the queue.
-An explicit view request encountering a deleted card can create one replacement;
-the observer never recreates messages on its own. If an applied command's card
-edit fails, the private receipt distinguishes that UI failure from the accepted
-operation, rather than encouraging an accidental duplicate command.
+All buttons on older messages return a private explanation and cannot reactivate
+an old player. Read-only requests before a session exists return a private
+idle/empty view. The adapter retains bounded channel/message IDs and an optional
+anchor, never interaction tokens or message history. Views are not persisted
+across bot restarts: use `/now-playing` to establish a new one.
+
+Deleted or forbidden messages suspend automatic updates. Other failures use at
+most three attempts, with 30/60/90-second backoff; HTTP 429 respects the server
+delay with a 30-second minimum. Delays of an hour or more suspend updates.
+Suspension preserves the message identity: a manual refresh edits the same card
+and only a confirmed 404 allows one replacement. The observer never creates
+messages. A failed UI edit never stops audio or advances the queue. If an
+applied command's card edit fails, the private receipt distinguishes that UI
+failure from the accepted operation.
 
 Button mutations keep the existing voice-channel permission checks. A denied
 button press receives an ephemeral follow-up, preserving the shared card and

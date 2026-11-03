@@ -101,8 +101,8 @@ limit. It contains no host identifiers or process environment values.
 `discord.panel` WARN reports automatic player-edit failures with safe HTTP status,
 failure count, retry delay and whether automatic updates remain enabled. No
 message content, webhook token or response body is logged. Deleted/forbidden
-messages and exhausted retries disable edits until another interaction establishes
-a view; playback continues independently. Progress edits generate no INFO events.
+messages and exhausted retries suspend edits while retaining message identity
+for a manual refresh; playback continues independently. Progress edits generate no INFO events.
 
 Discord-facing feedback is separate from production logs: one evolving shared
 card carries playback state, recovery and failure guidance, while command receipts

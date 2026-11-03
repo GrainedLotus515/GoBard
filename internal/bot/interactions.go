@@ -141,6 +141,9 @@ func (r *Runtime) executeInteraction(ref interactionRef, m MappedInteraction) {
 }
 
 func (r *Runtime) execute(ctx context.Context, m MappedInteraction) (session.Snapshot, int, error) {
+	if m.PlayerChannelSetting {
+		return r.setPlayerChannel(ctx, m)
+	}
 	if m.Name == "play" {
 		return r.play(ctx, m)
 	}

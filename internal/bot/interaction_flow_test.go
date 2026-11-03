@@ -162,5 +162,10 @@ func TestInteractionFlowPlayConcurrentControlsAndStop(t *testing.T) {
 	if record.lastReceipt.Title != "Stopping playback" {
 		t.Fatal("stop acknowledgement missing")
 	}
+	execute(interactionFixture("disconnect"))
+	execute(interactionFixture("play", stringOption("query", "back again")))
+	if record.publicMessages != 1 || record.lastCard.Title != "First track" {
+		t.Fatal("disconnect/rejoin created a new card or failed to resume")
+	}
 	r.Close()
 }
