@@ -132,9 +132,13 @@ func newIdleSession(parent context.Context, id string, engine *playback.Engine, 
 	// #nosec G118 -- Session.Close owns cancellation; parent also terminates run.
 	ctx, cancel := context.WithCancel(parent)
 	s := &Session{ctx: ctx, cancel: cancel, done: make(chan struct{}), commands: make(chan command, MailboxCapacity), changed: make(chan struct{}, 1), memberUpdates: make(map[string]memberObservation), observed: make(chan struct{}, 1)}
-	c := &coordinator{session: s, id: id + "/" + rand.Text(), engine: engine, output: output, connected: output != nil, voice: voice, logger: logger, streamSlots: slots,
+	c := &coordinator{session: s, id: id + "/" + rand.Text(), engine: engine, output: output, voice: voice, logger: logger, streamSlots: slots,
 		queue:   queue{entries: make([]entry, 0, capacity), index: -1, capacity: capacity},
 		results: make(chan playback.Result, 1), volume: 100, duckTarget: 70, speakers: make(map[string]bool), reservations: make(map[string]uint64), transportResults: make(chan transportResult, 1), idle: idle}
+	c.link = voiceDisconnected{}
+	if output != nil {
+		c.link = voiceConnected{}
+	}
 	go c.run()
 	return s, nil
 }
@@ -428,7 +432,7 @@ type coordinator struct {
 	channel               string
 	engine                *playback.Engine
 	output                playback.Output
-	connected             bool
+	link                  voiceState
 	queue                 queue
 	results               chan playback.Result
 	active                *Ticket
@@ -452,29 +456,18 @@ type coordinator struct {
 	pausedIdle            <-chan time.Time
 	aloneTimer            *time.Timer
 	aloneIdle             <-chan time.Time
-	transportCancel       context.CancelFunc
-	transportKind         string
-	joinReply             chan response
-	needDisconnect        bool
 	recoveryAttempts      int
-	retryTimer            *time.Timer
-	retry                 <-chan time.Time
 	dirty                 bool
 	recovery              string
 	streamSlots           chan struct{}
 	streamHeld            bool
-	reconnectAfter        bool
-	// Bot voice observation made while a connect/recover was in flight;
-	// reconciled when that transport result is processed.
-	connectObserved    string
-	connectObservedSet bool
-	observedScratch    []Operation
+	observedScratch       []Operation
 }
 
 func (c *coordinator) run() {
 	defer close(c.session.done)
 	defer c.releaseStream()
-	defer c.closeVoice()
+	defer c.voiceEvent(voiceEvent{kind: voiceShutdown})
 	c.dirty = true
 	for {
 		// Same order as handle: a published completion precedes observations,
@@ -489,10 +482,10 @@ func (c *coordinator) run() {
 		c.driveTransport()
 		// Keep the lease through attempt cleanup, pause, seek and recovery.
 		// A retained disconnected queue is cheap state, not an active stream.
-		if c.active == nil && (c.queue.current() == nil || (!c.connected && c.retry == nil && c.transportKind != "recover" && c.transportKind != "connect")) {
+		if c.active == nil && (c.queue.current() == nil || !c.holdsChannel()) {
 			c.releaseStream()
 		}
-		if c.active == nil && c.connected && c.transportCancel == nil && c.queue.current() != nil && c.session.ctx.Err() == nil {
+		if c.active == nil && c.connected() && c.queue.current() != nil && c.session.ctx.Err() == nil {
 			c.start()
 			c.dirty = true
 		}
@@ -520,16 +513,15 @@ func (c *coordinator) run() {
 		case result := <-c.transportResults:
 			c.dirty = true
 			c.drainObserved()
-			c.transportComplete(result)
-		case <-c.retry:
+			c.voiceEvent(voiceEvent{kind: voiceTransportDone, result: result})
+		case <-c.retryTimer():
 			c.dirty = true
-			c.retry = nil
-			c.startRecovery()
+			c.voiceEvent(voiceEvent{kind: voiceRetry})
 		case <-c.pausedIdle:
 			// Armed only while the condition holds (see armIdle).
 			c.pausedIdle = nil
 			c.dirty = true
-			c.leaveVoice("paused_timeout")
+			c.voiceEvent(voiceEvent{kind: voiceIdleTimeout, reason: "paused_timeout"})
 		case <-c.aloneIdle:
 			c.aloneExpired()
 		case <-c.session.observed:
@@ -581,12 +573,12 @@ func (c *coordinator) applyObserved() {
 	if o.hasVoice {
 		// Speaker state is not in snapshots; only a transport change is
 		// worth waking observers for. ObserveVoice validated both channels.
-		connected, current, generation := c.connected, c.channel, c.generation
+		connected, current, generation := c.connected(), c.channel, c.generation
 		if o.hasPrior {
 			c.voiceLost(o.prior)
 		}
 		c.voiceLost(o.voice)
-		if c.connected != connected || c.channel != current || c.generation != generation {
+		if c.connected() != connected || c.channel != current || c.generation != generation {
 			c.dirty = true
 		}
 	}
@@ -614,7 +606,7 @@ func (c *coordinator) handle(cmd command) {
 		return
 	}
 	if cmd.joinChannel != "" {
-		c.join(cmd)
+		c.voiceEvent(voiceEvent{kind: voiceJoin, channel: cmd.joinChannel, reply: cmd.reply})
 		return
 	}
 	if cmd.reserve != "" || cmd.release != "" {
@@ -624,7 +616,7 @@ func (c *coordinator) handle(cmd command) {
 	if len(cmd.tracks) > 0 {
 		if cmd.generation != nil && *cmd.generation != c.generation {
 			cmd.reply <- response{err: ErrSuperseded}
-		} else if cmd.access != nil && (!c.connected || c.channel == "" || cmd.access.Channel != c.channel) {
+		} else if cmd.access != nil && (!c.connected() || c.channel == "" || cmd.access.Channel != c.channel) {
 			cmd.reply <- response{err: ErrVoiceAccess}
 		} else {
 			cmd.reply <- c.add(cmd.tracks, cmd.commandID)
@@ -648,7 +640,7 @@ func (c *coordinator) add(tracks []Track, commandID string) response {
 	if len(c.queue.entries)+len(tracks) > c.queue.capacity {
 		return response{err: ErrFull}
 	}
-	if (c.connected || c.transportKind == "connect" || c.transportKind == "recover") && !c.acquireStream() {
+	if dialing, _ := c.dialing(); (c.connected() || dialing) && !c.acquireStream() {
 		return response{err: ErrStreamLimit}
 	}
 	tickets := make([]*Ticket, 0, len(tracks))
@@ -703,10 +695,9 @@ func (c *coordinator) complete(result playback.Result) {
 	c.active = nil
 	c.controls = nil
 	c.last = result
-	if c.reconnectAfter {
-		c.reconnectAfter = false
-		defer c.recoverAfterPending()
-	}
+	// Resolves a voice loss that happened while this attempt ran; runs after
+	// the queue decisions below so the recovery budget reflects them.
+	defer c.voiceEvent(voiceEvent{kind: voiceAttemptJoined, cause: c.pending})
 	if c.stopAfter {
 		c.completeStop(result)
 		return
@@ -721,14 +712,9 @@ func (c *coordinator) complete(result playback.Result) {
 		// The attempt completed or failed on its own before the voice loss
 		// interrupted it; its outcome is authoritative. The connection is
 		// still gone, so recover only if work remains (else the drain
-		// releases it).
+		// releases it); voiceAttemptJoined decides.
 		reason = result.Outcome
-		defer func() {
-			c.generation++
-			if c.queue.current() != nil {
-				c.scheduleRecovery()
-			}
-		}()
+		c.generation++
 	}
 	switch reason {
 	case playback.SourceFailure:
@@ -740,9 +726,8 @@ func (c *coordinator) complete(result playback.Result) {
 	case playback.Disconnected, playback.TransportFailure:
 		if reason == playback.TransportFailure {
 			c.generation++
-			c.scheduleRecovery()
+			c.voiceEvent(voiceEvent{kind: voiceTransportFailed})
 		}
-		c.connected = false
 		c.forgetSpeakers()
 		// Both automatic recovery and a later explicit reconnect must resume
 		// after accepted packets. Unknown-duration/live media cannot be safely
@@ -784,20 +769,11 @@ func (c *coordinator) complete(result playback.Result) {
 	c.paused = false
 }
 
-// recoverAfterPending recovers a connection lost while another control was
-// pending, once that control's attempt has joined.
-func (c *coordinator) recoverAfterPending() {
-	if !c.connected && c.retry == nil && c.transportCancel == nil && !c.needDisconnect {
-		c.recoverLost()
-	}
-}
-
 func (c *coordinator) completeStop(result playback.Result) {
 	c.stopAfter = false
 	c.pending = ""
-	if result.Outcome == playback.TransportFailure || c.needDisconnect {
-		c.disconnectVoice()
-		c.connected = false
+	if result.Outcome == playback.TransportFailure || c.owesDisconnect() {
+		c.voiceEvent(voiceEvent{kind: voiceDisconnect})
 	}
 	c.settleAll(playback.Stopped, &result)
 	c.queue.reset()
@@ -849,15 +825,18 @@ func (c *coordinator) interrupt(reason playback.Outcome) {
 }
 
 func (c *coordinator) snapshot() Snapshot {
-	s := Snapshot{Generation: c.generation, Channel: c.channel, Current: c.queue.index, Active: c.active != nil, Connected: c.connected, Connecting: c.transportKind == "connect" || c.transportKind == "recover", Paused: c.paused,
+	s := Snapshot{Generation: c.generation, Channel: c.channel, Current: c.queue.index, Active: c.active != nil, Connected: c.connected(), Paused: c.paused,
 		Loop: c.loop, Volume: c.volume, Ducking: c.ducking, DuckTarget: c.duckTarget, Last: c.last, Recovery: c.recovery, Transition: c.pending}
-	s.Busy = c.active != nil || c.queue.current() != nil || len(c.reservations) > 0 || c.transportKind != "" || c.retry != nil || c.needDisconnect || c.stopAfter
+	s.Busy = c.active != nil || c.queue.current() != nil || len(c.reservations) > 0 || c.voiceBusy() || c.stopAfter
 	if current := c.queue.current(); current != nil {
 		s.RequestID = current.ticket.request.ID
 	}
-	if c.retry != nil || c.transportKind == "recover" {
+	dialing, recovering := c.dialing()
+	s.Connecting = dialing
+	_, backoff := c.link.(voiceBackoff)
+	if backoff || recovering {
 		s.Recovery = "voice_reconnect"
-	} else if c.recoveryAttempts >= 3 && !c.connected {
+	} else if c.recoveryAttempts >= 3 && !c.connected() {
 		s.Recovery = "voice_exhausted"
 	}
 	if c.stopAfter {
@@ -908,7 +887,7 @@ func (s *Session) ObserveAudience(channel string, alone bool) error {
 // previous event, so a timer is armed exactly while its condition holds and a
 // fired timer means the condition held continuously for the whole timeout.
 func (c *coordinator) armIdle() {
-	managed := c.voice != nil && c.connected
+	managed := c.voice != nil && c.connected()
 	c.pausedIdle = armTimer(&c.pausedTimer, c.pausedIdle, c.idle.Paused, managed && c.paused)
 	c.aloneIdle = armTimer(&c.aloneTimer, c.aloneIdle, c.idle.Alone, managed && c.audienceAlone && c.audienceChannel == c.channel)
 }
@@ -918,11 +897,11 @@ func (c *coordinator) armIdle() {
 func (c *coordinator) aloneExpired() {
 	fired := c.aloneIdle
 	c.drainObserved()
-	stillAlone := c.aloneIdle == fired && c.audienceAlone && c.audienceChannel == c.channel && c.connected
+	stillAlone := c.aloneIdle == fired && c.audienceAlone && c.audienceChannel == c.channel && c.connected()
 	c.aloneIdle = nil
 	if stillAlone {
 		c.dirty = true
-		c.leaveVoice("alone_timeout")
+		c.voiceEvent(voiceEvent{kind: voiceIdleTimeout, reason: "alone_timeout"})
 	}
 }
 

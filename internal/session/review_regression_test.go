@@ -116,7 +116,7 @@ func TestInterruptedRecoveryBoundariesAndControlPriority(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ticket := &Ticket{done: make(chan struct{}), request: playback.Request{ID: "request", Offset: time.Second}}
-			c := &coordinator{session: &Session{ctx: context.Background()}, cancel: func(error) {}, active: ticket, connected: true, pending: tc.pending, stopAfter: tc.stop, loop: true, recoveryAttempts: 2,
+			c := &coordinator{session: &Session{ctx: context.Background()}, cancel: func(error) {}, active: ticket, link: voiceConnected{}, pending: tc.pending, stopAfter: tc.stop, loop: true, recoveryAttempts: 2,
 				queue: queue{index: 0, entries: []entry{{track: Track{Duration: tc.duration, Live: tc.live}, ticket: ticket}}}}
 			result := playback.Result{Request: ticket.request, Outcome: playback.TransportFailure, Frames: tc.frames}
 			// Engine normally returns the winning cancellation cause.

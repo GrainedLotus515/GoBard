@@ -147,6 +147,63 @@ queue. A timer is armed only while its condition holds and restarts when it
 stops holding; 0 disables it. Occupancy comes from the adapter's voice-state
 cache; a member not known to be a bot counts as a listener.
 
+### Voice connection state machine
+
+The coordinator holds exactly one voice state (`internal/session/voice_state.go`).
+Each state carries only its own data, and `voiceEvent` is the only code that
+changes it. The per-request recovery budget lives outside the states because it
+outlasts them. A reconnect keeps it, and only advancing the queue or an explicit
+join resets it.
+
+```mermaid
+stateDiagram-v2
+    [*] --> Disconnected
+    Disconnected --> Connecting: join
+    Connecting --> Connected: connect ok (then judge newest observation)
+    Connecting --> Releasing: connect failed
+    Connected --> Lost: moved, attempt running
+    Connected --> Backoff: moved idle with queued work / output transport failure
+    Connected --> Releasing: kicked ("") / idle timeout / moved idle, nothing queued / Disconnect / drained / exhausted
+    Lost --> Lost: moved again (retarget) / stop or Disconnect (release=true)
+    Lost --> Backoff: attempt joined, work queued
+    Lost --> Releasing: kicked / attempt joined after stop, or idle after a loss during another control
+    Lost --> Disconnected: attempt finished on its own, nothing queued (drain releases)
+    Backoff --> Reconnecting: retry timer
+    Backoff --> Backoff: moved (retarget)
+    Backoff --> Releasing: kicked / stop / Disconnect / drained
+    Reconnecting --> Connected: recover ok (then judge newest observation)
+    Reconnecting --> Backoff: recover failed, budget left
+    Reconnecting --> Releasing: recover failed, budget exhausted
+    Connecting --> Releasing: stop / Disconnect (abandoned connect must report)
+    Reconnecting --> Releasing: stop / Disconnect (abandoned recover must report)
+    Releasing --> Disconnecting: no attempt running and no abandoned connect
+    Disconnecting --> Disconnected: Disconnect returned
+```
+
+* **Disconnected** — nothing held or owed; a queue and resume position may be retained.
+* **Connecting / Reconnecting** — a join's or recovery's `Connect` is in flight.
+  Observations are recorded, not judged: a recover's own teardown reports `""`
+  before the new channel, so only the newest observation is judged, against the
+  connection just established. The join is acknowledged only if still connected.
+* **Lost** — moved away while an attempt runs. A control pending at the move
+  keeps its outcome. The next state is decided after the attempt joins. A stop
+  or Disconnect in the meantime sets `release`.
+* **Backoff** — waiting 0/1/2 s before the next of three recovery attempts.
+* **Releasing** — a Disconnect is owed. It waits for the running attempt to
+  join, and for an abandoned connect or recover to report. That late success is
+  discarded and the join gets `ErrSuperseded`.
+* **Disconnecting** — `Disconnect` is in flight.
+
+Shutdown from any state cancels and joins in-flight transport, rejects a
+pending join with `ErrClosed` and calls `Disconnect`. Snapshot projections:
+`Connected` is the Connected state. `Connecting` means a connect or recover is
+in flight, including one abandoned by Releasing. `Recovery` is `voice_reconnect`
+during Backoff or a recover, and `voice_exhausted` when the budget is spent and
+the session is not connected. Voice work makes `Busy` true in every state except
+Disconnected, Connected and Lost; Lost always has a running attempt. Users in
+the channel may control the session while it is Connected, in Backoff, or has a
+connect in flight. The stream-slot lease is kept in those same states.
+
 After the failed attempt joins, its accepted frame count advances that attempt's
 offset by 20 ms per frame, including after a nonzero seek. Request identity is
 retained; every resume gets a distinct attempt identity and terminal event.

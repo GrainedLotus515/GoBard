@@ -15,9 +15,9 @@ import (
 
 func TestVoiceConnectionRecordIncludesSafeNetworkReason(t *testing.T) {
 	var records bytes.Buffer
-	c := &coordinator{session: &Session{}, id: "session", logger: log.NewWithOptions(&records, log.Options{Formatter: log.JSONFormatter}), transportCancel: func() {}, transportKind: "connect"}
+	c := &coordinator{session: &Session{}, id: "session", logger: log.NewWithOptions(&records, log.Options{Formatter: log.JSONFormatter}), link: voiceConnecting{dial: dial{cancel: func() {}}}}
 	c.session.ctx = t.Context()
-	c.transportComplete(transportResult{err: &net.OpError{Op: "dial SECRET", Net: "udp", Err: syscall.ECONNREFUSED}})
+	c.voiceEvent(voiceEvent{kind: voiceTransportDone, result: transportResult{err: &net.OpError{Op: "dial SECRET", Net: "udp", Err: syscall.ECONNREFUSED}}})
 	var event map[string]any
 	if err := json.Unmarshal(records.Bytes(), &event); err != nil {
 		t.Fatal("expected one record", err)
