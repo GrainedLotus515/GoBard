@@ -282,8 +282,11 @@ func (r *Runtime) voiceState(e *discordgo.VoiceStateUpdate) {
 	}
 	// Publish the bot's own channel to the session before the voice SDK can
 	// act on it, so a connect that completes on this update is reconciled
-	// against it rather than an older observation.
-	if target, ok := r.sessions.Get(e.GuildID); ok {
+	// against it rather than an older observation. The acknowledgement of
+	// the adapter's own failure cleanup is not a removal: the session already
+	// owns that failure and its bounded retry.
+	ownCleanup := e.ChannelID == "" && r.voice.Load().ConsumeCleanupLeave(e.GuildID)
+	if target, ok := r.sessions.Get(e.GuildID); ok && !ownCleanup {
 		if err := target.ObserveVoice(e.ChannelID); err != nil {
 			r.logger.Warn("Voice-state transition rejected", "event", "voice.event", "reason", "invalid_channel")
 		}

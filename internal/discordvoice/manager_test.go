@@ -106,3 +106,29 @@ func TestToVoiceStateUpdateRejectsInvalidIDs(t *testing.T) {
 		t.Fatal("toVoiceStateUpdate() error = nil, want parse failure")
 	}
 }
+
+func TestCleanupLeaveClaimsOneAcknowledgementWithinWindow(t *testing.T) {
+	m := &Manager{}
+	if m.ConsumeCleanupLeave("1") {
+		t.Fatal("unmarked empty voice state treated as own cleanup")
+	}
+	m.markCleanupLeave("1")
+	if m.ConsumeCleanupLeave("2") {
+		t.Fatal("cleanup mark leaked across guilds")
+	}
+	if !m.ConsumeCleanupLeave("1") {
+		t.Fatal("own cleanup acknowledgement not recognized")
+	}
+	if m.ConsumeCleanupLeave("1") {
+		t.Fatal("one cleanup claimed a second empty voice state (a later removal)")
+	}
+	m.markCleanupLeave("1")
+	m.cleanupLeaves["1"] = time.Now().Add(-time.Millisecond)
+	if m.ConsumeCleanupLeave("1") {
+		t.Fatal("stale cleanup mark hid a removal")
+	}
+	var none *Manager
+	if none.ConsumeCleanupLeave("1") {
+		t.Fatal("nil manager claimed a cleanup")
+	}
+}

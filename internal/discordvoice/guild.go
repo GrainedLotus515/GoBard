@@ -34,6 +34,7 @@ func (g *Guild) Connect(ctx context.Context, channel string) (playback.Output, e
 		err = conn.SetSpeaking(ctx, true)
 	}
 	if err != nil {
+		g.manager.markCleanupLeave(g.id)
 		cleanup, cancel := context.WithTimeout(context.WithoutCancel(ctx), 3*time.Second)
 		defer cancel()
 		return nil, errors.Join(err, g.Disconnect(cleanup))

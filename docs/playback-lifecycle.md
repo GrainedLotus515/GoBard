@@ -136,7 +136,10 @@ is followed (with work queued) or released (idle). Removal by someone else
 (observed channel empty) is deliberate: it is handled as an intentional
 disconnect, never reconnected automatically, and the queue is retained. A
 recover's own teardown also reports an empty channel, so during a connect only
-the newest observation at completion is judged.
+the newest observation at completion is judged. A failed connect's own cleanup
+leave is marked by the voice adapter, and its empty-channel acknowledgement (up to
+5 s later) is not published as a removal, so it cannot cancel bounded recovery. A
+removal that coincides with a failed reconnect may cost those bounded retries.
 Idle timeouts take the same path as a removal: after `PAUSE_TIMEOUT_SECONDS`
 (default 600) continuously paused, or `ALONE_TIMEOUT_SECONDS` (default 120) with
 no non-bot member in the bot's channel, the session disconnects and keeps the
