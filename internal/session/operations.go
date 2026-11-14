@@ -44,7 +44,10 @@ func (c *coordinator) apply(op Operation) error {
 	case Connect:
 		return c.connect(op)
 	case VoiceLost:
-		return c.voiceLost(op.Channel)
+		if len(op.Channel) > 32 {
+			return errors.New("invalid observed voice channel")
+		}
+		c.voiceLost(op.Channel)
 	case VoiceMember:
 		c.voiceMember(op.Speaker, op.Channel)
 	case Clear:

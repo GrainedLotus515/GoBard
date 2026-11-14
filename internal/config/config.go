@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/GrainedLotus515/gobard/internal/capacity"
 )
@@ -44,6 +45,8 @@ type Config struct {
 	DefaultVolume             int
 	ReduceVolumeOnVoice       bool
 	ReduceVolumeOnVoiceTarget int
+	PauseTimeout              time.Duration
+	AloneTimeout              time.Duration
 	MaxPlaylistTracks         int
 	YTDLPMaxConcurrency       int
 	MaxGuildSessions          int
@@ -82,6 +85,14 @@ func Load() (*Config, error) {
 		return nil, err
 	}
 	reduceTarget, err := envInt("REDUCE_VOL_WHEN_VOICE_TARGET", 70, 0, 100)
+	if err != nil {
+		return nil, err
+	}
+	pauseTimeout, err := envInt("PAUSE_TIMEOUT_SECONDS", 600, 0, 86400)
+	if err != nil {
+		return nil, err
+	}
+	aloneTimeout, err := envInt("ALONE_TIMEOUT_SECONDS", 120, 0, 86400)
 	if err != nil {
 		return nil, err
 	}
@@ -163,6 +174,8 @@ func Load() (*Config, error) {
 		DefaultVolume:             defaultVolume,
 		ReduceVolumeOnVoice:       reduceOnVoice,
 		ReduceVolumeOnVoiceTarget: reduceTarget,
+		PauseTimeout:              time.Duration(pauseTimeout) * time.Second,
+		AloneTimeout:              time.Duration(aloneTimeout) * time.Second,
 		MaxPlaylistTracks:         maxPlaylistTracks,
 		YTDLPMaxConcurrency:       ytdlpConcurrency,
 		MaxGuildSessions:          maxGuilds,

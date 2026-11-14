@@ -24,10 +24,9 @@ type transportResult struct {
 	err    error
 }
 
-func (c *coordinator) voiceLost(channel string) error {
-	if len(channel) > 32 {
-		return errors.New("invalid observed voice channel")
-	}
+// voiceLost applies the bot's own observed channel ("" when removed). Callers
+// validate the channel length at the observation boundary.
+func (c *coordinator) voiceLost(channel string) {
 	if !c.connected {
 		switch {
 		case c.transportKind == "connect" || c.transportKind == "recover":
@@ -39,20 +38,20 @@ func (c *coordinator) voiceLost(channel string) error {
 			c.connectObserved, c.connectObservedSet = channel, true
 		case c.retry != nil || c.reconnectAfter || c.active != nil && c.pending == playback.TransportFailure:
 			if channel == "" {
-				c.kicked()
+				c.leaveVoice("removed")
 			} else {
 				// Recovery is pending: target the newest observed channel.
 				c.channel = channel
 			}
 		}
-		return nil
+		return
 	}
 	if channel == c.channel {
-		return nil
+		return
 	}
 	if channel == "" {
-		c.kicked()
-		return nil
+		c.leaveVoice("removed")
+		return
 	}
 	c.channel = channel
 	c.connected = false
@@ -67,17 +66,17 @@ func (c *coordinator) voiceLost(channel string) error {
 	} else {
 		c.recoverLost()
 	}
-	return nil
 }
 
-// kicked handles the bot being removed from voice by someone else (its own
-// channel observed as ""). That is deliberate, unlike a move or a network
-// failure: no recovery is attempted, the connection is released, and the
-// queue is kept with the current request's resume position, exactly as an
-// explicit Disconnect. A control already pending keeps its outcome.
-func (c *coordinator) kicked() {
+// leaveVoice handles a deliberate end of the voice connection that no user
+// command requested: removal by someone else (own channel observed as ""),
+// or an idle timeout. Unlike a move or a network failure, no recovery is
+// attempted; the connection is released and the queue is kept with the
+// current request's resume position, exactly as an explicit Disconnect. A
+// control already pending keeps its outcome.
+func (c *coordinator) leaveVoice(reason string) {
 	if c.voice != nil {
-		c.logger.Info("Removed from voice; recovery declined, queue retained", "event", "session.recovery", "session_id", c.id, "recovery", "declined", "reason", "removed")
+		c.logger.Info("Left voice; recovery declined, queue retained", "event", "session.recovery", "session_id", c.id, "recovery", "declined", "reason", reason)
 	}
 	c.reconnectAfter = false
 	c.disconnectVoice()
@@ -246,7 +245,7 @@ func (c *coordinator) transportComplete(result transportResult) {
 		// observation as a loss of the connection just established, before
 		// acknowledging the join.
 		c.connectObservedSet = false
-		_ = c.voiceLost(c.connectObserved)
+		c.voiceLost(c.connectObserved)
 	}
 	if c.joinReply != nil {
 		if c.connected {

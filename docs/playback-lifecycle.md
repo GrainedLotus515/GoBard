@@ -137,6 +137,12 @@ is followed (with work queued) or released (idle). Removal by someone else
 disconnect, never reconnected automatically, and the queue is retained. A
 recover's own teardown also reports an empty channel, so during a connect only
 the newest observation at completion is judged.
+Idle timeouts take the same path as a removal: after `PAUSE_TIMEOUT_SECONDS`
+(default 600) continuously paused, or `ALONE_TIMEOUT_SECONDS` (default 120) with
+no non-bot member in the bot's channel, the session disconnects and keeps the
+queue. A timer is armed only while its condition holds and restarts when it
+stops holding; 0 disables it. Occupancy comes from the adapter's voice-state
+cache; a member not known to be a bot counts as a listener.
 
 After the failed attempt joins, its accepted frame count advances that attempt's
 offset by 20 ms per frame, including after a nonzero seek. Request identity is

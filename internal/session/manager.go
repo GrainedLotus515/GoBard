@@ -17,6 +17,7 @@ type Defaults struct {
 	Volume     int
 	Ducking    bool
 	DuckTarget int
+	Idle       IdleTimeouts // managed-voice sessions only
 }
 type managedSession struct {
 	session  *Session
@@ -44,7 +45,7 @@ func NewManager(parent context.Context, engine *playback.Engine, maxGuilds, maxS
 	if maxStreams < 1 || maxStreams > 64 || maxStreams > maxGuilds {
 		return nil, errors.New("invalid active stream capacity")
 	}
-	if parent == nil || engine == nil || maxGuilds < 1 || maxGuilds > 1024 || queueCapacity < 1 || queueCapacity > MaxQueue || defaults.Volume < 0 || defaults.Volume > 100 || defaults.DuckTarget < 0 || defaults.DuckTarget > 100 {
+	if parent == nil || engine == nil || maxGuilds < 1 || maxGuilds > 1024 || queueCapacity < 1 || queueCapacity > MaxQueue || defaults.Volume < 0 || defaults.Volume > 100 || defaults.DuckTarget < 0 || defaults.DuckTarget > 100 || defaults.Idle.Paused < 0 || defaults.Idle.Alone < 0 {
 		return nil, errors.New("invalid session manager configuration")
 	}
 	// #nosec G118 -- Manager.Close cancels and joins every admitted session.
@@ -69,7 +70,7 @@ func (m *Manager) CreateVoice(guild string, voice Voice, logger *log.Logger) (*S
 		return nil, errors.New("guild, voice and logger required")
 	}
 	return m.create(guild, func() (*Session, error) {
-		return newSession(m.ctx, guild, m.engine, nil, voice, logger, m.streamSlots, m.queueCapacity)
+		return newIdleSession(m.ctx, guild, m.engine, nil, voice, logger, m.streamSlots, m.queueCapacity, m.defaults.Idle)
 	})
 }
 

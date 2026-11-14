@@ -231,6 +231,31 @@ func (r *Runtime) reconcileSnapshot(g *discordgo.Guild) {
 	if err := target.ObserveVoice(channel); err != nil {
 		r.logger.Warn("Voice-state transition rejected", "event", "voice.event", "reason", "invalid_channel")
 	}
+	r.publishAudience(g.ID)
+}
+
+// publishAudience reports whether the bot has no non-bot company in its
+// channel, from the authorization cache, so the session can leave an
+// abandoned channel. An incomplete guild snapshot publishes nothing.
+func (r *Runtime) publishAudience(guild string) {
+	target, ok := r.sessions.Get(guild)
+	if !ok {
+		return
+	}
+	r.discord.State.RLock()
+	self := ""
+	if r.discord.State.User != nil {
+		self = r.discord.State.User.ID
+	}
+	r.discord.State.RUnlock()
+	if self == "" {
+		return
+	}
+	if channel, alone, ok := r.state.audience(guild, self); ok {
+		if err := target.ObserveAudience(channel, alone); err != nil {
+			r.logger.Warn("Voice-state transition rejected", "event", "voice.event", "reason", "invalid_channel")
+		}
+	}
 }
 
 func (r *Runtime) voiceState(e *discordgo.VoiceStateUpdate) {
@@ -252,6 +277,7 @@ func (r *Runtime) voiceState(e *discordgo.VoiceStateUpdate) {
 				r.logger.Debug("Voice member event dropped", "event", "voice.member", "reason", "rejected")
 			}
 		}
+		r.publishAudience(e.GuildID)
 		return
 	}
 	// Publish the bot's own channel to the session before the voice SDK can
@@ -265,6 +291,7 @@ func (r *Runtime) voiceState(e *discordgo.VoiceStateUpdate) {
 	if v := r.voice.Load(); v != nil {
 		v.HandleVoiceStateUpdate(e)
 	}
+	r.publishAudience(e.GuildID)
 }
 
 func (r *Runtime) Start() error {

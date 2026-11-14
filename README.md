@@ -85,6 +85,8 @@ GoBard validates supplied values at startup and exits on invalid configuration. 
 | `DEFAULT_VOLUME` | `100` | Integer from 0 to 100. |
 | `REDUCE_VOL_WHEN_VOICE` | `false` | Enable speaking-based volume ducking. |
 | `REDUCE_VOL_WHEN_VOICE_TARGET` | `70` | Integer from 0 to 100. |
+| `PAUSE_TIMEOUT_SECONDS` | `600` | Leave voice after this long paused; the queue and position are kept. 0 disables; max 86400. |
+| `ALONE_TIMEOUT_SECONDS` | `120` | Leave voice after this long with no non-bot member in the channel; the queue and position are kept. 0 disables; max 86400. |
 | `MAX_PLAYLIST_TRACKS` | `500` | Integer from 1 to 500. |
 | `YTDLP_MAX_CONCURRENCY` | `4` | Shared integer cap from 1 to 16 for every yt-dlp path: metadata, playlist work, cache downloads, and streaming fallback. |
 | `MAX_GUILD_SESSIONS` | `16` | Retained guild-session limit, 1–1024; increase explicitly for larger deployments. |
