@@ -97,7 +97,7 @@ func (m *Manager) create(guild string, construct func() (*Session, error)) (*Ses
 		err = m.configure(s)
 	}
 	m.mu.Lock()
-	if m.stopping || m.ctx.Err() != nil {
+	if m.stopping || m.ctx.Err() != nil || e.removing {
 		err = ErrClosed
 	}
 	if err != nil {
@@ -145,7 +145,14 @@ func (m *Manager) Remove(guild string) error {
 		m.mu.Unlock()
 		return nil
 	}
-	if e.removing || e.session == nil {
+	if e.session == nil {
+		// Construction owns the entry and closes the session once it observes
+		// the removal, so a guild leave during creation cannot leak a session.
+		e.removing = true
+		m.mu.Unlock()
+		return nil
+	}
+	if e.removing {
 		m.mu.Unlock()
 		return ErrBusy
 	}

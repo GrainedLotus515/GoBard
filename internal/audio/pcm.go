@@ -84,7 +84,7 @@ func Decode(parent context.Context, input *os.File, offset time.Duration, contro
 	args = append(args, "-vn", "-f", "s16le", "-ar", "48000", "-ac", "2", "pipe:1")
 	cmd := exec.CommandContext(ctx, "ffmpeg", args...)
 	cmd.WaitDelay = time.Second
-	s := &pcmStream{cmd: cmd, cancel: cancel, stdout: r, encoder: encoder, controls: controls}
+	s := &pcmStream{parent: parent, cmd: cmd, cancel: cancel, stdout: r, encoder: encoder, controls: controls}
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = input, w, &s.stderr
 	if err := cmd.Start(); err != nil {
 		cancel()
@@ -97,6 +97,9 @@ func Decode(parent context.Context, input *os.File, offset time.Duration, contro
 }
 
 type pcmStream struct {
+	// parent is the attempt context that owns this stream; it distinguishes an
+	// owner-initiated FFmpeg kill from an independent decoder failure.
+	parent    context.Context
 	cmd       *exec.Cmd
 	cancel    context.CancelFunc
 	stdout    *os.File
@@ -105,6 +108,7 @@ type pcmStream struct {
 	pcm       [samplesPerFrame * 2]byte
 	samples   [samplesPerFrame]int16
 	waitOnce  sync.Once
+	waitRaw   error
 	waitErr   error
 	closeOnce sync.Once
 	closeErr  error
@@ -122,6 +126,15 @@ func (s *pcmStream) Next(ctx context.Context, packet []byte) (int, error) {
 	n, err := io.ReadFull(s.stdout, s.pcm[:])
 	if err != nil {
 		s.ended = true
+		if s.parent.Err() != nil {
+			// Cancellation kills FFmpeg, which surfaces as EOF and a signal
+			// exit: report the owner's cause. Reap first so an independent
+			// nonzero exit that raced cancellation keeps its diagnostic.
+			if waitErr := s.wait(); waitErr != nil && !s.ownerKilled() {
+				return 0, waitErr
+			}
+			return 0, context.Cause(s.parent)
+		}
 		if !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrUnexpectedEOF) {
 			return 0, failure.Wrap("decode", failure.Codec, err)
 		}
@@ -157,10 +170,22 @@ func (s *pcmStream) Next(ctx context.Context, packet []byte) (int, error) {
 func (s *pcmStream) wait() error {
 	s.waitOnce.Do(func() {
 		if err := s.cmd.Wait(); err != nil {
+			s.waitRaw = err
 			s.waitErr = s.stderr.Failure("decode", failure.Codec, err)
 		}
 	})
 	return s.waitErr
+}
+
+// ownerKilled reports whether the reaped exit was caused by the owner's
+// cancellation (a signal kill) rather than an independent FFmpeg failure.
+// A normal nonzero exit stays authoritative even when cancellation races it.
+func (s *pcmStream) ownerKilled() bool {
+	if s.parent.Err() == nil {
+		return false
+	}
+	var exitErr *exec.ExitError
+	return s.waitRaw == nil || errors.Is(s.waitRaw, context.Canceled) || errors.As(s.waitRaw, &exitErr) && exitErr.ExitCode() == -1
 }
 
 func (s *pcmStream) Close() error {
@@ -168,9 +193,11 @@ func (s *pcmStream) Close() error {
 		s.cancel()
 		_ = s.stdout.Close()
 		s.closeErr = s.wait()
-		if !s.ended {
-			// Early Close intentionally terminates FFmpeg; the resulting signal
-			// exit is not a cleanup failure.
+		if !s.ended || s.parent.Err() != nil {
+			// Early Close or owner cancellation terminates FFmpeg, and closing
+			// its pipes can make it exit nonzero rather than by signal. Neither
+			// is a cleanup failure. An independent failure Next observed was
+			// already returned by Next; Close does not report it twice.
 			s.closeErr = nil
 		}
 	})

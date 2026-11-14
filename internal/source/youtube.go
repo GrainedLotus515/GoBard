@@ -300,6 +300,9 @@ func (s *extractorStream) next(ctx context.Context, packet []byte) (int, error) 
 	}
 	s.stopStartup()
 	if s.ctx.Err() != nil {
+		// Cancellation stops the feeder and closes FFmpeg's stdin, so even a
+		// normal nonzero decoder exit here is a consequence of the cancel, not
+		// independent evidence. The owner's cause takes precedence.
 		return 0, context.Cause(s.ctx)
 	}
 	if !errors.Is(err, io.EOF) {

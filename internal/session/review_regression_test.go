@@ -27,7 +27,7 @@ func TestReviewTransportRecoveryPreservesDeliveredPosition(t *testing.T) {
 		}
 		time.Sleep(time.Millisecond)
 	}
-	apply(t, s, Operation{Action: VoiceLost})
+	apply(t, s, Operation{Action: VoiceLost, Channel: "moved"})
 	second := nextAttempt(t, source)
 	if second.request.ID != first.request.ID {
 		t.Fatal("recovery replaced the logical request")
@@ -65,9 +65,9 @@ func TestVoiceRecoveryAccumulatesAfterSeekAndDisconnect(t *testing.T) {
 	first := nextAttempt(t, source)
 	apply(t, s, Operation{Action: Seek, Offset: time.Second})
 	previous := nextAttempt(t, source)
-	for range 2 {
+	for _, moved := range []string{"moved", "voice"} {
 		awaitDelivered(t, s)
-		apply(t, s, Operation{Action: VoiceLost})
+		apply(t, s, Operation{Action: VoiceLost, Channel: moved})
 		next := nextAttempt(t, source)
 		if next.request.ID != first.request.ID || next.request.AttemptID == previous.request.AttemptID || next.request.Offset != previous.request.Offset+playback.FrameDuration {
 			t.Fatalf("resume identities/offset: previous=%+v next=%+v", previous.request, next.request)
