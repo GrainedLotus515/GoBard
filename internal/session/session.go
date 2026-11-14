@@ -90,7 +90,10 @@ type Session struct {
 	audienceChannel string
 	audienceAlone   bool
 	audiencePending bool
-	observed        chan struct{}
+	// A not-alone observation since the last drain; it restarts the alone
+	// clock even if the latest value is alone again.
+	audienceInterrupted bool
+	observed            chan struct{}
 }
 
 // IdleTimeouts bound how long a voice connection is kept when nobody is
@@ -398,6 +401,7 @@ type observations struct {
 	audienceChannel    string
 	audienceAlone      bool
 	hasAudience        bool
+	audienceInterrupt  bool
 }
 
 // takeObserved moves pending observations into the coordinator-owned buffer.
@@ -405,7 +409,8 @@ func (s *Session) takeObserved(speakers []Operation) observations {
 	s.observeMu.Lock()
 	defer s.observeMu.Unlock()
 	o := observations{prior: s.priorVoice, voice: s.observedVoice, hasPrior: s.priorPending, hasVoice: s.voicePending, resetSpeakers: s.speakersReset}
-	o.audienceChannel, o.audienceAlone, o.hasAudience = s.audienceChannel, s.audienceAlone, s.audiencePending
+	o.audienceChannel, o.audienceAlone, o.hasAudience, o.audienceInterrupt = s.audienceChannel, s.audienceAlone, s.audiencePending, s.audienceInterrupted
+	s.audienceInterrupted = false
 	s.voicePending, s.priorPending, s.speakersReset, s.audiencePending = false, false, false, false
 	for _, m := range s.memberUpdates {
 		speakers = m.replay(speakers)
@@ -526,9 +531,7 @@ func (c *coordinator) run() {
 			c.dirty = true
 			c.leaveVoice("paused_timeout")
 		case <-c.aloneIdle:
-			c.aloneIdle = nil
-			c.dirty = true
-			c.leaveVoice("alone_timeout")
+			c.aloneExpired()
 		case <-c.session.observed:
 			c.applyObserved()
 		case cmd := <-c.session.commands:
@@ -570,6 +573,10 @@ func (c *coordinator) applyObserved() {
 	c.observedScratch = o.speakers[:0]
 	if o.hasAudience {
 		c.audienceChannel, c.audienceAlone = o.audienceChannel, o.audienceAlone
+		if o.audienceInterrupt {
+			// Disarm so armIdle restarts the full timeout.
+			c.aloneIdle = armTimer(&c.aloneTimer, c.aloneIdle, 0, false)
+		}
 	}
 	if o.hasVoice {
 		// Speaker state is not in snapshots; only a transport change is
@@ -891,6 +898,7 @@ func (s *Session) ObserveAudience(channel string, alone bool) error {
 	}
 	s.observeMu.Lock()
 	s.audienceChannel, s.audienceAlone, s.audiencePending = channel, alone, true
+	s.audienceInterrupted = s.audienceInterrupted || !alone
 	s.observeMu.Unlock()
 	s.notifyObserved()
 	return nil
@@ -903,6 +911,19 @@ func (c *coordinator) armIdle() {
 	managed := c.voice != nil && c.connected
 	c.pausedIdle = armTimer(&c.pausedTimer, c.pausedIdle, c.idle.Paused, managed && c.paused)
 	c.aloneIdle = armTimer(&c.aloneTimer, c.aloneIdle, c.idle.Alone, managed && c.audienceAlone && c.audienceChannel == c.channel)
+}
+
+// aloneExpired leaves voice unless a listener's return was published but not
+// yet applied; applying it disarms the timer or clears the condition.
+func (c *coordinator) aloneExpired() {
+	fired := c.aloneIdle
+	c.drainObserved()
+	stillAlone := c.aloneIdle == fired && c.audienceAlone && c.audienceChannel == c.channel && c.connected
+	c.aloneIdle = nil
+	if stillAlone {
+		c.dirty = true
+		c.leaveVoice("alone_timeout")
+	}
 }
 
 func armTimer(timer **time.Timer, armed <-chan time.Time, timeout time.Duration, want bool) <-chan time.Time {

@@ -126,3 +126,60 @@ func TestIdleTimeoutsDisabledByZero(t *testing.T) {
 	}
 	expectLeft(t, left, false, 150*time.Millisecond)
 }
+
+func aloneCoordinator(t *testing.T) *coordinator {
+	t.Helper()
+	ticket := &Ticket{done: make(chan struct{})}
+	c := &coordinator{session: &Session{ctx: context.Background(), observed: make(chan struct{}, 1), memberUpdates: make(map[string]memberObservation)},
+		voice: voiceFixture{}, logger: log.New(io.Discard), speakers: make(map[string]bool), connected: true, channel: "voice", idle: IdleTimeouts{Alone: time.Hour},
+		queue: queue{index: 0, capacity: 8, entries: []entry{{track: Track{Duration: time.Minute}, ticket: ticket}}}}
+	t.Cleanup(func() {
+		if c.aloneTimer != nil {
+			c.aloneTimer.Stop()
+		}
+	})
+	if err := c.session.ObserveAudience("voice", true); err != nil {
+		t.Fatal(err)
+	}
+	c.drainObserved()
+	c.armIdle()
+	if c.aloneIdle == nil {
+		t.Fatal("alone timer not armed")
+	}
+	return c
+}
+
+func TestBriefListenerRestartsAloneClock(t *testing.T) {
+	c := aloneCoordinator(t)
+	// Left again before the coordinator drained: the latest value is still
+	// alone, but the clock must restart.
+	for _, alone := range []bool{false, true} {
+		if err := c.session.ObserveAudience("voice", alone); err != nil {
+			t.Fatal(err)
+		}
+	}
+	c.drainObserved()
+	if c.aloneIdle != nil {
+		t.Fatal("interrupted alone period kept its original deadline")
+	}
+}
+
+func TestAloneExpiryYieldsToPublishedListener(t *testing.T) {
+	c := aloneCoordinator(t)
+	if err := c.session.ObserveAudience("voice", false); err != nil {
+		t.Fatal(err)
+	}
+	c.aloneExpired()
+	if !c.connected || c.needDisconnect {
+		t.Fatal("left an occupied channel")
+	}
+	if err := c.session.ObserveAudience("voice", true); err != nil {
+		t.Fatal(err)
+	}
+	c.drainObserved()
+	c.armIdle()
+	c.aloneExpired()
+	if c.connected || !c.needDisconnect {
+		t.Fatal("did not leave when still alone at expiry")
+	}
+}

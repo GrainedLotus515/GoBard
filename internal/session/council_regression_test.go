@@ -535,3 +535,22 @@ func TestRemovalWhileReconnectingIsDistinguishedFromOwnTeardown(t *testing.T) {
 		}
 	}
 }
+
+func TestFailedRecoverCleanupIsNotMistakenForRemoval(t *testing.T) {
+	// A failed recover publishes "" for its own teardown and failure cleanup,
+	// before and after the new channel; neither may cancel bounded recovery.
+	for _, observed := range [][]string{{""}, {"", "voice", ""}} {
+		ticket := &Ticket{done: make(chan struct{})}
+		c := &coordinator{session: &Session{ctx: context.Background()}, voice: voiceFixture{}, logger: log.New(io.Discard), speakers: make(map[string]bool), channel: "voice",
+			queue:         queue{index: 0, capacity: 8, entries: []entry{{track: Track{Duration: time.Minute}, ticket: ticket}}},
+			transportKind: "recover", transportCancel: func() {}}
+		for _, channel := range observed {
+			c.voiceLost(channel)
+		}
+		c.transportComplete(transportResult{err: errors.New("voice handshake failed")})
+		if c.retry == nil || c.needDisconnect {
+			t.Fatalf("%q: recovery cancelled by own cleanup: retry=%v needDisconnect=%v", observed, c.retry != nil, c.needDisconnect)
+		}
+		c.retryTimer.Stop()
+	}
+}

@@ -227,6 +227,9 @@ func (c *coordinator) transportComplete(result transportResult) {
 		if c.connectObservedSet && c.connectObserved != "" {
 			c.channel = c.connectObserved
 		}
+		// A "" here is ambiguous: the adapter's own failure cleanup reports
+		// it too, after the new channel. Keep the bounded retry; a removal
+		// is honored once connected or when a reconnect succeeds.
 		c.connectObservedSet = false
 		if kind == "recover" {
 			c.scheduleRecovery()
