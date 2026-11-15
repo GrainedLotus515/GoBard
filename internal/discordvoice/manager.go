@@ -30,6 +30,40 @@ type Manager struct {
 
 	speakingMu      sync.RWMutex
 	speakingHandler func(guildID, userID string, speaking bool)
+
+	// Failure-cleanup leaves this adapter issued, per guild, until their
+	// Gateway acknowledgement (the bot's own empty voice state) arrives.
+	cleanupMu     sync.Mutex
+	cleanupLeaves map[string]time.Time
+}
+
+// cleanupLeaveWindow bounds how long a cleanup leave may claim the next empty
+// self voice state. Discord sends none if the bot never entered the channel;
+// the bound keeps that stale mark from hiding a later moderator removal.
+const cleanupLeaveWindow = 5 * time.Second
+
+// markCleanupLeave records that a failed connect is leaving voice on its own.
+func (m *Manager) markCleanupLeave(guildID string) {
+	m.cleanupMu.Lock()
+	if m.cleanupLeaves == nil {
+		m.cleanupLeaves = make(map[string]time.Time)
+	}
+	m.cleanupLeaves[guildID] = time.Now().Add(cleanupLeaveWindow)
+	m.cleanupMu.Unlock()
+}
+
+// ConsumeCleanupLeave reports whether an empty self voice state for guildID
+// acknowledges this adapter's own failure cleanup rather than a removal by
+// someone else. It consumes the mark.
+func (m *Manager) ConsumeCleanupLeave(guildID string) bool {
+	if m == nil {
+		return false
+	}
+	m.cleanupMu.Lock()
+	defer m.cleanupMu.Unlock()
+	deadline, ok := m.cleanupLeaves[guildID]
+	delete(m.cleanupLeaves, guildID)
+	return ok && time.Now().Before(deadline)
 }
 
 // Connection adapts a disgo voice connection to the player-facing voice interface.
@@ -139,6 +173,7 @@ func (m *Manager) Join(ctx context.Context, guildID, channelID string, selfMute,
 		}
 	})
 	if err := conn.Open(ctx, channelSnowflake, selfMute, selfDeaf); err != nil {
+		m.markCleanupLeave(guildID)
 		cleanup, cancel := context.WithTimeout(context.WithoutCancel(ctx), 3*time.Second)
 		conn.Shutdown(cleanup)
 		cancel()

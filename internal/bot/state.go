@@ -13,8 +13,15 @@ const maxGuildVoiceStates = 1024
 const maxGatewayVoiceStates = 16384
 
 type observedGuild struct {
-	voices   map[string]string
+	voices   map[string]voiceEntry
 	complete bool
+}
+
+// voiceEntry is one member's observed channel. bot is false when unknown, so
+// an unidentified member keeps the bot in its channel.
+type voiceEntry struct {
+	channel string
+	bot     bool
 }
 
 // gatewayState retains only authorization observations, never full SDK guilds,
@@ -66,10 +73,16 @@ func (s *gatewayState) updateGuild(g *discordgo.Guild) error {
 	if len(g.VoiceStates) > maxGuildVoiceStates || s.voices+len(g.VoiceStates) > maxGatewayVoiceStates {
 		return errors.New("gateway voice-state budget exceeded")
 	}
-	old.voices = make(map[string]string, len(g.VoiceStates))
+	bots := make(map[string]bool)
+	for _, m := range g.Members {
+		if m != nil && m.User != nil && m.User.Bot {
+			bots[m.User.ID] = true
+		}
+	}
+	old.voices = make(map[string]voiceEntry, len(g.VoiceStates))
 	for _, v := range g.VoiceStates {
 		if v != nil && validPathPart(v.UserID, 32) && validPathPart(v.ChannelID, 32) {
-			old.voices[strings.Clone(v.UserID)] = strings.Clone(v.ChannelID)
+			old.voices[strings.Clone(v.UserID)] = voiceEntry{channel: strings.Clone(v.ChannelID), bot: bots[v.UserID] || v.Member != nil && v.Member.User != nil && v.Member.User.Bot}
 		}
 	}
 	s.voices += len(old.voices)
@@ -101,7 +114,7 @@ func (s *gatewayState) voice(v *discordgo.VoiceState) error {
 		}
 		s.voices++
 	}
-	g.voices[strings.Clone(v.UserID)] = strings.Clone(v.ChannelID)
+	g.voices[strings.Clone(v.UserID)] = voiceEntry{channel: strings.Clone(v.ChannelID), bot: v.Member != nil && v.Member.User != nil && v.Member.User.Bot}
 	return nil
 }
 
@@ -112,7 +125,28 @@ func (s *gatewayState) access(guild, user string) (string, error) {
 	if !ok || !g.complete {
 		return "", errors.New("guild voice state unavailable")
 	}
-	return g.voices[user], nil
+	return g.voices[user].channel, nil
+}
+
+// audience reports self's observed channel and whether no other non-bot
+// member is in it. ok is false while the guild snapshot is incomplete.
+func (s *gatewayState) audience(guild, self string) (channel string, alone, ok bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	g, exists := s.guilds[guild]
+	if !exists || !g.complete {
+		return "", false, false
+	}
+	channel = g.voices[self].channel
+	if channel == "" {
+		return "", false, true
+	}
+	for user, v := range g.voices {
+		if v.channel == channel && user != self && !v.bot {
+			return channel, false, true
+		}
+	}
+	return channel, true, true
 }
 func (s *gatewayState) guildIDs() []string {
 	s.mu.Lock()

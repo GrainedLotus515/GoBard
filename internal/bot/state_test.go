@@ -90,3 +90,34 @@ func TestGatewayStateGlobalVoiceBudget(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestAudienceIgnoresBotsAndOtherChannels(t *testing.T) {
+	s := newGatewayState()
+	bot := &discordgo.Member{User: &discordgo.User{ID: "200", Bot: true}}
+	if err := s.updateGuild(&discordgo.Guild{ID: "1", Members: []*discordgo.Member{bot},
+		VoiceStates: []*discordgo.VoiceState{{UserID: "100", ChannelID: "10"}, {UserID: "200", ChannelID: "10"}, {UserID: "300", ChannelID: "11"}}}); err != nil {
+		t.Fatal(err)
+	}
+	if channel, alone, ok := s.audience("1", "100"); !ok || channel != "10" || !alone {
+		t.Fatalf("with only a bot: channel=%q alone=%v ok=%v", channel, alone, ok)
+	}
+	// An unidentified member counts as a listener.
+	if err := s.voice(&discordgo.VoiceState{GuildID: "1", UserID: "300", ChannelID: "10"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, alone, _ := s.audience("1", "100"); alone {
+		t.Fatal("listener in channel reported alone")
+	}
+	if err := s.voice(&discordgo.VoiceState{GuildID: "1", UserID: "300", ChannelID: ""}); err != nil {
+		t.Fatal(err)
+	}
+	if _, alone, _ := s.audience("1", "100"); !alone {
+		t.Fatal("departed listener still counted")
+	}
+	if channel, alone, ok := s.audience("1", "999"); !ok || channel != "" || alone {
+		t.Fatalf("not in voice: channel=%q alone=%v ok=%v", channel, alone, ok)
+	}
+	if _, _, ok := s.audience("2", "100"); ok {
+		t.Fatal("unknown guild reported audience")
+	}
+}

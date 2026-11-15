@@ -2,8 +2,8 @@
 
 # GoBard releases are intentionally linux/amd64 only.  Pin the exact platform
 # manifests rather than mutable image tags so a rebuild has a reviewable base.
-ARG BUILD_IMAGE=golang:1.27.3-trixie@sha256:8aa2821993207ae840ce09e4223217efcd14e01f71525db734faf4232bd59999
-ARG RUNTIME_IMAGE=debian:trixie-slim@sha256:918311b7b6c4c6f68b232ba516584925f6c78ad82b6fd534b98979df6438e483
+ARG BUILD_IMAGE=golang:1.27.4-trixie@sha256:2cd7e1ebf475c6208122d2b9cefc638d98fcc8dfd8554c8872c9dd0c21f4ac61
+ARG RUNTIME_IMAGE=debian:trixie-slim@sha256:7378260c0a098d27ac206225db5e7d92b8c7c84ea7afccc86eeb513756bbd392
 
 FROM --platform=linux/amd64 ${BUILD_IMAGE} AS build-base
 
@@ -160,13 +160,16 @@ RUN --mount=type=cache,target=/go/pkg/mod \
 
 FROM --platform=linux/amd64 ${RUNTIME_IMAGE} AS runtime
 
+# zlib1g is preinstalled in the base image; naming it pulls the
+# trixie-security fix (CVE-2026-85091) until the base image includes it.
 RUN apt-get update && apt-get install -y --no-install-recommends \
 	ca-certificates \
 	ffmpeg \
 	libopus0 \
 	libopusfile0 \
 	libsodium23 \
-	python3 && \
+	python3 \
+	zlib1g && \
 	rm -rf /var/lib/apt/lists/*
 
 RUN groupadd --gid 1000 gobard && \

@@ -17,6 +17,7 @@ type Defaults struct {
 	Volume     int
 	Ducking    bool
 	DuckTarget int
+	Idle       IdleTimeouts // managed-voice sessions only
 }
 type managedSession struct {
 	session  *Session
@@ -44,7 +45,7 @@ func NewManager(parent context.Context, engine *playback.Engine, maxGuilds, maxS
 	if maxStreams < 1 || maxStreams > 64 || maxStreams > maxGuilds {
 		return nil, errors.New("invalid active stream capacity")
 	}
-	if parent == nil || engine == nil || maxGuilds < 1 || maxGuilds > 1024 || queueCapacity < 1 || queueCapacity > MaxQueue || defaults.Volume < 0 || defaults.Volume > 100 || defaults.DuckTarget < 0 || defaults.DuckTarget > 100 {
+	if parent == nil || engine == nil || maxGuilds < 1 || maxGuilds > 1024 || queueCapacity < 1 || queueCapacity > MaxQueue || defaults.Volume < 0 || defaults.Volume > 100 || defaults.DuckTarget < 0 || defaults.DuckTarget > 100 || defaults.Idle.Paused < 0 || defaults.Idle.Alone < 0 {
 		return nil, errors.New("invalid session manager configuration")
 	}
 	// #nosec G118 -- Manager.Close cancels and joins every admitted session.
@@ -69,7 +70,7 @@ func (m *Manager) CreateVoice(guild string, voice Voice, logger *log.Logger) (*S
 		return nil, errors.New("guild, voice and logger required")
 	}
 	return m.create(guild, func() (*Session, error) {
-		return newSession(m.ctx, guild, m.engine, nil, voice, logger, m.streamSlots, m.queueCapacity)
+		return newIdleSession(m.ctx, guild, m.engine, nil, voice, logger, m.streamSlots, m.queueCapacity, m.defaults.Idle)
 	})
 }
 
@@ -97,7 +98,7 @@ func (m *Manager) create(guild string, construct func() (*Session, error)) (*Ses
 		err = m.configure(s)
 	}
 	m.mu.Lock()
-	if m.stopping || m.ctx.Err() != nil {
+	if m.stopping || m.ctx.Err() != nil || e.removing {
 		err = ErrClosed
 	}
 	if err != nil {
@@ -145,7 +146,14 @@ func (m *Manager) Remove(guild string) error {
 		m.mu.Unlock()
 		return nil
 	}
-	if e.removing || e.session == nil {
+	if e.session == nil {
+		// Construction owns the entry and closes the session once it observes
+		// the removal, so a guild leave during creation cannot leak a session.
+		e.removing = true
+		m.mu.Unlock()
+		return nil
+	}
+	if e.removing {
 		m.mu.Unlock()
 		return ErrBusy
 	}

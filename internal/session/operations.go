@@ -9,8 +9,15 @@ import (
 )
 
 func (c *coordinator) apply(op Operation) error {
-	if c.pending != "" && op.Action != Inspect && op.Action != Stop {
-		return ErrBusy
+	// Lifecycle observations are facts about the outside world, not competing
+	// controls: they must update observed state even while a transition is
+	// pending. The first accepted control still owns the attempt's cause.
+	if c.pending != "" {
+		switch op.Action {
+		case Inspect, Stop, Speaking, VoiceMember, VoiceLost:
+		default:
+			return ErrBusy
+		}
 	}
 	switch op.Action {
 	case Inspect:
@@ -37,7 +44,10 @@ func (c *coordinator) apply(op Operation) error {
 	case Connect:
 		return c.connect(op)
 	case VoiceLost:
-		return c.voiceLost(op.Channel)
+		if len(op.Channel) > 32 {
+			return errors.New("invalid observed voice channel")
+		}
+		c.voiceLost(op.Channel)
 	case VoiceMember:
 		c.voiceMember(op.Speaker, op.Channel)
 	case Clear:
@@ -80,7 +90,7 @@ func (c *coordinator) stop() {
 		c.interrupt(playback.Stopped)
 		return
 	}
-	c.settleAll(playback.Stopped)
+	c.settleAll(playback.Stopped, nil)
 	c.queue.reset()
 	c.paused = false
 }
@@ -241,6 +251,14 @@ func (c *coordinator) effectiveVolume() int {
 		return min(c.volume, c.duckTarget)
 	}
 	return c.volume
+}
+
+// forgetSpeakers drops speaking state tied to a lost or replaced voice
+// connection; a member who stopped during the outage would otherwise keep
+// the music ducked indefinitely. The new connection reports fresh state.
+func (c *coordinator) forgetSpeakers() {
+	clear(c.speakers)
+	c.updateVolume()
 }
 
 func (c *coordinator) updateVolume() {

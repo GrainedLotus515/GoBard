@@ -152,6 +152,8 @@ func (r *Runtime) handlers() {
 			}
 			if err := r.state.updateGuild(e.Guild); err != nil {
 				r.logger.Warn("Guild state admission failed", "event", "discord.state", "error", err)
+			} else {
+				r.reconcileSnapshot(e.Guild)
 			}
 			r.signalRegistration()
 		})
@@ -198,6 +200,64 @@ func (r *Runtime) resumeRuntime() {
 	r.signalRegistration()
 }
 
+// reconcileSnapshot publishes the bot's own channel from a complete guild
+// snapshot (sent after a non-resumed Gateway reconnect) to an existing
+// session, so a move or disconnect during the outage is not missed. Commands
+// handled after this are authorized against the refreshed channel.
+func (r *Runtime) reconcileSnapshot(g *discordgo.Guild) {
+	if g == nil || g.Unavailable {
+		return
+	}
+	target, ok := r.sessions.Get(g.ID)
+	if !ok {
+		return
+	}
+	r.discord.State.RLock()
+	self := ""
+	if r.discord.State.User != nil {
+		self = r.discord.State.User.ID
+	}
+	r.discord.State.RUnlock()
+	if self == "" {
+		return
+	}
+	channel := ""
+	for _, v := range g.VoiceStates {
+		if v != nil && v.UserID == self {
+			channel = v.ChannelID
+			break
+		}
+	}
+	if err := target.ObserveVoice(channel); err != nil {
+		r.logger.Warn("Voice-state transition rejected", "event", "voice.event", "reason", "invalid_channel")
+	}
+	r.publishAudience(g.ID)
+}
+
+// publishAudience reports whether the bot has no non-bot company in its
+// channel, from the authorization cache, so the session can leave an
+// abandoned channel. An incomplete guild snapshot publishes nothing.
+func (r *Runtime) publishAudience(guild string) {
+	target, ok := r.sessions.Get(guild)
+	if !ok {
+		return
+	}
+	r.discord.State.RLock()
+	self := ""
+	if r.discord.State.User != nil {
+		self = r.discord.State.User.ID
+	}
+	r.discord.State.RUnlock()
+	if self == "" {
+		return
+	}
+	if channel, alone, ok := r.state.audience(guild, self); ok {
+		if err := target.ObserveAudience(channel, alone); err != nil {
+			r.logger.Warn("Voice-state transition rejected", "event", "voice.event", "reason", "invalid_channel")
+		}
+	}
+}
+
 func (r *Runtime) voiceState(e *discordgo.VoiceStateUpdate) {
 	if e == nil || e.VoiceState == nil {
 		return
@@ -205,25 +265,36 @@ func (r *Runtime) voiceState(e *discordgo.VoiceStateUpdate) {
 	if err := r.state.voice(e.VoiceState); err != nil {
 		r.logger.Warn("Voice authorization state unavailable", "event", "discord.state", "error", err)
 	}
-	if v := r.voice.Load(); v != nil {
-		v.HandleVoiceStateUpdate(e)
-	}
 	r.discord.State.RLock()
 	self := r.discord.State.User != nil && r.discord.State.User.ID == e.UserID
 	r.discord.State.RUnlock()
 	if !self {
+		if v := r.voice.Load(); v != nil {
+			v.HandleVoiceStateUpdate(e)
+		}
 		if target, ok := r.sessions.Get(e.GuildID); ok {
-			if _, err := target.Apply(r.ctx, session.Operation{Action: session.VoiceMember, Speaker: e.UserID, Channel: e.ChannelID}); err != nil && r.ctx.Err() == nil {
-				r.logger.Debug("Voice member event dropped", "event", "voice.member", "reason", "session_busy")
+			if err := target.ObserveMember(e.UserID, e.ChannelID); err != nil {
+				r.logger.Debug("Voice member event dropped", "event", "voice.member", "reason", "rejected")
 			}
 		}
+		r.publishAudience(e.GuildID)
 		return
 	}
-	if target, ok := r.sessions.Get(e.GuildID); ok {
-		if _, err := target.Apply(r.ctx, session.Operation{Action: session.VoiceLost, Channel: e.ChannelID}); err != nil && r.ctx.Err() == nil {
-			r.logger.Warn("Voice-state transition rejected", "event", "voice.event", "reason", "session_busy")
+	// Publish the bot's own channel to the session before the voice SDK can
+	// act on it, so a connect that completes on this update is reconciled
+	// against it rather than an older observation. The acknowledgement of
+	// the adapter's own failure cleanup is not a removal: the session already
+	// owns that failure and its bounded retry.
+	ownCleanup := e.ChannelID == "" && r.voice.Load().ConsumeCleanupLeave(e.GuildID)
+	if target, ok := r.sessions.Get(e.GuildID); ok && !ownCleanup {
+		if err := target.ObserveVoice(e.ChannelID); err != nil {
+			r.logger.Warn("Voice-state transition rejected", "event", "voice.event", "reason", "invalid_channel")
 		}
 	}
+	if v := r.voice.Load(); v != nil {
+		v.HandleVoiceStateUpdate(e)
+	}
+	r.publishAudience(e.GuildID)
 }
 
 func (r *Runtime) Start() error {
@@ -325,9 +396,8 @@ func (r *Runtime) speaking(guild, user string, speaking bool) {
 		return
 	}
 	if target, ok := r.sessions.Get(guild); ok {
-		_, err := target.Apply(r.ctx, session.Operation{Action: session.Speaking, Speaker: user, Enabled: speaking})
-		if err != nil && r.ctx.Err() == nil {
-			r.logger.Debug("Speaking event dropped", "event", "voice.speaking", "reason", "session_busy")
+		if err := target.ObserveSpeaker(user, speaking); err != nil {
+			r.logger.Debug("Speaking event dropped", "event", "voice.speaking", "reason", "rejected")
 		}
 	}
 }

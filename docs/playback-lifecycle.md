@@ -131,6 +131,21 @@ Transport failure retains a finite seekable request and permits at most three
 reconnect attempts, with 0/1/2-second delays. Successful connection alone does
 not reset this budget: repeated partial failures consume it too. A completed/advanced
 request resets the budget. Exhaustion retains the queue and disconnects.
+The bot's own observed voice channel decides recovery. A move to another channel
+is followed (with work queued) or released (idle). Removal by someone else
+(observed channel empty) is deliberate: it is handled as an intentional
+disconnect, never reconnected automatically, and the queue is retained. A
+recover's own teardown also reports an empty channel, so during a connect only
+the newest observation at completion is judged. A failed connect's own cleanup
+leave is marked by the voice adapter, and its empty-channel acknowledgement (up to
+5 s later) is not published as a removal, so it cannot cancel bounded recovery. A
+removal that coincides with a failed reconnect may cost those bounded retries.
+Idle timeouts take the same path as a removal: after `PAUSE_TIMEOUT_SECONDS`
+(default 600) continuously paused, or `ALONE_TIMEOUT_SECONDS` (default 120) with
+no non-bot member in the bot's channel, the session disconnects and keeps the
+queue. A timer is armed only while its condition holds and restarts when it
+stops holding; 0 disables it. Occupancy comes from the adapter's voice-state
+cache; a member not known to be a bot counts as a listener.
 
 After the failed attempt joins, its accepted frame count advances that attempt's
 offset by 20 ms per frame, including after a nonzero seek. Request identity is

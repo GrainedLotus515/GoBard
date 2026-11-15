@@ -84,7 +84,8 @@ Queue admission rejects excess active streams atomically with private feedback.
 Existing admitted queues retain their slot through pause, seek and bounded
 recovery; stop, completed drain, intentional disconnect and exhausted recovery
 release only after the attempt joins. Reconnecting a retained queue reacquires
-capacity. Idle retained sessions consume no stream slot. The configured disk
+capacity. Idle retained sessions consume no stream slot. The pause and
+alone timeouts disconnect abandoned sessions so their slots return. The configured disk
 `CACHE_LIMIT` is not an in-memory allocation; cgroup file-cache charges and other
 processes remain operational uncertainties.
 

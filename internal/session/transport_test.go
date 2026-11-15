@@ -133,13 +133,13 @@ func TestSkipLastTrackCancelsRecoveryAndDisconnects(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("attempt not started")
 	}
-	apply(t, s, Operation{Action: VoiceLost})
+	apply(t, s, Operation{Action: VoiceLost, Channel: "moved"})
 	select {
 	case <-recovering:
 	case <-time.After(time.Second):
 		t.Fatal("recovery not started")
 	}
-	if _, err := s.ApplyAs(context.Background(), Access{Channel: "voice"}, Operation{Action: Skip}); err != nil {
+	if _, err := s.ApplyAs(context.Background(), Access{Channel: "moved"}, Operation{Action: Skip}); err != nil {
 		t.Fatal(err)
 	}
 	select {
@@ -442,14 +442,14 @@ func TestRemoveLastTrackCancelsRecoveryAndDisconnects(t *testing.T) {
 		t.Fatal(err)
 	}
 	_ = nextAttempt(t, source)
-	apply(t, s, Operation{Action: VoiceLost})
+	apply(t, s, Operation{Action: VoiceLost, Channel: "moved"})
 	select {
 	case <-recovering:
 	case <-time.After(time.Second):
 		t.Fatal("recovery not started")
 	}
 	apply(t, s, Operation{Action: Pause})
-	if _, err := s.ApplyAs(context.Background(), Access{Channel: "voice"}, Operation{Action: Remove, Position: 0}); err != nil {
+	if _, err := s.ApplyAs(context.Background(), Access{Channel: "moved"}, Operation{Action: Remove, Position: 0}); err != nil {
 		t.Fatal(err)
 	}
 	select {

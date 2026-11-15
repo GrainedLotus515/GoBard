@@ -72,7 +72,40 @@ type Session struct {
 	commands  chan command
 	closeOnce sync.Once
 	changed   chan struct{}
+	// Latest-value voice observations. Moves, disconnects and speaker state
+	// must not be lost to a saturated mailbox; only the newest observation
+	// per subject matters, so they coalesce here and wake the coordinator.
+	observeMu     sync.Mutex
+	observedVoice string
+	voicePending  bool
+	// Most recent overwritten bot channel that differed from its successor,
+	// so A→B→A before a drain still reconciles the intervening move.
+	priorVoice   string
+	priorPending bool
+	// Set when a member observation overflowed the pending bound; the
+	// coordinator then drops all speaker state rather than keep a stale one.
+	speakersReset bool
+	memberUpdates map[string]memberObservation
+	// Latest bot channel occupancy: whether no non-bot member remains.
+	audienceChannel string
+	audienceAlone   bool
+	audiencePending bool
+	// A not-alone observation since the last drain; it restarts the alone
+	// clock even if the latest value is alone again.
+	audienceInterrupted bool
+	observed            chan struct{}
 }
+
+// IdleTimeouts bound how long a voice connection is kept when nobody is
+// using it. Zero disables a timeout. Expiry disconnects and keeps the queue.
+type IdleTimeouts struct {
+	Paused time.Duration // continuously paused while connected
+	Alone  time.Duration // no non-bot member in the bot's channel
+}
+
+// maxPendingSpeakers bounds coalesced member observations awaiting the
+// coordinator; it matches the coordinator's own speaker-set bound.
+const maxPendingSpeakers = 256
 
 func New(parent context.Context, id string, engine *playback.Engine, output playback.Output, capacity int) (*Session, error) {
 	return newSession(parent, id, engine, output, nil, nil, nil, capacity)
@@ -86,15 +119,22 @@ func NewVoice(parent context.Context, id string, engine *playback.Engine, voice 
 }
 
 func newSession(parent context.Context, id string, engine *playback.Engine, output playback.Output, voice Voice, logger *log.Logger, slots chan struct{}, capacity int) (*Session, error) {
+	return newIdleSession(parent, id, engine, output, voice, logger, slots, capacity, IdleTimeouts{})
+}
+
+func newIdleSession(parent context.Context, id string, engine *playback.Engine, output playback.Output, voice Voice, logger *log.Logger, slots chan struct{}, capacity int, idle IdleTimeouts) (*Session, error) {
+	if idle.Paused < 0 || idle.Alone < 0 {
+		return nil, errors.New("invalid idle timeouts")
+	}
 	if parent == nil || id == "" || len(id) > 64 || engine == nil || output == nil && voice == nil || capacity < 1 || capacity > MaxQueue {
 		return nil, errors.New("invalid session dependencies or capacity")
 	}
 	// #nosec G118 -- Session.Close owns cancellation; parent also terminates run.
 	ctx, cancel := context.WithCancel(parent)
-	s := &Session{ctx: ctx, cancel: cancel, done: make(chan struct{}), commands: make(chan command, MailboxCapacity), changed: make(chan struct{}, 1)}
+	s := &Session{ctx: ctx, cancel: cancel, done: make(chan struct{}), commands: make(chan command, MailboxCapacity), changed: make(chan struct{}, 1), memberUpdates: make(map[string]memberObservation), observed: make(chan struct{}, 1)}
 	c := &coordinator{session: s, id: id + "/" + rand.Text(), engine: engine, output: output, connected: output != nil, voice: voice, logger: logger, streamSlots: slots,
 		queue:   queue{entries: make([]entry, 0, capacity), index: -1, capacity: capacity},
-		results: make(chan playback.Result, 1), volume: 100, duckTarget: 70, speakers: make(map[string]bool), reservations: make(map[string]uint64), transportResults: make(chan transportResult, 1)}
+		results: make(chan playback.Result, 1), volume: 100, duckTarget: 70, speakers: make(map[string]bool), reservations: make(map[string]uint64), transportResults: make(chan transportResult, 1), idle: idle}
 	go c.run()
 	return s, nil
 }
@@ -225,9 +265,17 @@ func (s *Session) submit(c command) response {
 	}
 	// The owner checks cancellation before admission. After acceptance, return
 	// its definitive acknowledgement, never an ambiguous timeout/rollback claim.
+	// Inspect changes nothing, so abandoning its reply is safe and lets
+	// health probes honor their deadline during a slow shutdown.
+	var abandon <-chan struct{}
+	if c.operation.Action == Inspect && len(c.tracks) == 0 && c.joinChannel == "" && c.reserve == "" && c.release == "" {
+		abandon = c.ctx.Done()
+	}
 	select {
 	case r := <-c.reply:
 		return r
+	case <-abandon:
+		return response{err: c.ctx.Err()}
 	case <-s.done:
 		select {
 		case r := <-c.reply:
@@ -238,6 +286,139 @@ func (s *Session) submit(c command) response {
 	}
 }
 func (s *Session) Close() { s.closeOnce.Do(s.cancel); <-s.done }
+
+// ObserveVoice records the bot's own observed voice channel ("" when
+// disconnected). It never blocks and never drops: a newer observation replaces
+// an unprocessed older one, and the coordinator applies it as VoiceLost.
+func (s *Session) ObserveVoice(channel string) error {
+	if len(channel) > 32 {
+		return errors.New("invalid observed voice channel")
+	}
+	s.observeMu.Lock()
+	if s.voicePending && s.observedVoice != channel {
+		s.priorVoice, s.priorPending = s.observedVoice, true
+	}
+	s.observedVoice, s.voicePending = channel, true
+	s.observeMu.Unlock()
+	s.notifyObserved()
+	return nil
+}
+
+// memberObservation coalesces one member's observations between coordinator
+// drains: the latest speaking state, the latest voice channel, and the most
+// recent overwritten channel when it differs (a leave that a quick rejoin
+// replaced must still clear the speaker). Positions (0 = absent) record
+// arrival order so replay preserves it: a departure after speaking wins, and
+// a self-mute update never erases a pending speaking change.
+type memberObservation struct {
+	speaking, member, prior       Operation
+	speakingAt, memberAt, priorAt uint32
+	next                          uint32
+}
+
+// ObserveSpeaker records another member's speaking state. ObserveMember
+// records another member's current voice channel ("" when they left). Both
+// coalesce latest-wins per member and kind, never block, and preserve the
+// relative order of the two kinds; ErrBusy means more than
+// maxPendingSpeakers distinct members are awaiting the coordinator.
+func (s *Session) ObserveSpeaker(user string, speaking bool) error {
+	return s.observeMember(Operation{Action: Speaking, Speaker: user, Enabled: speaking})
+}
+func (s *Session) ObserveMember(user, channel string) error {
+	if len(channel) > 32 {
+		return errors.New("invalid observed voice channel")
+	}
+	return s.observeMember(Operation{Action: VoiceMember, Speaker: user, Channel: channel})
+}
+
+func (s *Session) observeMember(op Operation) error {
+	if op.Speaker == "" || len(op.Speaker) > 32 {
+		return errors.New("invalid speaker")
+	}
+	s.observeMu.Lock()
+	observation, exists := s.memberUpdates[op.Speaker]
+	if !exists && len(s.memberUpdates) >= maxPendingSpeakers {
+		// Dropping this observation could strand a tracked speaker (and
+		// keep music ducked); reset speaker state instead. Fresh speaking
+		// events rebuild it.
+		s.speakersReset = true
+		s.observeMu.Unlock()
+		s.notifyObserved()
+		return ErrBusy
+	}
+	observation.next++
+	if op.Action == VoiceMember {
+		if observation.memberAt != 0 && observation.member.Channel != op.Channel {
+			observation.prior, observation.priorAt = observation.member, observation.memberAt
+		}
+		observation.member, observation.memberAt = op, observation.next
+	} else {
+		observation.speaking, observation.speakingAt = op, observation.next
+	}
+	s.memberUpdates[op.Speaker] = observation
+	s.observeMu.Unlock()
+	s.notifyObserved()
+	return nil
+}
+
+// replay appends the retained observations in arrival order.
+func (o memberObservation) replay(dst []Operation) []Operation {
+	type positioned struct {
+		at uint32
+		op Operation
+	}
+	var ops [3]positioned
+	n := 0
+	for _, p := range [3]positioned{{o.priorAt, o.prior}, {o.memberAt, o.member}, {o.speakingAt, o.speaking}} {
+		if p.at == 0 {
+			continue
+		}
+		i := n
+		for ; i > 0 && ops[i-1].at > p.at; i-- {
+			ops[i] = ops[i-1]
+		}
+		ops[i] = p
+		n++
+	}
+	for _, p := range ops[:n] {
+		dst = append(dst, p.op)
+	}
+	return dst
+}
+
+func (s *Session) notifyObserved() {
+	select {
+	case s.observed <- struct{}{}:
+	default:
+	}
+}
+
+type observations struct {
+	prior, voice       string
+	hasPrior, hasVoice bool
+	resetSpeakers      bool
+	speakers           []Operation
+	audienceChannel    string
+	audienceAlone      bool
+	hasAudience        bool
+	audienceInterrupt  bool
+}
+
+// takeObserved moves pending observations into the coordinator-owned buffer.
+func (s *Session) takeObserved(speakers []Operation) observations {
+	s.observeMu.Lock()
+	defer s.observeMu.Unlock()
+	o := observations{prior: s.priorVoice, voice: s.observedVoice, hasPrior: s.priorPending, hasVoice: s.voicePending, resetSpeakers: s.speakersReset}
+	o.audienceChannel, o.audienceAlone, o.hasAudience, o.audienceInterrupt = s.audienceChannel, s.audienceAlone, s.audiencePending, s.audienceInterrupted
+	s.audienceInterrupted = false
+	s.voicePending, s.priorPending, s.speakersReset, s.audiencePending = false, false, false, false
+	for _, m := range s.memberUpdates {
+		speakers = m.replay(speakers)
+	}
+	clear(s.memberUpdates)
+	o.speakers = speakers
+	return o
+}
 
 type coordinator struct {
 	session               *Session
@@ -264,6 +445,13 @@ type coordinator struct {
 	reservations          map[string]uint64
 	drained               bool
 	transportResults      chan transportResult
+	idle                  IdleTimeouts
+	audienceChannel       string
+	audienceAlone         bool
+	pausedTimer           *time.Timer
+	pausedIdle            <-chan time.Time
+	aloneTimer            *time.Timer
+	aloneIdle             <-chan time.Time
 	transportCancel       context.CancelFunc
 	transportKind         string
 	joinReply             chan response
@@ -275,6 +463,12 @@ type coordinator struct {
 	recovery              string
 	streamSlots           chan struct{}
 	streamHeld            bool
+	reconnectAfter        bool
+	// Bot voice observation made while a connect/recover was in flight;
+	// reconciled when that transport result is processed.
+	connectObserved    string
+	connectObservedSet bool
+	observedScratch    []Operation
 }
 
 func (c *coordinator) run() {
@@ -283,6 +477,15 @@ func (c *coordinator) run() {
 	defer c.closeVoice()
 	c.dirty = true
 	for {
+		// Same order as handle: a published completion precedes observations,
+		// so a voice event cannot reinterpret an attempt that already ended.
+		select {
+		case result := <-c.results:
+			c.dirty = true
+			c.complete(result)
+		default:
+		}
+		c.drainObserved()
 		c.driveTransport()
 		// Keep the lease through attempt cleanup, pause, seek and recovery.
 		// A retained disconnected queue is cheap state, not an active stream.
@@ -300,26 +503,91 @@ func (c *coordinator) run() {
 			}
 			c.dirty = false
 		}
+		c.armIdle()
 		select {
 		case <-c.session.ctx.Done():
 			if c.active != nil {
 				c.cancel(playback.Cancellation{Outcome: playback.Shutdown})
 				c.last = <-c.results
+				c.settleAll(playback.Shutdown, &c.last)
+			} else {
+				c.settleAll(playback.Shutdown, nil)
 			}
-			c.settleAll(playback.Shutdown)
 			return
 		case result := <-c.results:
 			c.dirty = true
 			c.complete(result)
 		case result := <-c.transportResults:
 			c.dirty = true
+			c.drainObserved()
 			c.transportComplete(result)
 		case <-c.retry:
 			c.dirty = true
 			c.retry = nil
 			c.startRecovery()
+		case <-c.pausedIdle:
+			// Armed only while the condition holds (see armIdle).
+			c.pausedIdle = nil
+			c.dirty = true
+			c.leaveVoice("paused_timeout")
+		case <-c.aloneIdle:
+			c.aloneExpired()
+		case <-c.session.observed:
+			c.applyObserved()
 		case cmd := <-c.session.commands:
 			c.handle(cmd)
+		}
+	}
+}
+
+// drainObserved applies observations already published before the caller's
+// event. Observers publish before returning, so a control submitted after an
+// observation is never authorized or applied against the older state.
+func (c *coordinator) drainObserved() {
+	select {
+	case <-c.session.observed:
+		c.applyObserved()
+	default:
+	}
+}
+
+func (c *coordinator) applyObserved() {
+	// A published attempt result precedes observations on every path; the
+	// run loop's select may otherwise pick the observation first.
+	select {
+	case result := <-c.results:
+		c.dirty = true
+		c.complete(result)
+	default:
+	}
+	o := c.session.takeObserved(c.observedScratch[:0])
+	if o.resetSpeakers {
+		c.forgetSpeakers()
+	}
+	for _, op := range o.speakers {
+		// Validated by observeMember; a full speaker set is a bounded drop.
+		if err := c.apply(op); err != nil && c.logger != nil {
+			c.logger.Debug("Speaker observation dropped", "event", "voice.member", "session_id", c.id, "reason", "speaker_limit")
+		}
+	}
+	c.observedScratch = o.speakers[:0]
+	if o.hasAudience {
+		c.audienceChannel, c.audienceAlone = o.audienceChannel, o.audienceAlone
+		if o.audienceInterrupt {
+			// Disarm so armIdle restarts the full timeout.
+			c.aloneIdle = armTimer(&c.aloneTimer, c.aloneIdle, 0, false)
+		}
+	}
+	if o.hasVoice {
+		// Speaker state is not in snapshots; only a transport change is
+		// worth waking observers for. ObserveVoice validated both channels.
+		connected, current, generation := c.connected, c.channel, c.generation
+		if o.hasPrior {
+			c.voiceLost(o.prior)
+		}
+		c.voiceLost(o.voice)
+		if c.connected != connected || c.channel != current || c.generation != generation {
+			c.dirty = true
 		}
 	}
 }
@@ -328,13 +596,15 @@ func (c *coordinator) handle(cmd command) {
 	if cmd.operation.Action != Inspect {
 		c.dirty = true
 	}
-	// Observe already-published completion before applying the next control.
+	// Observe already-published completion and observations before applying
+	// the next control.
 	select {
 	case result := <-c.results:
 		c.dirty = true
 		c.complete(result)
 	default:
 	}
+	c.drainObserved()
 	if err := cmd.ctx.Err(); err != nil {
 		cmd.reply <- response{err: err}
 		return
@@ -433,16 +703,12 @@ func (c *coordinator) complete(result playback.Result) {
 	c.active = nil
 	c.controls = nil
 	c.last = result
+	if c.reconnectAfter {
+		c.reconnectAfter = false
+		defer c.recoverAfterPending()
+	}
 	if c.stopAfter {
-		c.stopAfter = false
-		c.pending = ""
-		if result.Outcome == playback.TransportFailure || c.needDisconnect {
-			c.disconnectVoice()
-			c.connected = false
-		}
-		c.settleAll(playback.Stopped)
-		c.queue.reset()
-		c.paused = false
+		c.completeStop(result)
 		return
 	}
 	e := c.queue.current()
@@ -450,6 +716,19 @@ func (c *coordinator) complete(result playback.Result) {
 	if c.pending != "" {
 		reason = c.pending
 		c.pending = ""
+	}
+	if reason == playback.TransportFailure && endedOnItsOwn(result) {
+		// The attempt completed or failed on its own before the voice loss
+		// interrupted it; its outcome is authoritative. The connection is
+		// still gone, so recover only if work remains (else the drain
+		// releases it).
+		reason = result.Outcome
+		defer func() {
+			c.generation++
+			if c.queue.current() != nil {
+				c.scheduleRecovery()
+			}
+		}()
 	}
 	switch reason {
 	case playback.SourceFailure:
@@ -464,6 +743,7 @@ func (c *coordinator) complete(result playback.Result) {
 			c.scheduleRecovery()
 		}
 		c.connected = false
+		c.forgetSpeakers()
 		// Both automatic recovery and a later explicit reconnect must resume
 		// after accepted packets. Unknown-duration/live media cannot be safely
 		// sought; finish that request instead of silently replaying its prefix.
@@ -479,7 +759,7 @@ func (c *coordinator) complete(result playback.Result) {
 		// the explicit interruption outcome and advance, even with loop on.
 		result.Outcome = reason
 	case playback.Stopped:
-		c.settleAll(playback.Stopped)
+		c.settleAll(playback.Stopped, &result)
 		c.queue.reset()
 		c.paused = false
 		return
@@ -504,6 +784,32 @@ func (c *coordinator) complete(result playback.Result) {
 	c.paused = false
 }
 
+// recoverAfterPending recovers a connection lost while another control was
+// pending, once that control's attempt has joined.
+func (c *coordinator) recoverAfterPending() {
+	if !c.connected && c.retry == nil && c.transportCancel == nil && !c.needDisconnect {
+		c.recoverLost()
+	}
+}
+
+func (c *coordinator) completeStop(result playback.Result) {
+	c.stopAfter = false
+	c.pending = ""
+	if result.Outcome == playback.TransportFailure || c.needDisconnect {
+		c.disconnectVoice()
+		c.connected = false
+	}
+	c.settleAll(playback.Stopped, &result)
+	c.queue.reset()
+	c.paused = false
+}
+
+// endedOnItsOwn reports an attempt result that is not the consequence of a
+// voice-loss cancellation: it completed, or failed for an independent cause.
+func endedOnItsOwn(result playback.Result) bool {
+	return result.Outcome != playback.TransportFailure && (result.Outcome == playback.Completed || result.Failure != nil)
+}
+
 func (c *coordinator) settle(e *entry, result playback.Result) {
 	if e == nil || e.settled {
 		return
@@ -512,12 +818,21 @@ func (c *coordinator) settle(e *entry, result playback.Result) {
 	e.ticket.result = result
 	close(e.ticket.done)
 }
-func (c *coordinator) settleAll(reason playback.Outcome) {
+
+// settleAll ends every unsettled request with reason. finished is the attempt
+// that just joined, if any; its own terminal result is authoritative for its
+// request. A result from an earlier attempt of a retained request (for example
+// a disconnect awaiting resumption) is not, so stop/shutdown decide instead.
+func (c *coordinator) settleAll(reason playback.Outcome, finished *playback.Result) {
 	for i := range c.queue.entries {
 		e := &c.queue.entries[i]
 		result := playback.Result{Request: e.ticket.request, Outcome: reason}
-		if c.last.Request.ID == e.ticket.request.ID {
-			result = c.last
+		if finished != nil && finished.Request.ID == e.ticket.request.ID {
+			result = *finished
+			if result.Outcome == playback.Seeked {
+				// A seek would have restarted the request; stop/shutdown ended it.
+				result.Outcome = reason
+			}
 		}
 		c.settle(e, result)
 	}
@@ -573,4 +888,58 @@ func (c *coordinator) position() time.Duration {
 		offset += elapsed
 	}
 	return offset
+}
+
+// ObserveAudience records whether the bot's own channel has no non-bot
+// member. Only the latest observation matters; it never blocks.
+func (s *Session) ObserveAudience(channel string, alone bool) error {
+	if len(channel) > 32 {
+		return errors.New("invalid observed voice channel")
+	}
+	s.observeMu.Lock()
+	s.audienceChannel, s.audienceAlone, s.audiencePending = channel, alone, true
+	s.audienceInterrupted = s.audienceInterrupted || !alone
+	s.observeMu.Unlock()
+	s.notifyObserved()
+	return nil
+}
+
+// armIdle runs before each blocking wait, after all state changes of the
+// previous event, so a timer is armed exactly while its condition holds and a
+// fired timer means the condition held continuously for the whole timeout.
+func (c *coordinator) armIdle() {
+	managed := c.voice != nil && c.connected
+	c.pausedIdle = armTimer(&c.pausedTimer, c.pausedIdle, c.idle.Paused, managed && c.paused)
+	c.aloneIdle = armTimer(&c.aloneTimer, c.aloneIdle, c.idle.Alone, managed && c.audienceAlone && c.audienceChannel == c.channel)
+}
+
+// aloneExpired leaves voice unless a listener's return was published but not
+// yet applied; applying it disarms the timer or clears the condition.
+func (c *coordinator) aloneExpired() {
+	fired := c.aloneIdle
+	c.drainObserved()
+	stillAlone := c.aloneIdle == fired && c.audienceAlone && c.audienceChannel == c.channel && c.connected
+	c.aloneIdle = nil
+	if stillAlone {
+		c.dirty = true
+		c.leaveVoice("alone_timeout")
+	}
+}
+
+func armTimer(timer **time.Timer, armed <-chan time.Time, timeout time.Duration, want bool) <-chan time.Time {
+	if !want || timeout <= 0 {
+		if armed != nil {
+			(*timer).Stop()
+		}
+		return nil
+	}
+	if armed != nil {
+		return armed
+	}
+	if *timer == nil {
+		*timer = time.NewTimer(timeout)
+	} else {
+		(*timer).Reset(timeout)
+	}
+	return (*timer).C
 }

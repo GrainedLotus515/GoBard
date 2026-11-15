@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 var configEnvKeys = []string{
@@ -19,6 +20,8 @@ var configEnvKeys = []string{
 	"DEFAULT_VOLUME",
 	"REDUCE_VOL_WHEN_VOICE",
 	"REDUCE_VOL_WHEN_VOICE_TARGET",
+	"PAUSE_TIMEOUT_SECONDS",
+	"ALONE_TIMEOUT_SECONDS",
 	"MAX_PLAYLIST_TRACKS",
 	"YTDLP_MAX_CONCURRENCY",
 	"MAX_GUILD_SESSIONS",
@@ -84,6 +87,9 @@ func TestLoadReadsTokenFileAndAppliesDefaults(t *testing.T) {
 	if cfg.DiscordToken != "file-token" || cfg.DiscordTokenFile != path {
 		t.Fatalf("token config = (%q, %q), want file token and path", cfg.DiscordToken, cfg.DiscordTokenFile)
 	}
+	if cfg.PauseTimeout != 10*time.Minute || cfg.AloneTimeout != 2*time.Minute {
+		t.Fatalf("idle defaults = paused %v alone %v", cfg.PauseTimeout, cfg.AloneTimeout)
+	}
 	if cfg.DefaultVolume != 100 || cfg.ReduceVolumeOnVoiceTarget != 70 {
 		t.Fatalf("playback defaults = volume %d target %d", cfg.DefaultVolume, cfg.ReduceVolumeOnVoiceTarget)
 	}
@@ -104,6 +110,8 @@ func TestLoadRejectsMalformedValues(t *testing.T) {
 		{"bad boolean", "REDUCE_VOL_WHEN_VOICE", "sometimes"},
 		{"bad playback debug boolean", "DEBUG_PLAYBACK", "sometimes"},
 		{"volume over range", "DEFAULT_VOLUME", "101"},
+		{"negative pause timeout", "PAUSE_TIMEOUT_SECONDS", "-1"},
+		{"excess alone timeout", "ALONE_TIMEOUT_SECONDS", "86401"},
 		{"negative cache limit", "CACHE_LIMIT", "-1GB"},
 		{"overflowing cache limit", "CACHE_LIMIT", "999999999999999999999GB"},
 		{"bad status", "BOT_STATUS", "away"},

@@ -50,7 +50,7 @@ func New(ctx context.Context, cfg *config.Config, logger *log.Logger) (*App, err
 		return nil, err
 	}
 	logger.Info("Runtime capacity", "event", "capacity.configured", "memory_bytes", cfg.Capacity.Memory.Bytes, "memory_source", cfg.Capacity.Memory.Source, "reserved_bytes", cfg.Capacity.Reserved, "active_streams", cfg.Capacity.Streams, "retained_sessions", cfg.MaxGuildSessions)
-	sessions, err := session.NewManager(ctx, engine, cfg.MaxGuildSessions, cfg.Capacity.Streams, cfg.QueueLimit, session.Defaults{Volume: cfg.DefaultVolume, Ducking: cfg.ReduceVolumeOnVoice, DuckTarget: cfg.ReduceVolumeOnVoiceTarget})
+	sessions, err := session.NewManager(ctx, engine, cfg.MaxGuildSessions, cfg.Capacity.Streams, cfg.QueueLimit, session.Defaults{Volume: cfg.DefaultVolume, Ducking: cfg.ReduceVolumeOnVoice, DuckTarget: cfg.ReduceVolumeOnVoiceTarget, Idle: session.IdleTimeouts{Paused: cfg.PauseTimeout, Alone: cfg.AloneTimeout}})
 	if err != nil {
 		return nil, err
 	}

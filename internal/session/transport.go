@@ -24,24 +24,84 @@ type transportResult struct {
 	err    error
 }
 
-func (c *coordinator) voiceLost(channel string) error {
-	if !c.connected || channel == c.channel {
-		return nil
+// voiceLost applies the bot's own observed channel ("" when removed). Callers
+// validate the channel length at the observation boundary.
+func (c *coordinator) voiceLost(channel string) {
+	if !c.connected {
+		switch {
+		case c.transportKind == "connect" || c.transportKind == "recover":
+			// A recover tears down the old connection first, which Discord
+			// reports as "" before the new channel, so "" is judged only
+			// against the outcome (see transportComplete).
+			// Reconcile after the in-flight connection reports; a newer
+			// observation must not be overwritten by its success.
+			c.connectObserved, c.connectObservedSet = channel, true
+		case c.retry != nil || c.reconnectAfter || c.active != nil && c.pending == playback.TransportFailure:
+			if channel == "" {
+				c.leaveVoice("removed")
+			} else {
+				// Recovery is pending: target the newest observed channel.
+				c.channel = channel
+			}
+		}
+		return
 	}
-	if len(channel) > 32 {
-		return errors.New("invalid observed voice channel")
+	if channel == c.channel {
+		return
 	}
-	if channel != "" {
-		c.channel = channel
+	if channel == "" {
+		c.leaveVoice("removed")
+		return
 	}
+	c.channel = channel
 	c.connected = false
+	c.forgetSpeakers()
 	if c.active != nil {
+		if c.pending != "" {
+			// The pending control keeps its outcome; recovery runs once the
+			// attempt joins (see complete).
+			c.reconnectAfter = true
+		}
 		c.interrupt(playback.TransportFailure)
 	} else {
-		c.generation++
-		c.scheduleRecovery()
+		c.recoverLost()
 	}
-	return nil
+}
+
+// leaveVoice handles a deliberate end of the voice connection that no user
+// command requested: removal by someone else (own channel observed as ""),
+// or an idle timeout. Unlike a move or a network failure, no recovery is
+// attempted; the connection is released and the queue is kept with the
+// current request's resume position, exactly as an explicit Disconnect. A
+// control already pending keeps its outcome.
+func (c *coordinator) leaveVoice(reason string) {
+	if c.voice != nil {
+		c.logger.Info("Left voice; recovery declined, queue retained", "event", "session.recovery", "session_id", c.id, "recovery", "declined", "reason", reason)
+	}
+	c.reconnectAfter = false
+	c.disconnectVoice()
+	c.generation++
+	c.connected = false
+	c.forgetSpeakers()
+	if c.active != nil && c.pending == playback.TransportFailure {
+		// The connection was already lost to a move; the removal decides the
+		// outcome. Cancellation is already in flight.
+		c.pending = playback.Disconnected
+	}
+	c.interrupt(playback.Disconnected)
+}
+
+// recoverLost handles a lost connection once no attempt is running. Voice
+// recovery exists to resume queued work; with nothing queued (after /stop,
+// or a kick during a join) the dead connection is released instead of
+// rejoining an idle channel. Either way in-flight resolutions are superseded.
+func (c *coordinator) recoverLost() {
+	c.generation++
+	if c.queue.current() == nil {
+		c.disconnectVoice()
+		return
+	}
+	c.scheduleRecovery()
 }
 
 func (c *coordinator) join(cmd command) {
@@ -121,6 +181,7 @@ func (c *coordinator) launchTransport(kind string) {
 	}
 	ctx, cancel := context.WithTimeout(parent, timeout)
 	c.transportCancel, c.transportKind = cancel, kind
+	c.connectObservedSet = false
 	c.dirty = true
 	channel := c.channel
 	go func() {
@@ -163,6 +224,13 @@ func (c *coordinator) transportComplete(result transportResult) {
 			c.joinReply = nil
 		}
 		c.logVoiceFailure("Voice connection failed", "voice.connection", result.err, kind)
+		if c.connectObservedSet && c.connectObserved != "" {
+			c.channel = c.connectObserved
+		}
+		// A "" here is ambiguous: the adapter's own failure cleanup reports
+		// it too, after the new channel. Keep the bounded retry; a removal
+		// is honored once connected or when a reconnect succeeds.
+		c.connectObservedSet = false
 		if kind == "recover" {
 			c.scheduleRecovery()
 		} else {
@@ -171,9 +239,23 @@ func (c *coordinator) transportComplete(result transportResult) {
 		return
 	}
 	c.output, c.connected = result.output, true
+	// Speaking events from the replaced connection may have arrived after
+	// the loss cleared them; the new connection reports fresh state.
+	c.forgetSpeakers()
 	c.logger.Info("Voice connected", "event", "voice.connected", "session_id", c.id, "recovery_attempt", c.recoveryAttempts)
+	if c.connectObservedSet {
+		// The bot was moved or disconnected while connecting. Treat the newer
+		// observation as a loss of the connection just established, before
+		// acknowledging the join.
+		c.connectObservedSet = false
+		c.voiceLost(c.connectObserved)
+	}
 	if c.joinReply != nil {
-		c.joinReply <- response{snapshot: c.snapshot()}
+		if c.connected {
+			c.joinReply <- response{snapshot: c.snapshot()}
+		} else {
+			c.joinReply <- response{err: ErrSuperseded}
+		}
 		c.joinReply = nil
 	}
 }
@@ -182,16 +264,24 @@ func (c *coordinator) disconnectVoice() {
 	if c.voice == nil {
 		return
 	}
-	c.needDisconnect = true
 	if c.retryTimer != nil {
 		c.retryTimer.Stop()
 		c.retry = nil
 	}
+	if c.transportKind == "disconnect" {
+		// Already tearing down; cutting that short only to repeat it is waste.
+		return
+	}
+	c.needDisconnect = true
 	if c.transportCancel != nil {
 		c.transportCancel()
 	}
 }
 
+// scheduleRecovery spends the per-request recovery budget. The budget resets
+// only when the queue advances or on an explicit join, never after a
+// successful reconnect, so a flapping voice connection cannot loop one track
+// indefinitely.
 func (c *coordinator) scheduleRecovery() {
 	if c.voice == nil || c.needDisconnect || c.session.ctx.Err() != nil {
 		return

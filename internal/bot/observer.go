@@ -64,7 +64,9 @@ func (r *Runtime) observe(guild string, target *session.Session) {
 			}
 			delivering = active
 		}
-		if snapshot.Frames > 0 {
+		if active {
+			// Only new delivery is evidence of health. A paused or finished
+			// guild's historical frames must not mask a later failure elsewhere.
 			r.sourceStatus.Store(1)
 			r.pipelineStatus.Store(1)
 		}
