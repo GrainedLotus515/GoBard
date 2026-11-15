@@ -37,9 +37,8 @@ func (c *coordinator) apply(op Operation) error {
 	case Stop:
 		c.stop()
 	case Disconnect:
-		c.disconnectVoice()
+		c.voiceEvent(voiceEvent{kind: voiceDisconnect})
 		c.generation++
-		c.connected = false
 		c.interrupt(playback.Disconnected)
 	case Connect:
 		return c.connect(op)
@@ -80,10 +79,8 @@ func (c *coordinator) stop() {
 	// Stop replaces natural-drain policy, including a drain held open by an
 	// outstanding metadata reservation.
 	c.drained = false
-	if !c.connected || c.transportCancel != nil || c.retry != nil || c.needDisconnect {
-		c.disconnectVoice()
-		c.connected = false
-	}
+	// A healthy established connection is kept; anything else is released.
+	c.voiceEvent(voiceEvent{kind: voiceStop})
 	c.generation++
 	if c.active != nil {
 		c.stopAfter = true
@@ -120,7 +117,7 @@ func (c *coordinator) connect(op Operation) error {
 	if c.active != nil {
 		return errors.New("cannot replace active output")
 	}
-	if c.transportCancel != nil || c.needDisconnect || c.retry != nil {
+	if c.voiceBusy() {
 		return ErrBusy
 	}
 	if op.Output == nil {
@@ -129,7 +126,7 @@ func (c *coordinator) connect(op Operation) error {
 	if c.queue.current() != nil && !c.acquireStream() {
 		return ErrStreamLimit
 	}
-	c.output, c.channel, c.connected = op.Output, op.Channel, true
+	c.voiceEvent(voiceEvent{kind: voiceAttach, output: op.Output, channel: op.Channel})
 	return nil
 }
 
@@ -144,11 +141,11 @@ func (c *coordinator) authorize(access Access, action Action) error {
 			return ErrManageGuild
 		}
 		// Existing behavior permits administrator configuration before joining.
-		if !c.connected && c.transportKind != "connect" && c.transportKind != "recover" && c.retry == nil {
+		if !c.holdsChannel() {
 			return nil
 		}
 	}
-	if (!c.connected && c.transportKind != "connect" && c.transportKind != "recover" && c.retry == nil) || c.channel == "" || access.Channel != c.channel {
+	if !c.holdsChannel() || c.channel == "" || access.Channel != c.channel {
 		return ErrVoiceAccess
 	}
 	return nil

@@ -15,7 +15,7 @@ import (
 
 func pendingCoordinator(pending playback.Outcome) (*coordinator, *Ticket) {
 	ticket := &Ticket{done: make(chan struct{}), request: playback.Request{ID: "request"}}
-	c := &coordinator{session: &Session{ctx: context.Background()}, cancel: func(error) {}, active: ticket, connected: true, channel: "original", pending: pending,
+	c := &coordinator{session: &Session{ctx: context.Background()}, cancel: func(error) {}, active: ticket, link: voiceConnected{}, channel: "original", pending: pending,
 		voice: voiceFixture{}, logger: log.New(io.Discard), speakers: make(map[string]bool), volume: 100, duckTarget: 50, ducking: true,
 		queue: queue{index: 0, capacity: 8, entries: []entry{{track: Track{Duration: time.Minute}, ticket: ticket}, {track: Track{Duration: time.Minute}, ticket: &Ticket{done: make(chan struct{})}}}}}
 	return c, ticket
@@ -47,8 +47,8 @@ func TestVoiceLostDuringPendingControlRecoversAfterJoin(t *testing.T) {
 	if err := c.apply(Operation{Action: VoiceLost, Channel: "moved"}); err != nil {
 		t.Fatalf("voice loss rejected during pending skip: %v", err)
 	}
-	if c.connected || c.channel != "moved" || c.pending != playback.Skipped {
-		t.Fatalf("observation not recorded or pending cause overwritten: connected=%v channel=%q pending=%q", c.connected, c.channel, c.pending)
+	if c.connected() || c.channel != "moved" || c.pending != playback.Skipped {
+		t.Fatalf("observation not recorded or pending cause overwritten: state=%T channel=%q pending=%q", c.link, c.channel, c.pending)
 	}
 	c.complete(playback.Result{Request: ticket.request, Outcome: playback.Skipped, Frames: 1})
 	select {
@@ -59,10 +59,10 @@ func TestVoiceLostDuringPendingControlRecoversAfterJoin(t *testing.T) {
 	if ticket.result.Outcome != playback.Skipped {
 		t.Fatalf("skip outcome replaced: %q", ticket.result.Outcome)
 	}
-	if c.retry == nil || c.generation == generation {
+	if !inBackoff(c) || c.generation == generation {
 		t.Fatal("voice recovery not scheduled after pending attempt joined")
 	}
-	c.retryTimer.Stop()
+	stopBackoff(c)
 }
 
 func TestStopRetainedRequestReportsStopNotEarlierAttempt(t *testing.T) {
@@ -189,24 +189,24 @@ func TestSpeakerObservationsReachCoordinator(t *testing.T) {
 
 func TestVoiceObservationDuringConnectReconciledOnSuccess(t *testing.T) {
 	c := &coordinator{session: &Session{ctx: context.Background()}, voice: voiceFixture{}, logger: log.New(io.Discard), speakers: make(map[string]bool),
-		channel: "target", transportKind: "recover", transportCancel: func() {},
+		channel: "target", link: voiceReconnecting{dial: dial{cancel: func() {}}},
 		queue: queue{index: 0, capacity: 8, entries: []entry{{track: Track{Duration: time.Minute}, ticket: &Ticket{done: make(chan struct{})}}}}}
 	c.voiceLost("moved")
-	c.transportComplete(transportResult{output: outputFunc(func(context.Context, []byte) error { return nil })})
-	if c.connected || c.channel != "moved" || c.retry == nil {
-		t.Fatalf("newer observation overwritten by connect success: connected=%v channel=%q retry=%v", c.connected, c.channel, c.retry != nil)
+	connectSucceeds(c)
+	if c.connected() || c.channel != "moved" || !inBackoff(c) {
+		t.Fatalf("newer observation overwritten by connect success: state=%T channel=%q", c.link, c.channel)
 	}
-	c.retryTimer.Stop()
+	stopBackoff(c)
 }
 
 func TestVoiceObservationRetargetsPendingRecovery(t *testing.T) {
 	c := &coordinator{session: &Session{ctx: context.Background()}, voice: voiceFixture{}, logger: log.New(io.Discard), channel: "b", queue: queue{index: -1, capacity: 8}}
-	c.scheduleRecovery()
+	c.link = c.recoverNext()
 	c.voiceLost("c")
 	if c.channel != "c" {
 		t.Fatalf("recovery targets stale channel %q", c.channel)
 	}
-	c.retryTimer.Stop()
+	stopBackoff(c)
 }
 
 func TestInspectHonorsCallerDeadlineAfterAdmission(t *testing.T) {
@@ -265,15 +265,13 @@ func TestSecondMoveDuringVoiceLossTeardownRetargets(t *testing.T) {
 func TestJoinNotAcknowledgedWhenLostDuringConnect(t *testing.T) {
 	reply := make(chan response, 1)
 	c := &coordinator{session: &Session{ctx: context.Background()}, voice: voiceFixture{}, logger: log.New(io.Discard), speakers: make(map[string]bool),
-		channel: "target", transportKind: "connect", transportCancel: func() {}, joinReply: reply, queue: queue{index: -1, capacity: 8}}
+		channel: "target", link: voiceConnecting{dial: dial{cancel: func() {}}, reply: reply}, queue: queue{index: -1, capacity: 8}}
 	c.voiceLost("")
-	c.transportComplete(transportResult{output: outputFunc(func(context.Context, []byte) error { return nil })})
+	connectSucceeds(c)
 	if r := <-reply; !errors.Is(r.err, ErrSuperseded) {
 		t.Fatalf("join acknowledged despite observed loss: %+v", r)
 	}
-	if c.retryTimer != nil {
-		c.retryTimer.Stop()
-	}
+	stopBackoff(c)
 }
 
 func TestStopAfterPendingSeekReportsStop(t *testing.T) {
@@ -350,19 +348,19 @@ func TestStopThenVoiceLossReleasesInsteadOfRejoining(t *testing.T) {
 	c.stopAfter = true
 	c.voiceLost("")
 	c.complete(playback.Result{Request: ticket.request, Outcome: playback.Stopped, Frames: 1})
-	if c.retry != nil || !c.needDisconnect {
-		t.Fatalf("stopped and kicked bot would rejoin: retry=%v needDisconnect=%v", c.retry != nil, c.needDisconnect)
+	if inBackoff(c) || !c.owesDisconnect() {
+		t.Fatalf("stopped and kicked bot would rejoin: state=%T", c.link)
 	}
 }
 
 func TestIdleVoiceLossReleasesConnection(t *testing.T) {
 	for _, channel := range []string{"", "moved"} {
 		c := &coordinator{session: &Session{ctx: context.Background()}, voice: voiceFixture{}, logger: log.New(io.Discard), speakers: make(map[string]bool),
-			connected: true, channel: "original", queue: queue{index: -1, capacity: 8}}
+			link: voiceConnected{}, channel: "original", queue: queue{index: -1, capacity: 8}}
 		generation := c.generation
 		c.voiceLost(channel)
-		if c.retry != nil || !c.needDisconnect || c.generation == generation {
-			t.Fatalf("%q: idle loss retry=%v needDisconnect=%v generation bumped=%v", channel, c.retry != nil, c.needDisconnect, c.generation != generation)
+		if inBackoff(c) || !c.owesDisconnect() || c.generation == generation {
+			t.Fatalf("%q: idle loss state=%T generation bumped=%v", channel, c.link, c.generation != generation)
 		}
 	}
 }
@@ -401,15 +399,13 @@ func TestCompletionRacingVoiceLossStaysCompleted(t *testing.T) {
 		if ticket.result.Outcome != playback.Completed {
 			t.Fatalf("completion overwritten with %q", ticket.result.Outcome)
 		}
-		if c.connected {
+		if c.connected() {
 			t.Fatal("lost connection treated as live")
 		}
-		if (c.retry != nil) != more {
-			t.Fatalf("more work=%v but recovery scheduled=%v", more, c.retry != nil)
+		if inBackoff(c) != more {
+			t.Fatalf("more work=%v but recovery scheduled=%v", more, inBackoff(c))
 		}
-		if c.retryTimer != nil {
-			c.retryTimer.Stop()
-		}
+		stopBackoff(c)
 	}
 }
 
@@ -423,8 +419,8 @@ func TestBotMovedAwayAndBackBeforeDrainStillReconciles(t *testing.T) {
 		}
 	}
 	c.drainObserved()
-	if c.connected || c.pending != playback.TransportFailure || c.channel != "original" || len(c.speakers) != 0 {
-		t.Fatalf("intervening move erased: connected=%v pending=%q channel=%q speakers=%v", c.connected, c.pending, c.channel, c.speakers)
+	if c.connected() || c.pending != playback.TransportFailure || c.channel != "original" || len(c.speakers) != 0 {
+		t.Fatalf("intervening move erased: state=%T pending=%q channel=%q speakers=%v", c.link, c.pending, c.channel, c.speakers)
 	}
 }
 
@@ -455,7 +451,7 @@ func TestIndependentFailureRacingVoiceLossKeepsItsOutcome(t *testing.T) {
 	if ticket.result.Outcome != playback.EncodeFailure || c.queue.current() != nil {
 		t.Fatalf("independent failure reinterpreted as voice loss: outcome=%q retained=%v", ticket.result.Outcome, c.queue.current() != nil)
 	}
-	if c.retry != nil {
+	if inBackoff(c) {
 		t.Fatal("recovery scheduled with no work left")
 	}
 }
@@ -481,14 +477,14 @@ func TestRemovalDuringPlaybackDeclinesRecoveryAndKeepsQueue(t *testing.T) {
 		c, ticket := pendingCoordinator(pending)
 		if pending != "" {
 			// Moved first (recovery owed), then removed before the attempt joined.
-			c.connected = false
+			c.link = voiceLost{}
 		}
 		c.voiceLost("")
-		if c.pending != playback.Disconnected || !c.needDisconnect || c.connected {
-			t.Fatalf("pending=%q: removal pending=%q needDisconnect=%v connected=%v", pending, c.pending, c.needDisconnect, c.connected)
+		if c.pending != playback.Disconnected || !c.owesDisconnect() || c.connected() {
+			t.Fatalf("pending=%q: removal pending=%q state=%T", pending, c.pending, c.link)
 		}
 		c.complete(playback.Result{Request: ticket.request, Outcome: playback.Disconnected, Frames: 50})
-		if c.retry != nil {
+		if inBackoff(c) {
 			t.Fatalf("pending=%q: removed bot scheduled a rejoin", pending)
 		}
 		select {
@@ -506,10 +502,10 @@ func TestRemovalDuringRecoveryBackoffCancelsIt(t *testing.T) {
 	ticket := &Ticket{done: make(chan struct{})}
 	c := &coordinator{session: &Session{ctx: context.Background()}, voice: voiceFixture{}, logger: log.New(io.Discard), speakers: make(map[string]bool), channel: "voice",
 		queue: queue{index: 0, capacity: 8, entries: []entry{{track: Track{Duration: time.Minute}, ticket: ticket}}}}
-	c.scheduleRecovery()
+	c.link = c.recoverNext()
 	c.voiceLost("")
-	if c.retry != nil || !c.needDisconnect || c.queue.current() == nil {
-		t.Fatalf("removal during backoff: retry=%v needDisconnect=%v queued=%v", c.retry != nil, c.needDisconnect, c.queue.current() != nil)
+	if inBackoff(c) || !c.owesDisconnect() || c.queue.current() == nil {
+		t.Fatalf("removal during backoff: state=%T queued=%v", c.link, c.queue.current() != nil)
 	}
 }
 
@@ -524,14 +520,14 @@ func TestRemovalWhileReconnectingIsDistinguishedFromOwnTeardown(t *testing.T) {
 	} {
 		ticket := &Ticket{done: make(chan struct{})}
 		c := &coordinator{session: &Session{ctx: context.Background()}, voice: voiceFixture{}, logger: log.New(io.Discard), speakers: make(map[string]bool), channel: "voice",
-			queue:         queue{index: 0, capacity: 8, entries: []entry{{track: Track{Duration: time.Minute}, ticket: ticket}}},
-			transportKind: "recover", transportCancel: func() {}}
+			queue: queue{index: 0, capacity: 8, entries: []entry{{track: Track{Duration: time.Minute}, ticket: ticket}}},
+			link:  voiceReconnecting{dial: dial{cancel: func() {}}}}
 		for _, channel := range tc.observed {
 			c.voiceLost(channel)
 		}
-		c.transportComplete(transportResult{output: outputFunc(func(context.Context, []byte) error { return nil })})
-		if removed := c.needDisconnect && !c.connected && c.retry == nil; removed != tc.removed {
-			t.Fatalf("%q: removed=%v connected=%v needDisconnect=%v", tc.observed, removed, c.connected, c.needDisconnect)
+		connectSucceeds(c)
+		if removed := c.owesDisconnect() && !c.connected() && !inBackoff(c); removed != tc.removed {
+			t.Fatalf("%q: removed=%v state=%T", tc.observed, removed, c.link)
 		}
 	}
 }
@@ -542,15 +538,29 @@ func TestFailedRecoverCleanupIsNotMistakenForRemoval(t *testing.T) {
 	for _, observed := range [][]string{{""}, {"", "voice", ""}} {
 		ticket := &Ticket{done: make(chan struct{})}
 		c := &coordinator{session: &Session{ctx: context.Background()}, voice: voiceFixture{}, logger: log.New(io.Discard), speakers: make(map[string]bool), channel: "voice",
-			queue:         queue{index: 0, capacity: 8, entries: []entry{{track: Track{Duration: time.Minute}, ticket: ticket}}},
-			transportKind: "recover", transportCancel: func() {}}
+			queue: queue{index: 0, capacity: 8, entries: []entry{{track: Track{Duration: time.Minute}, ticket: ticket}}},
+			link:  voiceReconnecting{dial: dial{cancel: func() {}}}}
 		for _, channel := range observed {
 			c.voiceLost(channel)
 		}
-		c.transportComplete(transportResult{err: errors.New("voice handshake failed")})
-		if c.retry == nil || c.needDisconnect {
-			t.Fatalf("%q: recovery cancelled by own cleanup: retry=%v needDisconnect=%v", observed, c.retry != nil, c.needDisconnect)
+		c.voiceEvent(voiceEvent{kind: voiceTransportDone, result: transportResult{err: errors.New("voice handshake failed")}})
+		if !inBackoff(c) || c.owesDisconnect() {
+			t.Fatalf("%q: recovery cancelled by own cleanup: state=%T", observed, c.link)
 		}
-		c.retryTimer.Stop()
+		stopBackoff(c)
 	}
+}
+func inBackoff(c *coordinator) bool {
+	_, ok := c.link.(voiceBackoff)
+	return ok
+}
+
+func stopBackoff(c *coordinator) {
+	if s, ok := c.link.(voiceBackoff); ok {
+		s.timer.Stop()
+	}
+}
+
+func connectSucceeds(c *coordinator) {
+	c.voiceEvent(voiceEvent{kind: voiceTransportDone, result: transportResult{output: outputFunc(func(context.Context, []byte) error { return nil })}})
 }

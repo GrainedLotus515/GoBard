@@ -131,7 +131,7 @@ func aloneCoordinator(t *testing.T) *coordinator {
 	t.Helper()
 	ticket := &Ticket{done: make(chan struct{})}
 	c := &coordinator{session: &Session{ctx: context.Background(), observed: make(chan struct{}, 1), memberUpdates: make(map[string]memberObservation)},
-		voice: voiceFixture{}, logger: log.New(io.Discard), speakers: make(map[string]bool), connected: true, channel: "voice", idle: IdleTimeouts{Alone: time.Hour},
+		voice: voiceFixture{}, logger: log.New(io.Discard), speakers: make(map[string]bool), link: voiceConnected{}, channel: "voice", idle: IdleTimeouts{Alone: time.Hour},
 		queue: queue{index: 0, capacity: 8, entries: []entry{{track: Track{Duration: time.Minute}, ticket: ticket}}}}
 	t.Cleanup(func() {
 		if c.aloneTimer != nil {
@@ -170,7 +170,7 @@ func TestAloneExpiryYieldsToPublishedListener(t *testing.T) {
 		t.Fatal(err)
 	}
 	c.aloneExpired()
-	if !c.connected || c.needDisconnect {
+	if !c.connected() || c.owesDisconnect() {
 		t.Fatal("left an occupied channel")
 	}
 	if err := c.session.ObserveAudience("voice", true); err != nil {
@@ -179,7 +179,7 @@ func TestAloneExpiryYieldsToPublishedListener(t *testing.T) {
 	c.drainObserved()
 	c.armIdle()
 	c.aloneExpired()
-	if c.connected || !c.needDisconnect {
+	if c.connected() || !c.owesDisconnect() {
 		t.Fatal("did not leave when still alone at expiry")
 	}
 }
