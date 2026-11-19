@@ -1,5 +1,10 @@
 # Setup Verification Guide
 
+> Historical pre-v2 document. Its setup steps, implementation paths and
+> dependency claims are not the current runtime contract. See the
+> [README](../README.md), [architecture](architecture.md),
+> [deployment](deployment.md) and [rewrite status](rewrite/status.md).
+
 This guide helps you verify that GoBard is properly configured and ready to run.
 
 ## Step 1: Verify Dependencies

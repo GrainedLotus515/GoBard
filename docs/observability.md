@@ -84,6 +84,9 @@ last observed source and pipeline success/failure, and sampled active deliveries
 Source includes cache acquisition. Unknown is explicit until an audio attempt
 provides evidence; a successful metadata lookup is not audio-source proof.
 Delivery counts observe increasing accepted frames, not human audibility.
+Source and pipeline are marked successful only while a guild is actively
+delivering; a paused or finished guild's historical frames do not count, so
+they cannot mask a later failure elsewhere.
 Observers sample at one second independently of the player editor. Delivery is
 a sampled indicator, not an instantaneous count. `busy_sessions` separately
 observes outstanding playback (including pause/preparation), metadata reservations

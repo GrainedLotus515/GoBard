@@ -1,5 +1,9 @@
 # Gitea Actions Setup Guide
 
+> Historical document. GitHub Actions publishes images to GHCR; Gitea runs
+> quality gates only and does not publish or deploy. See [CI/CD](CI_CD.md) and
+> [deployment](deployment.md).
+
 This guide will help you set up Gitea Actions CI/CD for the GoBard project.
 
 ## Prerequisites

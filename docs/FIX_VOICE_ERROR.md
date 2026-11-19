@@ -1,5 +1,10 @@
 # Fix for Voice Error 4016
 
+> Historical pre-v2 document. Its setup steps, implementation paths and
+> dependency claims are not the current runtime contract. See the
+> [README](../README.md), [architecture](architecture.md),
+> [deployment](deployment.md) and [rewrite status](rewrite/status.md).
+
 ## The Problem
 
 You're seeing this error:

@@ -1,5 +1,10 @@
 # GoBard Quick Start Guide
 
+> Historical pre-v2 document. Its setup steps, implementation paths and
+> dependency claims are not the current runtime contract. See the
+> [README](../README.md), [architecture](architecture.md),
+> [deployment](deployment.md) and [rewrite status](rewrite/status.md).
+
 Get GoBard up and running in minutes!
 
 ## Prerequisites
