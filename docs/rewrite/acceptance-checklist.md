@@ -36,7 +36,9 @@ listener is unavailable, leave that gate explicitly unverified.
 | Try a mutation outside the bot's voice channel | Private denial, no changed music or destroyed shared player. Read-only queue/player views remain available. |
 | Try configuration without/with Manage Guild | Unauthorized changes fail; authorized settings behave as documented. |
 | Let the queue finish naturally | Audio stops, voice drains cleanly, and the card shows Queue finished. No extra empty-queue/leaving messages or successful zero-frame completion. |
-| Disconnect/kick the bot from the test voice channel | It either recovers within the finite session policy or gives a truthful failure; no runaway reconnects or duplicated track advance. Capture the time for log correlation. |
+| Move the bot to another voice channel, with tracks queued and separately while idle | With work queued it follows the move and continues; when idle it leaves. No duplicated track advance. |
+| Disconnect/kick the bot during playback of a finite, seekable track with time remaining | Treated like `/disconnect`: it does not rejoin and the queue is kept; a later `/play` rejoins and resumes the retained position. (Live/unknown-duration selections end and advance instead.) No runaway reconnects or duplicated track advance. Capture the time for log correlation. |
+| With a finite, seekable track, pause past `PAUSE_TIMEOUT_SECONDS`; separately leave the bot alone past `ALONE_TIMEOUT_SECONDS` | It leaves voice and keeps the queue. Start the alone-only test with more playback remaining than `ALONE_TIMEOUT_SECONDS`; there, a listener returning before the timeout keeps it connected (the pause timer runs independently). Use short test values and record them. |
 | Coordinate a local restart during playback | Clean stop, no hung local container or orphan audio process, followed by successful new playback. Queue/settings are in-memory and do not survive restart. |
 | If available, play in two guilds concurrently | Controls and audio remain isolated; stopping one guild does not affect the other. |
 

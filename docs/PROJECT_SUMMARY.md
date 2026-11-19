@@ -1,5 +1,10 @@
 # GoBard Project Summary
 
+> Historical pre-v2 document. Its setup steps, implementation paths and
+> dependency claims are not the current runtime contract. See the
+> [README](../README.md), [architecture](architecture.md),
+> [deployment](deployment.md) and [rewrite status](rewrite/status.md).
+
 ## ✅ Project Complete
 
 GoBard is a **complete, production-ready Discord music bot** written in Go, recreating the Muse bot with full feature parity.

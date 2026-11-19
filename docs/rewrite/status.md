@@ -1,6 +1,37 @@
-# Rewrite status — 2026-11-01
+# Rewrite status — 2026-11-19
 
-## Consolidated merge candidate
+## Voice lifecycle and state machine (PRs #7 and #8, merged 2026-11-14)
+
+- [#7](https://github.com/GrainedLotus515/GoBard/pull/7): session ownership and
+  async fixes. The bot's own voice observations are applied before later
+  commands; moves during connect, A→B→A moves and Gateway outages are reconciled;
+  skip/stop report owner cancellation rather than a decoder exit. A removal by
+  someone else (kick) is now a deliberate disconnect: no automatic rejoin, queue
+  kept. A move is followed with work queued and released when idle. New idle
+  timeouts `PAUSE_TIMEOUT_SECONDS` (600) and `ALONE_TIMEOUT_SECONDS` (120) leave
+  voice and keep the queue. Source/pipeline health is marked successful only by
+  active delivery, not by a guild's historical frames. Go 1.27.4 in the Docker
+  build image addresses GO-2026-6859, `klauspost/compress` v1.20.2 addresses
+  GO-2026-6865, and runtime image package updates address HIGH apt/zlib findings.
+- [#8](https://github.com/GrainedLotus515/GoBard/pull/8): coordinator voice state
+  is one sealed state machine (`internal/session/voice_state.go`) with no
+  intended behavior change; see [playback lifecycle](../playback-lifecycle.md).
+
+Evidence: race-enabled session/bot/audio suites, `go test ./...`,
+`make docker-lint` and `make docker-test` per the PR descriptions, and the
+GitHub `verify-and-publish` job on both merges. That job published GHCR images
+for these commits; they have **not** been run against live Discord.
+
+Open follow-ups from #7: a kick that coincides with a failed reconnect may cost
+the bounded retries (needs adapter plumbing to distinguish its own leaves);
+seek/recovery on long tracks is unmeasured against the 30 s startup limit.
+
+Live state: no local GoBard container exists as of 2026-11-19, and the newest
+live evidence is the 2026-10-16 local candidate below. Every gate in the
+[acceptance checklist](acceptance-checklist.md), including the new move, kick
+and idle-timeout rows, remains unverified on the current revision.
+
+## Consolidated merge candidate (2026-11-01)
 
 The recovery edits and quality-fix branch are integrated on `v2-rewrite`.
 The November 1 active-stream budget supersedes the October 27 retained-guild
