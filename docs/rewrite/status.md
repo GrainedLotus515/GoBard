@@ -10,8 +10,9 @@
   kept. A move is followed with work queued and released when idle. New idle
   timeouts `PAUSE_TIMEOUT_SECONDS` (600) and `ALONE_TIMEOUT_SECONDS` (120) leave
   voice and keep the queue. Source/pipeline health is marked successful only by
-  active delivery, not by a guild's historical frames. The Docker build image (Go 1.27.4) and runtime
-  image patches address GO-2026-6859, GO-2026-6865 and HIGH apt/zlib findings.
+  active delivery, not by a guild's historical frames. Go 1.27.4 in the Docker
+  build image addresses GO-2026-6859, `klauspost/compress` v1.20.2 addresses
+  GO-2026-6865, and runtime image package updates address HIGH apt/zlib findings.
 - [#8](https://github.com/GrainedLotus515/GoBard/pull/8): coordinator voice state
   is one sealed state machine (`internal/session/voice_state.go`) with no
   intended behavior change; see [playback lifecycle](../playback-lifecycle.md).
