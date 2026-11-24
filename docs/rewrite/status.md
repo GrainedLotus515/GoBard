@@ -22,9 +22,34 @@ Evidence: race-enabled session/bot/audio suites, `go test ./...`,
 GitHub `verify-and-publish` job on both merges. That job published GHCR images
 for these commits; they have **not** been run against live Discord.
 
-Open follow-ups from #7: a kick that coincides with a failed reconnect may cost
-the bounded retries (needs adapter plumbing to distinguish its own leaves);
-seek/recovery on long tracks is unmeasured against the 30 s startup limit.
+Open follow-ups from #7: seek/recovery on long tracks is unmeasured against the
+30 s startup limit. The kick-during-failed-reconnect follow-up is addressed
+offline below.
+
+## Voice leave classification (branch `fix/voice-leave-classification`, 2026-11-23)
+
+Reading the pinned voice SDK showed that it writes a leave (opcode 4, no
+channel) whenever its voice socket closes, including on a network failure, and
+Discord acknowledges that with the same empty self voice state as a kick. Only
+failed-connect cleanup leaves were marked, so a dropped voice socket was handled
+as a removal (leave, keep queue, no recovery), and the ack of an explicit
+Disconnect could be judged against a quick re-join. The adapter now marks every
+leave it writes while the bot is in a channel and reports a lost voice socket
+directly as a transport loss, which the session recovers like a move to the
+same channel. Closes where Discord ended the session (4014/4021/4022) and leaves
+after Discord reported the bot absent stay unmarked. With own leaves withheld,
+a `""` newest at a failed reconnect is a removal and ends recovery without
+spending retries. See [playback lifecycle](../playback-lifecycle.md) for
+residual limits found in an independent review.
+
+Evidence is offline only: adapter tests through real SDK connections (leave
+marking per close cause and observed absence, ordering, expiry, bound,
+unsent-write withdrawal, close-code classification, loss reporting), runtime
+routing tests, and session tests (transport loss per state, coalesced public
+observation, failed-reconnect removal). Native `go test -race ./...`,
+`make docker-lint` and `make docker-test` pass. Live behavior of voice socket
+closes, kicks and Discord's acknowledgements on this branch is **unverified**;
+see the kick and network-loss acceptance rows.
 
 Live state: no local GoBard container exists as of 2026-11-19, and the newest
 live evidence is the 2026-10-16 local candidate below. Every gate in the

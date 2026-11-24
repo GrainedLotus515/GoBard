@@ -3,6 +3,7 @@ package session
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"testing"
 	"time"
@@ -514,7 +515,7 @@ func TestRemovalWhileReconnectingIsDistinguishedFromOwnTeardown(t *testing.T) {
 		observed []string
 		removed  bool
 	}{
-		// Recover tears down the old connection ("") before joining again.
+		// Only the newest observation is judged against the new connection.
 		{observed: []string{"", "voice"}, removed: false},
 		{observed: []string{"", "voice", ""}, removed: true},
 	} {
@@ -531,25 +532,126 @@ func TestRemovalWhileReconnectingIsDistinguishedFromOwnTeardown(t *testing.T) {
 		}
 	}
 }
-
-func TestFailedRecoverCleanupIsNotMistakenForRemoval(t *testing.T) {
-	// A failed recover publishes "" for its own teardown and failure cleanup,
-	// before and after the new channel; neither may cancel bounded recovery.
-	for _, observed := range [][]string{{""}, {"", "voice", ""}} {
+func TestFailedRecoverHonorsRemovalWithoutSpendingRetries(t *testing.T) {
+	// The adapter withholds its own leaves (teardown, failure cleanup, lost
+	// socket), so a "" that reaches the session while reconnecting is a
+	// removal by someone else; it must not be retried. Without one, or when
+	// a newer channel replaced it, bounded recovery continues.
+	for _, tc := range []struct {
+		observed []string
+		removed  bool
+	}{
+		{observed: nil},
+		{observed: []string{"voice"}},
+		{observed: []string{"", "voice"}},
+		{observed: []string{""}, removed: true},
+		{observed: []string{"voice", ""}, removed: true},
+	} {
 		ticket := &Ticket{done: make(chan struct{})}
 		c := &coordinator{session: &Session{ctx: context.Background()}, voice: voiceFixture{}, logger: log.New(io.Discard), speakers: make(map[string]bool), channel: "voice",
-			queue: queue{index: 0, capacity: 8, entries: []entry{{track: Track{Duration: time.Minute}, ticket: ticket}}},
-			link:  voiceReconnecting{dial: dial{cancel: func() {}}}}
-		for _, channel := range observed {
+			queue:            queue{index: 0, capacity: 8, entries: []entry{{track: Track{Duration: time.Minute}, ticket: ticket}}},
+			link:             voiceReconnecting{dial: dial{cancel: func() {}}},
+			recoveryAttempts: 1}
+		for _, channel := range tc.observed {
 			c.voiceLost(channel)
 		}
 		c.voiceEvent(voiceEvent{kind: voiceTransportDone, result: transportResult{err: errors.New("voice handshake failed")}})
+		if tc.removed {
+			if inBackoff(c) || !c.owesDisconnect() || c.queue.current() == nil || c.recoveryAttempts != 1 {
+				t.Fatalf("%q: removal not honored: state=%T queued=%v attempts=%d", tc.observed, c.link, c.queue.current() != nil, c.recoveryAttempts)
+			}
+			continue
+		}
 		if !inBackoff(c) || c.owesDisconnect() {
-			t.Fatalf("%q: recovery cancelled by own cleanup: state=%T", observed, c.link)
+			t.Fatalf("%q: bounded recovery cancelled: state=%T", tc.observed, c.link)
 		}
 		stopBackoff(c)
 	}
 }
+
+func TestTransportLossRecoversQueuedWorkWithoutRemoval(t *testing.T) {
+	newCoordinator := func(queued bool, link voiceState) *coordinator {
+		c := &coordinator{session: &Session{ctx: context.Background()}, voice: voiceFixture{}, logger: log.New(io.Discard), speakers: map[string]bool{"listener": true}, channel: "voice",
+			queue: queue{index: -1, capacity: 8}, link: link}
+		if queued {
+			c.queue = queue{index: 0, capacity: 8, entries: []entry{{track: Track{Duration: time.Minute}, ticket: &Ticket{done: make(chan struct{})}}}}
+		}
+		return c
+	}
+
+	// Idle with a retained selection: reconnect to the same channel.
+	c := newCoordinator(true, voiceConnected{})
+	generation := c.generation
+	c.voiceEvent(voiceEvent{kind: voiceTransportLost})
+	if !inBackoff(c) || c.channel != "voice" || c.generation == generation || len(c.speakers) != 0 {
+		t.Fatalf("idle loss with queued work: state=%T channel=%q speakers=%d", c.link, c.channel, len(c.speakers))
+	}
+	stopBackoff(c)
+
+	// Idle with nothing queued: release instead of reconnecting.
+	c = newCoordinator(false, voiceConnected{})
+	c.voiceEvent(voiceEvent{kind: voiceTransportLost})
+	if !c.owesDisconnect() {
+		t.Fatalf("idle loss with nothing queued: state=%T", c.link)
+	}
+
+	// While an attempt runs: interrupt it as a transport failure, then recover
+	// once it joins.
+	c = newCoordinator(true, voiceConnected{})
+	canceled := playback.Outcome("")
+	c.active, c.cancel = &Ticket{done: make(chan struct{})}, func(cause error) {
+		if cancellation, ok := cause.(playback.Cancellation); ok {
+			canceled = cancellation.Outcome
+		}
+	}
+	c.voiceEvent(voiceEvent{kind: voiceTransportLost})
+	if _, lost := c.link.(voiceLost); !lost || canceled != playback.TransportFailure {
+		t.Fatalf("loss during attempt: state=%T canceled=%q", c.link, canceled)
+	}
+	c.active = nil
+	c.voiceEvent(voiceEvent{kind: voiceTransportFailed})
+	if !inBackoff(c) {
+		t.Fatalf("attempt joined after loss: state=%T", c.link)
+	}
+	stopBackoff(c)
+
+	// A loss during a dial applies to the connection it establishes: the new
+	// socket can drop after Connect finishes, before its result is applied.
+	c = newCoordinator(true, voiceReconnecting{dial: dial{cancel: func() {}}})
+	c.voiceEvent(voiceEvent{kind: voiceTransportLost})
+	connectSucceeds(c)
+	if !inBackoff(c) {
+		t.Fatalf("loss during recover then success: state=%T", c.link)
+	}
+	stopBackoff(c)
+	reply := make(chan response, 1)
+	c = newCoordinator(false, voiceConnecting{dial: dial{cancel: func() {}}, reply: reply})
+	c.voiceEvent(voiceEvent{kind: voiceTransportLost})
+	connectSucceeds(c)
+	if !c.owesDisconnect() || !errors.Is((<-reply).err, ErrSuperseded) {
+		t.Fatalf("loss during join then success: state=%T", c.link)
+	}
+	c = newCoordinator(true, voiceReconnecting{dial: dial{cancel: func() {}}})
+	c.voiceEvent(voiceEvent{kind: voiceTransportLost})
+	c.voiceEvent(voiceEvent{kind: voiceTransportDone, result: transportResult{err: errors.New("handshake failed")}})
+	if !inBackoff(c) || c.recoveryAttempts != 0 {
+		t.Fatalf("loss during failed recover: state=%T attempts=%d", c.link, c.recoveryAttempts)
+	}
+	stopBackoff(c)
+
+	// Other states already recover or leave.
+	for _, link := range []voiceState{
+		voiceDisconnected{},
+		voiceReleasing{},
+	} {
+		c = newCoordinator(true, link)
+		c.voiceEvent(voiceEvent{kind: voiceTransportLost})
+		if fmt.Sprintf("%T", c.link) != fmt.Sprintf("%T", link) {
+			t.Fatalf("loss in %T changed state to %T", link, c.link)
+		}
+	}
+}
+
 func inBackoff(c *coordinator) bool {
 	_, ok := c.link.(voiceBackoff)
 	return ok

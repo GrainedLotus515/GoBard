@@ -517,3 +517,43 @@ func TestStopRetainsVoiceAfterSupersededLookupCleanup(t *testing.T) {
 		})
 	}
 }
+
+func TestObservedTransportLossReconnectsSameChannelAndKeepsPosition(t *testing.T) {
+	joined := make(chan string, 4)
+	s, source := voiceTestSession(t, voiceFixture{connect: func(_ context.Context, channel string) (playback.Output, error) {
+		joined <- channel
+		return outputFunc(func(context.Context, []byte) error { return nil }), nil
+	}})
+	if _, err := s.Join(context.Background(), "voice"); err != nil {
+		t.Fatal(err)
+	}
+	<-joined
+	if _, err := s.Add(context.Background(), []Track{{Provider: "fixture", MediaID: "audio", Duration: time.Minute}}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-source.opened:
+	case <-time.After(time.Second):
+		t.Fatal("attempt not started")
+	}
+	apply(t, s, Operation{Action: Pause})
+	// Losses coalesce; the bot was not removed, so it rejoins its own channel.
+	s.ObserveVoiceLoss()
+	s.ObserveVoiceLoss()
+	select {
+	case channel := <-joined:
+		if channel != "voice" {
+			t.Fatalf("reconnected to %q", channel)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("lost transport did not recover")
+	}
+	select {
+	case channel := <-joined:
+		t.Fatalf("coalesced loss reconnected twice (%q)", channel)
+	case <-time.After(100 * time.Millisecond):
+	}
+	if snap := apply(t, s, Operation{Action: Inspect}); snap.Current != 0 || !snap.Connected {
+		t.Fatalf("selection or connection not retained: %+v", snap)
+	}
+}

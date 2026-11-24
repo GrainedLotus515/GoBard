@@ -134,12 +134,42 @@ request resets the budget. Exhaustion retains the queue and disconnects.
 The bot's own observed voice channel decides recovery. A move to another channel
 is followed (with work queued) or released (idle). Removal by someone else
 (observed channel empty) is deliberate: it is handled as an intentional
-disconnect, never reconnected automatically, and the queue is retained. A
-recover's own teardown also reports an empty channel, so during a connect only
-the newest observation at completion is judged. A failed connect's own cleanup
-leave is marked by the voice adapter, and its empty-channel acknowledgement (up to
-5 s later) is not published as a removal, so it cannot cancel bounded recovery. A
-removal that coincides with a failed reconnect may cost those bounded retries.
+disconnect, never reconnected automatically, and the queue is retained.
+
+Discord acknowledges every leave the bot writes with the same empty-channel
+voice state a removal produces, so the voice adapter
+(`internal/discordvoice/leave.go`) marks each leave it writes while the bot is
+still in a channel, and the runtime consumes the matching acknowledgement
+(within 5 s, oldest first) instead of publishing a removal. That covers
+Disconnect, the teardown before every Connect, a failed connect's cleanup, and
+the leave the voice SDK writes after its voice socket closes. A leave written
+after Discord ended the session (voice close 4014 disconnected, 4021 rate
+limited, 4022 call terminated) or after Discord already reported the bot in no
+channel is not marked: Discord's own empty voice state was the removal.
+
+A voice socket that closes for any other reason (network failure, voice server
+crash) while the bot was not removed is reported by the adapter when it
+happens, as a **transport loss**, before its own Disconnect of that connection
+returns. The bot was not removed, so an established connection recovers like a
+move to the same channel: an interrupted attempt or a retained selection
+reconnects within the bounded budget, and an idle bot with nothing queued
+releases. A loss that arrives while a Connect is in flight is recorded and
+applied to the connection if the Connect succeeds (the new socket can drop
+before its result is applied); it is ignored in the other non-connected states.
+
+Only an empty channel that no mark claims reaches the session, so it is a
+removal by someone else (or a reconciled Gateway snapshot). During a connect
+only the newest observation is judged: against the connection just established
+on success, and on a failed reconnect a newest `""` ends recovery as a removal
+without spending the remaining retries.
+
+Residual limits, unverified live: a removal that lands within one Gateway round
+trip of a leave the bot just wrote can be claimed by that leave's mark (the bot
+may then rejoin on a recover); a leave written while Discord already considered
+the bot absent, but before it said so, is never acknowledged and its mark can
+claim a removal within 5 s; Discord documents 4014 for a voice server change
+as well, and such a move is treated as ended rather than followed.
+
 Idle timeouts take the same path as a removal: after `PAUSE_TIMEOUT_SECONDS`
 (default 600) continuously paused, or `ALONE_TIMEOUT_SECONDS` (default 120) with
 no non-bot member in the bot's channel, the session disconnects and keeps the
@@ -161,9 +191,9 @@ stateDiagram-v2
     Disconnected --> Connecting: join
     Connecting --> Connected: connect ok (then judge newest observation)
     Connecting --> Releasing: connect failed
-    Connected --> Lost: moved, attempt running
-    Connected --> Backoff: moved idle with queued work / output transport failure
-    Connected --> Releasing: kicked ("") / idle timeout / moved idle, nothing queued / Disconnect / drained / exhausted
+    Connected --> Lost: moved or transport lost, attempt running
+    Connected --> Backoff: moved or transport lost idle with queued work / output transport failure
+    Connected --> Releasing: kicked ("") / idle timeout / moved or transport lost idle, nothing queued / Disconnect / drained / exhausted
     Lost --> Lost: moved again (retarget) / stop or Disconnect (release=true)
     Lost --> Backoff: attempt joined, work queued
     Lost --> Releasing: kicked / attempt joined after stop, or idle after a loss during another control
@@ -173,7 +203,7 @@ stateDiagram-v2
     Backoff --> Releasing: kicked / stop / Disconnect / drained
     Reconnecting --> Connected: recover ok (then judge newest observation)
     Reconnecting --> Backoff: recover failed, budget left
-    Reconnecting --> Releasing: recover failed, budget exhausted
+    Reconnecting --> Releasing: recover failed, budget exhausted or removed ("" newest)
     Connecting --> Releasing: stop / Disconnect (abandoned connect must report)
     Reconnecting --> Releasing: stop / Disconnect (abandoned recover must report)
     Releasing --> Disconnecting: no attempt running and no abandoned connect
@@ -182,10 +212,12 @@ stateDiagram-v2
 
 * **Disconnected** — nothing held or owed; a queue and resume position may be retained.
 * **Connecting / Reconnecting** — a join's or recovery's `Connect` is in flight.
-  Observations are recorded, not judged: a recover's own teardown reports `""`
-  before the new channel, so only the newest observation is judged, against the
-  connection just established. The join is acknowledged only if still connected.
-* **Lost** — moved away while an attempt runs. A control pending at the move
+  Observations are recorded, not judged; only the newest is judged, against the
+  connection just established. A recover that fails with a newest `""` (a
+  removal) releases instead of retrying. A recorded transport loss applies
+after a successful connect. The
+  join is acknowledged only if still connected.
+* **Lost** — moved away or transport lost while an attempt runs. A control pending at the move
   keeps its outcome. The next state is decided after the attempt joins. A stop
   or Disconnect in the meantime sets `release`.
 * **Backoff** — waiting 0/1/2 s before the next of three recovery attempts.
