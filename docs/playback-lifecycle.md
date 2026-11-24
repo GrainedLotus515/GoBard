@@ -153,8 +153,9 @@ happens, as a **transport loss**, before its own Disconnect of that connection
 returns. The bot was not removed, so an established connection recovers like a
 move to the same channel: an interrupted attempt or a retained selection
 reconnects within the bounded budget, and an idle bot with nothing queued
-releases. A loss is ignored while a Connect is in flight (its result decides)
-and in the other non-connected states.
+releases. A loss that arrives while a Connect is in flight is recorded and
+applied to the connection if the Connect succeeds (the new socket can drop
+before its result is applied); it is ignored in the other non-connected states.
 
 Only an empty channel that no mark claims reaches the session, so it is a
 removal by someone else (or a reconciled Gateway snapshot). During a connect
@@ -213,7 +214,8 @@ stateDiagram-v2
 * **Connecting / Reconnecting** — a join's or recovery's `Connect` is in flight.
   Observations are recorded, not judged; only the newest is judged, against the
   connection just established. A recover that fails with a newest `""` (a
-  removal) releases instead of retrying. A transport loss is ignored here. The
+  removal) releases instead of retrying. A recorded transport loss applies
+after a successful connect. The
   join is acknowledged only if still connected.
 * **Lost** — moved away or transport lost while an attempt runs. A control pending at the move
   keeps its outcome. The next state is decided after the attempt joins. A stop

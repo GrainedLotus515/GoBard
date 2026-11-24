@@ -615,10 +615,32 @@ func TestTransportLossRecoversQueuedWorkWithoutRemoval(t *testing.T) {
 	}
 	stopBackoff(c)
 
-	// A dial's Connect result decides; other states already recover or leave.
+	// A loss during a dial applies to the connection it establishes: the new
+	// socket can drop after Connect finishes, before its result is applied.
+	c = newCoordinator(true, voiceReconnecting{dial: dial{cancel: func() {}}})
+	c.voiceEvent(voiceEvent{kind: voiceTransportLost})
+	connectSucceeds(c)
+	if !inBackoff(c) {
+		t.Fatalf("loss during recover then success: state=%T", c.link)
+	}
+	stopBackoff(c)
+	reply := make(chan response, 1)
+	c = newCoordinator(false, voiceConnecting{dial: dial{cancel: func() {}}, reply: reply})
+	c.voiceEvent(voiceEvent{kind: voiceTransportLost})
+	connectSucceeds(c)
+	if !c.owesDisconnect() || !errors.Is((<-reply).err, ErrSuperseded) {
+		t.Fatalf("loss during join then success: state=%T", c.link)
+	}
+	c = newCoordinator(true, voiceReconnecting{dial: dial{cancel: func() {}}})
+	c.voiceEvent(voiceEvent{kind: voiceTransportLost})
+	c.voiceEvent(voiceEvent{kind: voiceTransportDone, result: transportResult{err: errors.New("handshake failed")}})
+	if !inBackoff(c) || c.recoveryAttempts != 0 {
+		t.Fatalf("loss during failed recover: state=%T attempts=%d", c.link, c.recoveryAttempts)
+	}
+	stopBackoff(c)
+
+	// Other states already recover or leave.
 	for _, link := range []voiceState{
-		voiceReconnecting{dial: dial{cancel: func() {}}},
-		voiceConnecting{dial: dial{cancel: func() {}}},
 		voiceDisconnected{},
 		voiceReleasing{},
 	} {

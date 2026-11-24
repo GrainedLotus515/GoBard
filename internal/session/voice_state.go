@@ -64,6 +64,10 @@ type dial struct {
 	cancel      context.CancelFunc
 	observed    string
 	observedSet bool
+	// lost: a transport loss arrived during the dial. The new connection
+	// can drop after Connect finishes but before its result is applied, so
+	// a successful result is treated as lost.
+	lost bool
 }
 
 type voiceEventKind uint8
@@ -140,6 +144,9 @@ func (c *coordinator) voiceEvent(e voiceEvent) {
 			// Moved or removed while connecting: judge the newest observation
 			// against the connection just established, before acknowledging.
 			c.voiceEvent(voiceEvent{kind: voiceObserved, channel: d.observed})
+		}
+		if d.lost {
+			c.voiceEvent(voiceEvent{kind: voiceTransportLost})
 		}
 		if reply != nil {
 			if c.connected() {
@@ -299,11 +306,19 @@ func (c *coordinator) onObserved(channel string) voiceState {
 	return c.link
 }
 
-// onTransportLost handles a voice transport lost without a removal. Only an
-// established connection is affected: a dial's outcome is decided by its
-// Connect result, and the other states already recover or release.
+// onTransportLost handles a voice transport lost without a removal. A dial
+// records it and applies it if its Connect succeeds; the other non-connected
+// states already recover or release.
 func (c *coordinator) onTransportLost() voiceState {
-	if !c.connected() {
+	switch s := c.link.(type) {
+	case voiceConnecting:
+		s.lost = true
+		return s
+	case voiceReconnecting:
+		s.lost = true
+		return s
+	case voiceConnected:
+	default:
 		return c.link
 	}
 	next := c.connectionLost()
