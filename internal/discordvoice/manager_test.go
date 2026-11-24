@@ -5,12 +5,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/bwmarrin/discordgo"
 	"github.com/charmbracelet/log"
+	disgodiscord "github.com/disgoorg/disgo/discord"
+	disgogateway "github.com/disgoorg/disgo/gateway"
 	disgovoice "github.com/disgoorg/disgo/voice"
 	"github.com/disgoorg/snowflake/v2"
 	"github.com/gorilla/websocket"
@@ -115,60 +116,53 @@ func TestToVoiceStateUpdateRejectsInvalidIDs(t *testing.T) {
 func TestOwnLeavesClaimAcknowledgementsInOrderWithinWindow(t *testing.T) {
 	m := &Manager{}
 	now := time.Now()
-	if _, own := m.ConsumeOwnLeave("1"); own {
+	if m.ConsumeOwnLeave("1") {
 		t.Fatal("unmarked empty voice state treated as an own leave")
 	}
 	// A recover's teardown, then its failed connect's cleanup.
-	m.leaves.mark("1", LeaveRequested, now)
-	m.leaves.mark("1", LeaveTransportLost, now)
-	if _, own := m.ConsumeOwnLeave("2"); own {
+	m.leaves.mark("1", now)
+	m.leaves.mark("1", now)
+	if m.ConsumeOwnLeave("2") {
 		t.Fatal("leave mark leaked across guilds")
 	}
-	if kind, own := m.ConsumeOwnLeave("1"); !own || kind != LeaveRequested {
-		t.Fatalf("first acknowledgement = %v, %v; want requested", kind, own)
+	for range 2 {
+		if !m.ConsumeOwnLeave("1") {
+			t.Fatal("own leave acknowledgement not recognized")
+		}
 	}
-	if kind, own := m.ConsumeOwnLeave("1"); !own || kind != LeaveTransportLost {
-		t.Fatalf("second acknowledgement = %v, %v; want transport lost", kind, own)
-	}
-	if _, own := m.ConsumeOwnLeave("1"); own {
+	if m.ConsumeOwnLeave("1") {
 		t.Fatal("two leaves claimed a third empty voice state (a later removal)")
 	}
 
-	m.leaves.mark("1", LeaveRequested, now.Add(-ownLeaveWindow))
-	m.leaves.mark("1", LeaveTransportLost, now)
-	if kind, own := m.ConsumeOwnLeave("1"); !own || kind != LeaveTransportLost {
-		t.Fatalf("expired mark not skipped: %v, %v", kind, own)
-	}
-	m.leaves.mark("1", LeaveRequested, now.Add(-ownLeaveWindow))
-	if _, own := m.ConsumeOwnLeave("1"); own {
+	m.leaves.mark("1", now.Add(-ownLeaveWindow))
+	if m.ConsumeOwnLeave("1") {
 		t.Fatal("stale leave mark hid a removal")
 	}
-
-	m.leaves.mark("1", LeaveRequested, now)
-	m.leaves.mark("1", LeaveTransportLost, now)
-	m.leaves.unmark("1")
-	if kind, _ := m.ConsumeOwnLeave("1"); kind != LeaveRequested {
-		t.Fatal("unmark did not withdraw the newest (unsent) leave")
+	m.leaves.mark("1", now.Add(-ownLeaveWindow))
+	m.leaves.mark("1", now)
+	if !m.ConsumeOwnLeave("1") || m.ConsumeOwnLeave("1") {
+		t.Fatal("expired prefix not skipped exactly once")
 	}
-	if _, own := m.ConsumeOwnLeave("1"); own {
-		t.Fatal("withdrawn leave still claimed an acknowledgement")
+
+	m.leaves.mark("1", now)
+	m.leaves.mark("1", now)
+	m.leaves.unmark("1")
+	if !m.ConsumeOwnLeave("1") || m.ConsumeOwnLeave("1") {
+		t.Fatal("unmark did not withdraw exactly the unsent leave")
 	}
 
 	for range maxOwnLeaves + 2 {
-		m.leaves.mark("1", LeaveRequested, now)
+		m.leaves.mark("1", now)
 	}
 	claimed := 0
-	for {
-		if _, own := m.ConsumeOwnLeave("1"); !own {
-			break
-		}
+	for m.ConsumeOwnLeave("1") {
 		claimed++
 	}
 	if claimed != maxOwnLeaves {
 		t.Fatalf("claimed %d acknowledgements, want bound %d", claimed, maxOwnLeaves)
 	}
 	var none *Manager
-	if _, own := none.ConsumeOwnLeave("1"); own {
+	if none.ConsumeOwnLeave("1") {
 		t.Fatal("nil manager claimed a leave")
 	}
 }
@@ -193,63 +187,87 @@ func TestClassifyVoiceSocketClose(t *testing.T) {
 	}
 }
 
-func TestConnectionLeavesAreMarkedWithTheirCloseCause(t *testing.T) {
+func TestConnectionLeavesAreMarkedUnlessDiscordRemovedTheBot(t *testing.T) {
 	ctx := context.Background()
-	channel := snowflake.ID(5)
+	const bot = snowflake.ID(3)
 	var writeErr error
-	writes := 0
-	update := func(context.Context, snowflake.ID, *snowflake.ID, bool, bool) error {
-		writes++
+	leaves := 0
+	update := func(_ context.Context, _ snowflake.ID, channel *snowflake.ID, _, _ bool) error {
+		if channel == nil {
+			leaves++
+		}
 		return writeErr
 	}
-	closes := 0
-	closed := func(disgovoice.Gateway, error, bool) { closes++ }
+	channel := snowflake.ID(5)
+	selfState := func(channel *snowflake.ID, user snowflake.ID) disgogateway.EventVoiceStateUpdate {
+		return disgogateway.EventVoiceStateUpdate{VoiceState: disgodiscord.VoiceState{GuildID: 1, UserID: user, ChannelID: channel}}
+	}
 
+	// Real SDK connections: Close writes the leave through the wrapper.
 	for _, tc := range []struct {
-		name     string
-		closeErr error // nil: the owner disconnects; no socket close first
-		want     LeaveKind
-		marked   bool
+		name    string
+		updates []disgogateway.EventVoiceStateUpdate
+		marked  bool
 	}{
-		{name: "owner disconnect", want: LeaveRequested, marked: true},
-		{name: "network loss", closeErr: io.ErrUnexpectedEOF, want: LeaveTransportLost, marked: true},
-		{name: "kicked", closeErr: &websocket.CloseError{Code: 4014}},
+		{name: "owner disconnect while in a channel", updates: []disgogateway.EventVoiceStateUpdate{selfState(&channel, bot)}, marked: true},
+		{name: "never acknowledged a channel (failed join)", marked: true},
+		{name: "another member left", updates: []disgogateway.EventVoiceStateUpdate{selfState(&channel, bot), selfState(nil, 9)}, marked: true},
+		{name: "after Discord removed the bot", updates: []disgogateway.EventVoiceStateUpdate{selfState(&channel, bot), selfState(nil, bot)}},
 	} {
 		m := &Manager{}
-		cause := new(atomic.Uint32)
-		leave := m.markLeaves("1", cause, update)
-		if err := leave(ctx, 1, &channel, false, false); err != nil {
-			t.Fatal(err)
+		conn := m.connCreate(1, bot, update, func() {})
+		for _, u := range tc.updates {
+			conn.HandleVoiceStateUpdate(u)
 		}
-		if _, own := m.ConsumeOwnLeave("1"); own {
-			t.Fatalf("%s: join marked as a leave", tc.name)
+		before := leaves
+		conn.Shutdown(ctx)
+		if leaves != before+1 {
+			t.Fatalf("%s: SDK wrote %d leaves, want 1", tc.name, leaves-before)
 		}
-		if tc.closeErr != nil {
-			recordClose(cause, closed)(nil, tc.closeErr, false)
-			// A later close cannot rewrite the first cause.
-			recordClose(cause, closed)(nil, io.EOF, false)
-		}
-		if err := leave(ctx, 1, nil, false, false); err != nil {
-			t.Fatal(err)
-		}
-		kind, own := m.ConsumeOwnLeave("1")
-		if own != tc.marked || kind != tc.want {
-			t.Fatalf("%s: leave = %v, %v; want %v, %v", tc.name, kind, own, tc.want, tc.marked)
+		if own := m.ConsumeOwnLeave("1"); own != tc.marked {
+			t.Fatalf("%s: marked = %v, want %v", tc.name, own, tc.marked)
 		}
 	}
-	if closes != 4 {
-		t.Fatalf("SDK close handler called %d times, want 4", closes)
+
+	// Close causes recorded by the gateway close handler.
+	for _, tc := range []struct {
+		name     string
+		closeErr error
+		absent   bool
+		marked   bool
+		lost     bool
+	}{
+		{name: "network loss", closeErr: io.ErrUnexpectedEOF, marked: true, lost: true},
+		{name: "kicked", closeErr: &websocket.CloseError{Code: 4014}},
+		{name: "network loss after removal", closeErr: io.ErrUnexpectedEOF, absent: true},
+	} {
+		m := &Manager{}
+		var lost []string
+		m.SetTransportLossHandler(func(guild string) { lost = append(lost, guild) })
+		state := &connState{guild: "1", user: bot}
+		state.absent.Store(tc.absent)
+		closes := 0
+		closed := m.recordClose(state, func(disgovoice.Gateway, error, bool) { closes++ })
+		closed(nil, tc.closeErr, false)
+		// A later close cannot rewrite the first cause or report twice.
+		closed(nil, io.EOF, false)
+		if err := m.markLeaves(state, update)(ctx, 1, nil, false, false); err != nil {
+			t.Fatal(err)
+		}
+		if own := m.ConsumeOwnLeave("1"); own != tc.marked {
+			t.Fatalf("%s: marked = %v, want %v", tc.name, own, tc.marked)
+		}
+		if got := len(lost) == 1 && lost[0] == "1"; got != tc.lost || len(lost) > 1 || closes != 2 {
+			t.Fatalf("%s: loss reports %q (want %v), SDK closes %d", tc.name, lost, tc.lost, closes)
+		}
 	}
 
 	m := &Manager{}
 	writeErr = errors.New("gateway closed")
-	if err := m.markLeaves("1", new(atomic.Uint32), update)(ctx, 1, nil, false, false); err == nil {
+	if err := m.markLeaves(&connState{guild: "1"}, update)(ctx, 1, nil, false, false); err == nil {
 		t.Fatal("write error swallowed")
 	}
-	if _, own := m.ConsumeOwnLeave("1"); own {
+	if m.ConsumeOwnLeave("1") {
 		t.Fatal("unsent leave left a mark that could hide a removal")
-	}
-	if writes != 7 {
-		t.Fatalf("writes = %d, want 7", writes)
 	}
 }

@@ -7,60 +7,46 @@ import (
 	"sync/atomic"
 	"time"
 
+	disgogateway "github.com/disgoorg/disgo/gateway"
 	disgovoice "github.com/disgoorg/disgo/voice"
 	"github.com/disgoorg/godave"
 	"github.com/disgoorg/snowflake/v2"
 	"github.com/gorilla/websocket"
 )
 
-// LeaveKind classifies a voice leave (Gateway opcode 4 without a channel)
-// that this adapter wrote. Discord acknowledges a leave with the bot's own
-// voice state and an empty channel, which is indistinguishable on the wire
-// from a removal by a moderator. The runtime consumes the matching mark so
-// that only removals by someone else are published as an empty channel.
-type LeaveKind uint8
-
-const (
-	// LeaveRequested is a leave the session asked for: Disconnect, the
-	// teardown that precedes every Connect, or a failed connect's cleanup.
-	// Its acknowledgement carries no news for the session.
-	LeaveRequested LeaveKind = iota + 1
-	// LeaveTransportLost is the SDK leaving after the voice socket closed for
-	// a reason other than Discord ending the bot's voice session (a network
-	// failure, a voice server crash). The bot was not removed; the session
-	// must recover or release the connection.
-	LeaveTransportLost
-)
+// Discord acknowledges every voice leave (Gateway opcode 4 without a channel)
+// with the bot's own voice state and an empty channel, which is
+// indistinguishable on the wire from a removal by a moderator. The adapter
+// marks each leave it writes while the bot is still in a channel; the runtime
+// consumes the matching acknowledgement so that only removals by someone else
+// are published as an empty channel. A voice socket lost while the bot was not
+// removed is reported separately, when it happens, as a transport loss.
 
 // ownLeaveWindow bounds how long a written leave may claim the next empty
-// self voice state. Discord sends none if the bot was not in a channel; the
-// bound keeps that stale mark from hiding a later moderator removal.
+// self voice state. Discord sends none if it already considered the bot
+// absent; the bound keeps such a stale mark from hiding a later removal.
 const ownLeaveWindow = 5 * time.Second
 
 // maxOwnLeaves bounds outstanding marks per guild. A Connect writes at most
 // two leaves (teardown, failure cleanup); older marks are dropped first.
 const maxOwnLeaves = 4
 
-type ownLeave struct {
-	kind     LeaveKind
-	deadline time.Time
-}
-
-// leaveLedger records written leaves per guild in write order. Discord
-// acknowledges opcode 4 writes in order on the one Gateway connection, so the
-// oldest unexpired mark belongs to the next empty self voice state.
+// leaveLedger records the deadlines of written leaves per guild in write
+// order. Discord acknowledges opcode 4 writes in order on the one Gateway
+// connection, so the oldest unexpired mark belongs to the next empty self
+// voice state.
 type leaveLedger struct {
 	mu      sync.Mutex
-	pending map[string][]ownLeave
+	pending map[string][]time.Time
 }
 
-func (l *leaveLedger) mark(guild string, kind LeaveKind, now time.Time) {
+func (l *leaveLedger) mark(guild string, now time.Time) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if l.pending == nil {
-		l.pending = make(map[string][]ownLeave)
+		l.pending = make(map[string][]time.Time)
 	}
-	marks := append(l.pending[guild], ownLeave{kind: kind, deadline: now.Add(ownLeaveWindow)})
+	marks := append(l.pending[guild], now.Add(ownLeaveWindow))
 	if len(marks) > maxOwnLeaves {
 		marks = append(marks[:0], marks[len(marks)-maxOwnLeaves:]...)
 	}
@@ -79,35 +65,36 @@ func (l *leaveLedger) unmark(guild string) {
 	l.pending[guild] = marks[:len(marks)-1]
 }
 
-func (l *leaveLedger) consume(guild string, now time.Time) (LeaveKind, bool) {
+func (l *leaveLedger) consume(guild string, now time.Time) bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	marks := l.pending[guild]
 	// Deadlines are appended in increasing order; drop the expired prefix.
-	for len(marks) > 0 && !now.Before(marks[0].deadline) {
+	for len(marks) > 0 && !now.Before(marks[0]) {
 		marks = marks[1:]
 	}
 	if len(marks) == 0 {
 		delete(l.pending, guild)
-		return 0, false
+		return false
 	}
-	kind := marks[0].kind
 	if len(marks) == 1 {
 		delete(l.pending, guild)
 	} else {
 		l.pending[guild] = marks[1:]
 	}
-	return kind, true
+	return true
 }
 
-// Voice socket close causes recorded per connection before the SDK leaves.
+// Voice socket close causes, recorded once per connection.
 const (
 	closeNone uint32 = iota
 	// closeLost: network failure or a close Discord expects clients to
 	// survive by reconnecting.
 	closeLost
-	// closeEnded: Discord ended this client's voice session (kicked, call
-	// terminated, rate limited). Its own empty voice state is authoritative.
+	// closeEnded: Discord ended this client's voice session (4014
+	// disconnected, 4021 rate limited, 4022 call terminated). Recovery is
+	// not attempted; Discord documents 4014 for kicks and dropped sessions
+	// but also for a voice server change, which therefore is not followed.
 	closeEnded
 )
 
@@ -127,59 +114,100 @@ func classifyClose(err error) uint32 {
 	return closeLost
 }
 
-// connCreate wraps the SDK's connection constructor so that every leave a
-// connection writes is marked in the ledger with its cause. The SDK writes
-// exactly one leave per connection (its Close runs once): either from an
-// owner Disconnect/Shutdown (requested), or from its voice socket close
-// handler. The close cause is recorded before that handler runs.
-func (m *Manager) connCreate(guildID, userID snowflake.ID, update disgovoice.StateUpdateFunc, remove func(), opts ...disgovoice.ConnConfigOpt) disgovoice.Conn {
-	cause := new(atomic.Uint32)
-	gateway := func(dave godave.Session, events disgovoice.EventHandlerFunc, closed disgovoice.CloseHandlerFunc, gatewayOpts ...disgovoice.GatewayConfigOpt) disgovoice.Gateway {
-		return disgovoice.NewGateway(dave, events, recordClose(cause, closed), gatewayOpts...)
-	}
-	return disgovoice.NewConn(guildID, userID, m.markLeaves(guildID.String(), cause, update), remove, append(opts, disgovoice.WithConnGatewayCreateFunc(gateway))...)
+// connState is one connection's view of why it may leave.
+type connState struct {
+	guild  string
+	user   snowflake.ID
+	cause  atomic.Uint32
+	absent atomic.Bool // Discord last reported the bot in no channel
 }
 
-// recordClose records a voice socket close cause before the SDK reacts.
-func recordClose(cause *atomic.Uint32, closed disgovoice.CloseHandlerFunc) disgovoice.CloseHandlerFunc {
+// trackedConn records the bot's own channel as Discord reports it to this
+// connection, so a leave written after Discord removed the bot is not marked.
+type trackedConn struct {
+	disgovoice.Conn
+	state *connState
+}
+
+func (c trackedConn) HandleVoiceStateUpdate(update disgogateway.EventVoiceStateUpdate) {
+	if update.UserID == c.state.user {
+		c.state.absent.Store(update.ChannelID == nil)
+	}
+	c.Conn.HandleVoiceStateUpdate(update)
+}
+
+// connCreate wraps the SDK's connection constructor. The SDK writes exactly
+// one leave per connection (its Close runs once): from an owner
+// Disconnect/Shutdown or from its voice socket close handler, which records
+// the close cause first. Leaves are marked unless Discord already removed the
+// bot; a lost socket is reported to the loss handler before its leave is
+// written.
+func (m *Manager) connCreate(guildID, userID snowflake.ID, update disgovoice.StateUpdateFunc, remove func(), opts ...disgovoice.ConnConfigOpt) disgovoice.Conn {
+	state := &connState{guild: guildID.String(), user: userID}
+	gateway := func(dave godave.Session, events disgovoice.EventHandlerFunc, closed disgovoice.CloseHandlerFunc, gatewayOpts ...disgovoice.GatewayConfigOpt) disgovoice.Gateway {
+		return disgovoice.NewGateway(dave, events, m.recordClose(state, closed), gatewayOpts...)
+	}
+	conn := disgovoice.NewConn(guildID, userID, m.markLeaves(state, update), remove, append(opts, disgovoice.WithConnGatewayCreateFunc(gateway))...)
+	return trackedConn{Conn: conn, state: state}
+}
+
+// recordClose records a voice socket close cause before the SDK reacts, and
+// reports a transport loss unless Discord removed the bot. The SDK runs close
+// handlers on gateway workers that its Shutdown joins, so a loss is reported
+// before the owner's Disconnect of this connection returns.
+func (m *Manager) recordClose(state *connState, closed disgovoice.CloseHandlerFunc) disgovoice.CloseHandlerFunc {
 	return func(g disgovoice.Gateway, err error, reconnect bool) {
-		cause.CompareAndSwap(closeNone, classifyClose(err))
+		cause := classifyClose(err)
+		if state.cause.CompareAndSwap(closeNone, cause) && cause == closeLost && !state.absent.Load() {
+			m.lossMu.RLock()
+			handler := m.lossHandler
+			m.lossMu.RUnlock()
+			if handler != nil {
+				handler(state.guild)
+			}
+		}
 		closed(g, err, reconnect)
 	}
 }
 
 // markLeaves wraps one connection's voice state writes and marks each leave
-// with the connection's close cause. A leave after Discord ended the session
-// is not marked: Discord's own empty voice state is the removal.
-func (m *Manager) markLeaves(guild string, cause *atomic.Uint32, update disgovoice.StateUpdateFunc) disgovoice.StateUpdateFunc {
+// the bot writes while still in a channel. A leave after Discord ended the
+// session or reported the bot absent is not marked: Discord's own empty voice
+// state was the removal, and this leave is not acknowledged.
+func (m *Manager) markLeaves(state *connState, update disgovoice.StateUpdateFunc) disgovoice.StateUpdateFunc {
 	return func(ctx context.Context, guildID snowflake.ID, channelID *snowflake.ID, selfMute, selfDeaf bool) error {
-		if channelID != nil {
+		if channelID != nil || state.cause.Load() == closeEnded || state.absent.Load() {
 			return update(ctx, guildID, channelID, selfMute, selfDeaf)
-		}
-		kind := LeaveRequested
-		switch cause.Load() {
-		case closeEnded:
-			return update(ctx, guildID, channelID, selfMute, selfDeaf)
-		case closeLost:
-			kind = LeaveTransportLost
 		}
 		// Mark before writing: the acknowledgement may be handled before
 		// the write returns.
-		m.leaves.mark(guild, kind, time.Now())
+		m.leaves.mark(state.guild, time.Now())
 		err := update(ctx, guildID, channelID, selfMute, selfDeaf)
 		if err != nil {
-			m.leaves.unmark(guild)
+			m.leaves.unmark(state.guild)
 		}
 		return err
 	}
 }
 
-// ConsumeOwnLeave reports whether an empty self voice state for guildID
-// acknowledges a leave this adapter wrote, and why that leave was written.
-// It consumes the mark. A false result means someone else removed the bot.
-func (m *Manager) ConsumeOwnLeave(guildID string) (LeaveKind, bool) {
+// SetTransportLossHandler registers the consumer for a guild's voice socket
+// lost while the bot was not removed from its channel. The handler runs on an
+// SDK worker and must not block.
+func (m *Manager) SetTransportLossHandler(handler func(guildID string)) {
 	if m == nil {
-		return 0, false
+		return
+	}
+	m.lossMu.Lock()
+	m.lossHandler = handler
+	m.lossMu.Unlock()
+}
+
+// ConsumeOwnLeave reports whether an empty self voice state for guildID
+// acknowledges a leave this adapter wrote, and consumes the mark. False means
+// someone else removed the bot.
+func (m *Manager) ConsumeOwnLeave(guildID string) bool {
+	if m == nil {
+		return false
 	}
 	return m.leaves.consume(guildID, time.Now())
 }

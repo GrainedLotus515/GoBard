@@ -31,6 +31,9 @@ type Manager struct {
 	speakingMu      sync.RWMutex
 	speakingHandler func(guildID, userID string, speaking bool)
 
+	lossMu      sync.RWMutex
+	lossHandler func(guildID string)
+
 	// Leaves this adapter wrote, per guild, until Discord acknowledges them.
 	leaves leaveLedger
 }

@@ -137,31 +137,38 @@ is followed (with work queued) or released (idle). Removal by someone else
 disconnect, never reconnected automatically, and the queue is retained.
 
 Discord acknowledges every leave the bot writes with the same empty-channel
-voice state a removal produces, so the voice adapter marks each leave it writes
-(`internal/discordvoice/leave.go`) and the runtime consumes the matching
-acknowledgement (within 5 s, oldest first) instead of publishing a removal:
+voice state a removal produces, so the voice adapter
+(`internal/discordvoice/leave.go`) marks each leave it writes while the bot is
+still in a channel, and the runtime consumes the matching acknowledgement
+(within 5 s, oldest first) instead of publishing a removal. That covers
+Disconnect, the teardown before every Connect, a failed connect's cleanup, and
+the leave the voice SDK writes after its voice socket closes. A leave written
+after Discord ended the session (voice close 4014 disconnected, 4021 rate
+limited, 4022 call terminated) or after Discord already reported the bot in no
+channel is not marked: Discord's own empty voice state was the removal.
 
-* A requested leave (Disconnect, the teardown before every Connect, a failed
-  connect's cleanup) is not published at all.
-* A leave the voice SDK writes after its voice socket closed for any reason
-  other than Discord ending the session is published as a **transport loss**.
-  The bot was not removed, so an established connection recovers like a move
-  to the same channel: an interrupted attempt or a retained selection reconnects
-  within the bounded budget, and an idle bot with nothing queued releases. A
-  loss is ignored while a Connect is in flight (its result decides) and in the
-  other non-connected states.
-* After a voice close where Discord ended the session (4014 disconnected, 4021
-  rate limited, 4022 call terminated), the SDK's leave is not marked: Discord's
-  own empty voice state is the removal.
+A voice socket that closes for any other reason (network failure, voice server
+crash) while the bot was not removed is reported by the adapter when it
+happens, as a **transport loss**, before its own Disconnect of that connection
+returns. The bot was not removed, so an established connection recovers like a
+move to the same channel: an interrupted attempt or a retained selection
+reconnects within the bounded budget, and an idle bot with nothing queued
+releases. A loss is ignored while a Connect is in flight (its result decides)
+and in the other non-connected states.
 
 Only an empty channel that no mark claims reaches the session, so it is a
 removal by someone else (or a reconciled Gateway snapshot). During a connect
 only the newest observation is judged: against the connection just established
 on success, and on a failed reconnect a newest `""` ends recovery as a removal
-without spending the remaining retries. Residual limits: a leave written while
-Discord already considered the bot absent is never acknowledged, so its mark can
-claim a removal within the next 5 s; the close classification relies on
-Discord's documented voice close codes and has not been verified live.
+without spending the remaining retries.
+
+Residual limits, unverified live: a removal that lands within one Gateway round
+trip of a leave the bot just wrote can be claimed by that leave's mark (the bot
+may then rejoin on a recover); a leave written while Discord already considered
+the bot absent, but before it said so, is never acknowledged and its mark can
+claim a removal within 5 s; Discord documents 4014 for a voice server change
+as well, and such a move is treated as ended rather than followed.
+
 Idle timeouts take the same path as a removal: after `PAUSE_TIMEOUT_SECONDS`
 (default 600) continuously paused, or `ALONE_TIMEOUT_SECONDS` (default 120) with
 no non-bot member in the bot's channel, the session disconnects and keeps the

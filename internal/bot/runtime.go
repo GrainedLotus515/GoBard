@@ -190,9 +190,19 @@ func (r *Runtime) readyRuntime() {
 			return
 		}
 		manager.SetSpeakingHandler(func(guild, user string, speaking bool) { r.callback(func() { r.speaking(guild, user, speaking) }) })
+		manager.SetTransportLossHandler(func(guild string) { r.callback(func() { r.transportLost(guild) }) })
 		r.voice.Store(manager)
 	}
 	r.resumeRuntime()
+}
+
+// transportLost publishes a voice socket lost without a removal. The adapter
+// reports it before its own Disconnect of that connection returns, so the
+// session applies it before any later Connect result.
+func (r *Runtime) transportLost(guild string) {
+	if target, ok := r.sessions.Get(guild); ok {
+		target.ObserveVoiceLoss()
+	}
 }
 
 func (r *Runtime) resumeRuntime() {
@@ -283,22 +293,13 @@ func (r *Runtime) voiceState(e *discordgo.VoiceStateUpdate) {
 	// Publish the bot's own channel to the session before the voice SDK can
 	// act on it, so a connect that completes on this update is reconciled
 	// against it rather than an older observation. An empty channel that
-	// acknowledges a leave the adapter wrote is not a removal: a requested
-	// leave is already owned by the session, and a leave after a lost voice
-	// socket is published as a transport loss to recover from.
-	var leave discordvoice.LeaveKind
-	own := false
-	if e.ChannelID == "" {
-		leave, own = r.voice.Load().ConsumeOwnLeave(e.GuildID)
-	}
-	if target, ok := r.sessions.Get(e.GuildID); ok {
-		switch {
-		case !own:
-			if err := target.ObserveVoice(e.ChannelID); err != nil {
-				r.logger.Warn("Voice-state transition rejected", "event", "voice.event", "reason", "invalid_channel")
-			}
-		case leave == discordvoice.LeaveTransportLost:
-			target.ObserveVoiceLoss()
+	// acknowledges a leave the adapter wrote is not a removal: the session
+	// already owns that leave, and a lost voice socket was reported as a
+	// transport loss when it happened.
+	own := e.ChannelID == "" && r.voice.Load().ConsumeOwnLeave(e.GuildID)
+	if target, ok := r.sessions.Get(e.GuildID); ok && !own {
+		if err := target.ObserveVoice(e.ChannelID); err != nil {
+			r.logger.Warn("Voice-state transition rejected", "event", "voice.event", "reason", "invalid_channel")
 		}
 	}
 	if v := r.voice.Load(); v != nil {
