@@ -22,6 +22,10 @@ make docker-bench
 
 `docker-profile-check` renders all resource overrides and verifies their CPU, memory, cache, and yt-dlp settings. `docker-bench` runs allocation microbenchmarks, then starts deterministic reduced, small, medium, and large capacity containers for 15 minutes under their actual cgroup limits. By default these are fixed stress counts (5/4/12/24), not production capacity. Set `GOBARD_BENCH_ADMISSION=runtime` for memory/extractor-derived admission (1/3/7/11 under the standard limits). `GOBARD_BENCH_INPUT_KBPS=256 GOBARD_BENCH_MEDIA_DURATION=20m` exercises a fixture larger than the acquisition ring. Interactive probe counters measure shared extractor-slot availability, not real provider metadata latency. Set `GOBARD_BENCH_DURATION=10s` only for a quick harness check. Timing thresholds, concurrent process acquisition, cache leases, cleanup, and goroutine/resource-release invariants are enforced; results remain workload-specific capacity evidence rather than production guarantees.
 
+The capacity run uses real Opus encoding, deterministic media, an owned local extractor fixture, a fake voice sink, and concurrent queue/cache activity. It runs reduced (512 MiB/five derived guilds), small, medium, and large containers with their actual CPU, memory, and PID limits and prints one JSON metrics report per profile. Optional `GOBARD_BENCH_BASELINE_SMALL_MS`, `GOBARD_BENCH_BASELINE_MEDIUM_MS`, and `GOBARD_BENCH_BASELINE_LARGE_MS` values enforce the 10% first-frame regression budget against a captured pre-change baseline.
+
+The isolated acceptance bot has `make local-test-start`, `local-test-status`, `local-test-stop` and `local-test-update` commands. Its dedicated cache survives container replacement. [Setup and safety boundaries](docs/deployment.md#durable-local-acceptance-instance) are separate from production Compose.
+
 For an interactive local container, create `.env`, secure it, and use the local override:
 
 ```bash
