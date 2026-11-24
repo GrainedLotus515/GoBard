@@ -282,13 +282,23 @@ func (r *Runtime) voiceState(e *discordgo.VoiceStateUpdate) {
 	}
 	// Publish the bot's own channel to the session before the voice SDK can
 	// act on it, so a connect that completes on this update is reconciled
-	// against it rather than an older observation. The acknowledgement of
-	// the adapter's own failure cleanup is not a removal: the session already
-	// owns that failure and its bounded retry.
-	ownCleanup := e.ChannelID == "" && r.voice.Load().ConsumeCleanupLeave(e.GuildID)
-	if target, ok := r.sessions.Get(e.GuildID); ok && !ownCleanup {
-		if err := target.ObserveVoice(e.ChannelID); err != nil {
-			r.logger.Warn("Voice-state transition rejected", "event", "voice.event", "reason", "invalid_channel")
+	// against it rather than an older observation. An empty channel that
+	// acknowledges a leave the adapter wrote is not a removal: a requested
+	// leave is already owned by the session, and a leave after a lost voice
+	// socket is published as a transport loss to recover from.
+	var leave discordvoice.LeaveKind
+	own := false
+	if e.ChannelID == "" {
+		leave, own = r.voice.Load().ConsumeOwnLeave(e.GuildID)
+	}
+	if target, ok := r.sessions.Get(e.GuildID); ok {
+		switch {
+		case !own:
+			if err := target.ObserveVoice(e.ChannelID); err != nil {
+				r.logger.Warn("Voice-state transition rejected", "event", "voice.event", "reason", "invalid_channel")
+			}
+		case leave == discordvoice.LeaveTransportLost:
+			target.ObserveVoiceLoss()
 		}
 	}
 	if v := r.voice.Load(); v != nil {

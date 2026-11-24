@@ -30,9 +30,10 @@ type (
 	}
 	// voiceConnected owns c.output.
 	voiceConnected struct{}
-	// voiceLost: the connection was lost (moved away) while an attempt was
-	// running. What follows is decided once the attempt joins; release
-	// records a stop or disconnect requested in the meantime.
+	// voiceLost: the connection was lost (moved away or transport lost)
+	// while an attempt was running. What follows is decided once the
+	// attempt joins; release records a stop or disconnect requested in the
+	// meantime.
 	voiceLost struct{ release bool }
 	// voiceBackoff waits to spend the next recovery attempt.
 	voiceBackoff struct{ timer *time.Timer }
@@ -76,6 +77,9 @@ const (
 	voiceTransportDone
 	// voiceObserved is the bot's own observed channel ("" when removed).
 	voiceObserved
+	// voiceTransportLost: the adapter lost the voice transport without the
+	// bot being removed from its channel.
+	voiceTransportLost
 	// voiceIdleTimeout: paused or alone for the configured timeout (reason).
 	voiceIdleTimeout
 	// voiceTransportFailed: the attempt ended in a transport failure (output
@@ -146,6 +150,8 @@ func (c *coordinator) voiceEvent(e voiceEvent) {
 		}
 	case voiceObserved:
 		c.link = c.onObserved(e.channel)
+	case voiceTransportLost:
+		c.link = c.onTransportLost()
 	case voiceIdleTimeout:
 		c.link = c.left(e.reason)
 	case voiceTransportFailed:
@@ -245,13 +251,16 @@ func (c *coordinator) onTransportDone(result transportResult) (next, dialed voic
 		if d.observedSet && d.observed != "" {
 			c.channel = d.observed
 		}
-		// A "" here is ambiguous: the adapter's own failure cleanup reports
-		// it too, after the new channel. Keep the bounded retry; a removal
-		// is honored once connected or when a reconnect succeeds.
-		if kind == transportRecover {
-			return c.recoverNext(), nil
+		if kind != transportRecover {
+			return c.releasing(), nil
 		}
-		return c.releasing(), nil
+		if d.observedSet && d.observed == "" {
+			// The adapter withholds its own leaves (teardown, failure
+			// cleanup, lost socket), so "" is a removal by someone else and
+			// the remaining retries are not spent.
+			return c.leave(c.releasing(), "removed"), nil
+		}
+		return c.recoverNext(), nil
 	}
 	dialed = c.link
 	c.output = result.output
@@ -285,22 +294,50 @@ func (c *coordinator) onObserved(channel string) voiceState {
 			return c.left("removed")
 		}
 		c.channel = channel
-		c.forgetSpeakers()
-		if c.active != nil {
-			// A pending control keeps its outcome; recovery is decided once
-			// the attempt joins (voiceAttemptJoined).
-			c.interrupt(playback.TransportFailure)
-			return voiceLost{}
-		}
-		// Voice recovery exists to resume queued work; an idle bot that was
-		// moved releases the connection instead of following.
-		c.generation++
-		if c.queue.current() == nil {
-			return c.releasing()
-		}
-		return c.recoverNext()
+		return c.connectionLost()
 	}
 	return c.link
+}
+
+// onTransportLost handles a voice transport lost without a removal. Only an
+// established connection is affected: a dial's outcome is decided by its
+// Connect result, and the other states already recover or release.
+func (c *coordinator) onTransportLost() voiceState {
+	if !c.connected() {
+		return c.link
+	}
+	next := c.connectionLost()
+	if c.voice == nil {
+		return next
+	}
+	decision := "retry"
+	switch next.(type) {
+	case voiceLost:
+		decision = "after_attempt"
+	case voiceReleasing:
+		decision = "declined"
+	}
+	c.logger.Warn("Voice transport lost", "event", "session.recovery", "session_id", c.id, "reason", "transport_lost", "recovery", decision)
+	return next
+}
+
+// connectionLost: the established connection is gone (moved away or
+// transport lost) but the bot was not removed, so queued work recovers.
+func (c *coordinator) connectionLost() voiceState {
+	c.forgetSpeakers()
+	if c.active != nil {
+		// A pending control keeps its outcome; recovery is decided once
+		// the attempt joins (voiceAttemptJoined).
+		c.interrupt(playback.TransportFailure)
+		return voiceLost{}
+	}
+	// Voice recovery exists to resume queued work; an idle bot whose
+	// connection moved or dropped releases it instead of following.
+	c.generation++
+	if c.queue.current() == nil {
+		return c.releasing()
+	}
+	return c.recoverNext()
 }
 
 // left handles a deliberate end of the connection that no user command
@@ -310,10 +347,14 @@ func (c *coordinator) onObserved(channel string) voiceState {
 // position, exactly as after an explicit Disconnect. A control already
 // pending keeps its outcome.
 func (c *coordinator) left(reason string) voiceState {
+	return c.leave(c.released(c.link), reason)
+}
+
+// leave applies left's effects given the released next state.
+func (c *coordinator) leave(next voiceState, reason string) voiceState {
 	if c.voice != nil {
 		c.logger.Info("Left voice; recovery declined, queue retained", "event", "session.recovery", "session_id", c.id, "recovery", "declined", "reason", reason)
 	}
-	next := c.released(c.link)
 	if _, lost := next.(voiceLost); lost {
 		// The removal, not the earlier move, now decides the outcome.
 		next = c.releasing()
