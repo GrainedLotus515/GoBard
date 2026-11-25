@@ -160,14 +160,16 @@ RUN --mount=type=cache,target=/go/pkg/mod \
 
 FROM --platform=linux/amd64 ${RUNTIME_IMAGE} AS runtime
 
-# zlib1g is preinstalled in the base image; naming it pulls the
-# trixie-security fix (CVE-2026-85091) until the base image includes it.
+# zlib1g and libzstd1 are preinstalled in the base image; naming them pulls
+# the trixie-security fixes (CVE-2026-85091, CVE-2026-124851) until the base
+# image includes them.
 RUN apt-get update && apt-get install -y --no-install-recommends \
 	ca-certificates \
 	ffmpeg \
 	libopus0 \
 	libopusfile0 \
 	libsodium23 \
+	libzstd1 \
 	python3 \
 	zlib1g && \
 	rm -rf /var/lib/apt/lists/*
