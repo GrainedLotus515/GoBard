@@ -1,184 +1,131 @@
 # GoBard
 
-GoBard is a self-hosted Discord music bot for **YouTube searches, videos, and playlists**. It is packaged as a hardened `linux/amd64` container with Discord DAVE/libdave voice support.
+A self-hosted Discord music bot. Ask it for a song, a YouTube link or a whole
+playlist, and it joins your voice channel and plays it, with a live player card
+your server can control with buttons.
 
-It does not support Spotify, SponsorBlock, YouTube API keys, arbitrary audio URLs, DMs, or automatic host deployment.
+```text
+/play never gonna give you up
+/play https://www.youtube.com/playlist?list=...
+```
 
-This rewrite branch starts the v2 runtime. Offline playback/race/quality gates
-and real YouTube/Discord audio with source recovery to pipeline completion are
-verified, with a successful listening rerun. Live controls, DAVE reconnect,
-active-playback shutdown, full-album and concurrent listening remain acceptance
-gates on the final tree. Pinned SDK race suites verify the offline lifecycle
-contracts but cannot establish those live results.
-See [rewrite status](docs/rewrite/status.md)
-before considering a rollout. No v2 image has been published or deployed to the VPS.
+GoBard runs as a single container on your own machine or server. You bring a
+Discord bot token; there are no accounts, API keys or YouTube cookies to set up.
 
-## Quick start
+> **Status:** GoBard v2 is a rewrite that is still being validated. Real
+> YouTube-to-Discord playback has been tested end to end, but some live checks
+> (controls, voice reconnects, long albums, several servers at once) are still
+> open. See [rewrite status](docs/rewrite/status.md) before relying on it.
 
-Create a private configuration file and start the published image:
+## What it does
+
+- **Plays from YouTube.** Search by name, or paste a YouTube video or playlist
+  link (up to 500 tracks).
+- **Keeps a queue per server.** Shuffle, loop, reorder, remove, seek and adjust
+  volume while it plays.
+- **Shows a live player.** One card in the channel follows the current track,
+  with Pause/Resume, Skip, Repeat, Stop and Queue buttons. Command replies are
+  private, so the channel stays clean.
+- **Picks up where it left off.** If GoBard leaves voice, because you used
+  `/disconnect`, everyone left, or playback sat paused too long, the queue is
+  kept and the next `/play` resumes the song from where it stopped (live
+  streams move on to the next track instead).
+- **Lowers the music when people talk** (optional).
+- **Respects who's listening.** Only people in the bot's voice channel can
+  change playback, and only members with **Manage Server** can change settings.
+
+What it deliberately doesn't do: Spotify, SponsorBlock, direct audio file URLs,
+non-YouTube sites, or commands in DMs.
+
+## Commands
+
+| Command | What it does |
+| --- | --- |
+| `/play <song or link>` | Play a song or playlist, or add it to the queue |
+| `/pause`, `/resume` | Pause or resume playback |
+| `/skip` | Skip to the next song |
+| `/stop` | Stop and clear the queue (the bot stays in voice) |
+| `/disconnect` | Leave voice but keep the queue |
+| `/now-playing` | Show the current song |
+| `/queue` | Show what's coming up |
+| `/clear` | Clear the queue except the current song |
+| `/shuffle` | Shuffle the queue |
+| `/loop` | Toggle looping of the current song |
+| `/volume <0-100>` | Set the volume |
+| `/seek <position>` | Jump to a position, e.g. `1:30` or `90s` |
+| `/fseek <seconds>` | Skip forward by some seconds |
+| `/move <from> <to>` | Move a song in the queue |
+| `/remove <position>` | Remove a song from the queue |
+| `/config` | View or change player-channel and voice-ducking settings (changing needs Manage Server) |
+
+More detail on the player card and buttons is in the
+[Discord interface guide](docs/discord-interface.md).
+
+## Getting started
+
+You'll need Docker with Compose on a `linux/amd64` host and a
+[Discord bot token](https://discord.com/developers/applications).
 
 ```bash
 git clone https://github.com/GrainedLotus515/GoBard.git
 cd GoBard
 cp .env.example .env
 chmod 600 .env
-# Set DISCORD_TOKEN in .env.
-# This pulls the image, initializes ./cache, and then starts GoBard.
-export GOBARD_IMAGE=ghcr.io/grainedlotus515/gobard@sha256:<published-digest>
+# Edit .env: set DISCORD_TOKEN and GOBARD_IMAGE (a published image digest).
 docker compose up -d
 ```
 
-### Cache installation
+Then invite the bot to your server, join a voice channel and type `/play`.
 
-Cache preparation is built into the installation command above; no host `sudo`, `mkdir`, or `chown` command is required. The base Compose file uses the required immutable `GOBARD_IMAGE` digest, then runs the one-shot `cache-init` service before starting `gobard`. The initializer creates the `./cache` bind-mount directory when needed, assigns the mount point to container UID/GID `1000:1000`, and exits. Compose starts the bot only after that step succeeds.
+Check it's healthy with `docker compose ps` or `docker compose logs -f gobard`.
+After editing `.env`, apply changes with `docker compose up -d --force-recreate`.
 
-The initializer is safe to run again during later `docker compose up -d` operations. It changes only the cache mount point and deliberately does not recursively change ownership of existing cache contents. To confirm the installation step completed, run:
-
-```bash
-docker compose ps -a cache-init
-```
-
-To use a token file instead, comment out `DISCORD_TOKEN` in `.env`, set `DISCORD_TOKEN_FILE_HOST` to an absolute host path in `.env`, and add the secret override. The application receives the file at `/run/secrets/discord_token`:
-
-```bash
-docker compose -f docker-compose.yml -f docker-compose.secrets.yml up -d
-```
-
-Compose file-source secrets are bind mounts, so Docker may not apply requested UID/GID/mode values. Before startup, ensure the host token file and its parent directory are traversable/readable by container UID 1000; for example, use owner `1000:1000` and mode `0400`. Do not relax that file to world-readable permissions.
-
-After changing `.env`, recreate the container so Docker applies the new environment:
-
-```bash
-docker compose up -d --force-recreate
-```
-
-Check startup with `docker compose ps`, `docker compose logs -f gobard`, or `docker inspect --format '{{.State.Health.Status}}' gobard`. The health probe calls the application’s `/ready` endpoint; it does not merely look for a process.
-
-## Images and verification
-
-Release images are published only to GitHub Container Registry and only for `linux/amd64`. Production operators should pin an image digest rather than `latest`:
-
-```bash
-export GOBARD_IMAGE=ghcr.io/grainedlotus515/gobard@sha256:<published-digest>
-docker compose up -d
-```
-
-Published images are signed and carry SPDX SBOM and SLSA provenance attestations. Before the first release, the maintainer must commit the public half of the configured signing key as `cosign.pub`; the workflow fails closed if it is absent or does not match `COSIGN_PRIVATE_KEY`. Verify a digest with that trusted key before deployment:
-
-```bash
-cosign verify --key cosign.pub "$GOBARD_IMAGE"
-cosign verify-attestation --key cosign.pub --type spdxjson "$GOBARD_IMAGE"
-```
-
-There is no deployment automation in this repository. CI validates and publishes an image; rollout and rollback remain operator actions.
+The [installation guide](docs/installation.md) covers token files, larger-server
+profiles, image verification and the cache setup.
 
 ## Configuration
 
-GoBard validates supplied values at startup and exits on invalid configuration. Set exactly one credential source:
+Common settings in `.env`:
 
-| Variable | Default | Notes |
+| Setting | Default | |
 | --- | --- | --- |
-| `DISCORD_TOKEN` | required | Discord bot token. Keep `.env` mode `0600`. |
-| `DISCORD_TOKEN_FILE` | unset | Alternative regular file containing the token; mutually exclusive with `DISCORD_TOKEN`. Use `docker-compose.secrets.yml` for a Compose mount. |
-| `CACHE_DIR` | `./cache` | Compose sets this to `/app/cache`. |
-| `CACHE_LIMIT` | `2GB` | Positive `KB`, `MB`, or `GB` value. |
-| `DEFAULT_VOLUME` | `100` | Integer from 0 to 100. |
-| `REDUCE_VOL_WHEN_VOICE` | `false` | Enable speaking-based volume ducking. |
-| `REDUCE_VOL_WHEN_VOICE_TARGET` | `70` | Integer from 0 to 100. |
-| `PAUSE_TIMEOUT_SECONDS` | `600` | Leave voice after this long paused; the queue and position are kept. 0 disables; max 86400. |
-| `ALONE_TIMEOUT_SECONDS` | `120` | Leave voice after this long with no non-bot member in the channel; the queue and position are kept. 0 disables; max 86400. |
-| `MAX_PLAYLIST_TRACKS` | `500` | Integer from 1 to 500. |
-| `YTDLP_MAX_CONCURRENCY` | `4` | Shared integer cap from 1 to 16 for every yt-dlp path: metadata, playlist work, cache downloads, and streaming fallback. |
-| `MAX_GUILD_SESSIONS` | `16` | Retained guild-session limit, 1–1024; increase explicitly for larger deployments. |
-| `MEMORY_BUDGET` | auto | Optional positive byte size (KB/MB/GB); lowers the visible RAM/cgroup budget. |
-| `MAX_ACTIVE_STREAMS` | auto | Optional positive stream cap, no higher than derived memory/extractor capacity. |
-| `QUEUE_LIMIT` | `500` | Maximum tracks per guild, 1–500. |
-| `PLAY_COMMAND_CONCURRENCY` | `4` | Concurrent play operations, 1–16; saturation rejects with a retry-later response. |
-| `LOG_FORMAT` | `json` | Charm JSON or `text` with identical safe event semantics. |
-| `HEALTH_LISTEN_ADDR` | `127.0.0.1:8080` | Loopback-only health listener. |
-| `REGISTER_COMMANDS_ON_BOT` | `false` | Use global command registration instead of guild-by-guild reconciliation. |
-| `BOT_STATUS` | `online` | `online`, `idle`, `dnd`, `invisible`, or `offline`. |
-| `BOT_ACTIVITY_TYPE` | `LISTENING` | `PLAYING`, `STREAMING`, `LISTENING`, `WATCHING`, or `COMPETING`. |
-| `BOT_ACTIVITY` | `music` | Non-empty activity text. |
-| `BOT_ACTIVITY_URL` | unset | Optional URL used for streaming activity. |
-| `DEBUG` | `false` | Additional safe diagnostics; ordinary failures are always visible. |
-| `DEBUG_PLAYBACK` | `false` | Deprecated compatibility setting; validated but no independent playback logger. |
+| `DEFAULT_VOLUME` | `100` | Starting volume, 0–100 |
+| `PAUSE_TIMEOUT_SECONDS` | `600` | Leave voice after being paused this long (0 = never) |
+| `ALONE_TIMEOUT_SECONDS` | `120` | Leave voice after being alone this long (0 = never) |
+| `REDUCE_VOL_WHEN_VOICE` | `false` | Lower the music while people speak |
+| `CACHE_LIMIT` | `2GB` | Disk space for cached audio |
+| `BOT_ACTIVITY` | `music` | The "Listening to …" status text |
 
-Compose hardening defaults can be changed without editing the file:
+Every setting, resource limit and capacity profile is listed in the
+[configuration reference](docs/configuration.md).
 
-| Variable | Default |
-| --- | --- |
-| `GOBARD_MEMORY_LIMIT` | `1g` |
-| `GOBARD_CPUS` | `2.0` |
-| `GOBARD_PIDS_LIMIT` | `256` |
-| `GOBARD_TMPFS_SIZE` | `128m` |
+## Documentation
 
-The bot container has a read-only root filesystem, no Linux capabilities, `no-new-privileges`, and a bounded `noexec,nosuid` `/tmp`. It writes persistent audio only to the cache mount.
+- [Installation](docs/installation.md): running and verifying the published image
+- [Configuration](docs/configuration.md): all settings and capacity profiles
+- [Discord interface](docs/discord-interface.md): the player card and controls
+- [Architecture](docs/architecture.md) and [playback lifecycle](docs/playback-lifecycle.md): how it works inside
+- [Deployment](docs/deployment.md): rollout policy, migration from v1, memory admission
+- [Observability](docs/observability.md) and [performance](docs/performance.md): logs, health and measurements
+- [Rewrite status](docs/rewrite/status.md): what has and hasn't been verified
 
-### Capacity profiles
+## Contributing
 
-The base Compose file is the conservative small profile, not a hard playback limit. Capacity is measured in simultaneous guild playback sessions; adding listeners to one voice channel does not create another FFmpeg or Opus pipeline.
-
-| Profile | CPU | Memory | yt-dlp | Cache | Minimum validation target |
-| --- | ---: | ---: | ---: | ---: | ---: |
-| Small | 2 vCPU | 1 GiB | 4 | 2 GiB | 4 simultaneous guilds |
-| Medium | 4 vCPU | 2 GiB | 8 | 10 GiB | 12 simultaneous guilds |
-| Large | 8 vCPU | 4 GiB | 12 | 25 GiB | 24 simultaneous guilds |
-
-Use the same published image with a sizing override:
+GoBard is written in Go. Docker is the canonical build and test environment;
+on NixOS, `nix develop` gives an equivalent native shell with all dependencies,
+including libdave.
 
 ```bash
-docker compose -f docker-compose.yml -f docker-compose.medium.yml up -d
-docker compose -f docker-compose.yml -f docker-compose.large.yml up -d
-```
-
-For a local checkout, use `make docker-run-medium` or `make docker-run-large`. The existing `GOBARD_CPUS`, `GOBARD_MEMORY_LIMIT`, and `GOBARD_PIDS_LIMIT` variables still override a profile. `GOBARD_PROFILE_YTDLP_MAX_CONCURRENCY` and `GOBARD_PROFILE_CACHE_LIMIT` override its media-process and cache defaults.
-
-Resource profiles are workload targets. `MAX_GUILD_SESSIONS` bounds retained state (default 16; the large Compose profile defaults to 32). Active streams have a separate memory-derived limit, also capped to leave one extractor slot for metadata when possible. `GOBARD_PROFILE_MAX_GUILD_SESSIONS` overrides the retained-session budget. See [runtime admission](docs/deployment.md#runtime-memory-admission) and [measurement limits](docs/performance.md).
-
-## Commands and access
-
-Commands are guild-only. `/play` accepts a search query or an exact HTTPS YouTube URL (`youtube.com`, `www.youtube.com`, `music.youtube.com`, or `youtu.be`); other URLs are rejected.
-
-`/queue` and `/now-playing` are read-only. Playback controls and queue mutations require the caller to be in the bot’s active voice channel. Changing `/config` requires the `Manage Guild` permission. `/disconnect` leaves voice and retains the queue. Finite seekable tracks resume after their last delivered packet on the next `/play`; an interrupted live or unknown-duration track ends and the queue advances. Automatic voice recovery uses the same position policy. `/stop` clears the queue but keeps a healthy voice connection; it cancels pending joins and recovery and cleans broken transport.
-
-Available controls include `/play`, `/pause`, `/resume`, `/skip`, `/stop`, `/disconnect`, `/queue`, `/now-playing`, `/clear`, `/shuffle`, `/loop`, `/volume`, `/seek`, `/fseek`, `/move`, `/remove`, and `/config`.
-
-The active player shows track details and Pause/Resume, Skip, Repeat, Stop and
-Queue controls. It follows track/state changes automatically, with progress in
-15-second steps. Older messages can be refreshed; outdated mutation buttons
-return a private explanation. See [the interface contract](docs/discord-interface.md).
-Slash commands receive private confirmations. Repeated play and queue requests
-reuse the shared card; interruption, recovery and queue completion update that
-card instead of producing separate channel messages.
-
-## Development
-
-Docker is the canonical release build and validation environment. On NixOS, `nix develop` enters the pinned native shell with Go 1.27.3 and all CGO/media dependencies, including libdave; no host library installation is needed. Run `nix develop --command go test -race -count=1 ./...` and `nix develop --command go vet ./...` for native checks. Other native setups remain unsupported.
-
-The isolated acceptance bot has `make local-test-start`, `local-test-status`,
-`local-test-stop` and `local-test-update` commands. Its dedicated cache survives
-container replacement. [Setup and safety boundaries](docs/deployment.md#durable-local-acceptance-instance)
-are separate from production Compose.
-
-```bash
-make docker-test    # Go tests with -race
-make docker-lint    # gofmt check, vet, golangci-lint
+make docker-test    # tests with the race detector
+make docker-lint    # formatting, vet, golangci-lint
 make docker-build   # hardened runtime image
-make docker-smoke   # final-image tools and permission checks
-make docker-bench   # microbenchmarks + four 15-minute capacity profiles
-make docker-profile-check # rendered capacity-profile validation
-make docker-run     # checkout + docker-compose.local.yml
+make docker-smoke   # final-image checks
+make docker-run     # run this checkout locally
 ```
 
-The capacity run uses real Opus encoding, deterministic media, an owned local
-extractor fixture, a fake voice sink, and concurrent queue/cache activity.
-It runs reduced (512 MiB/five derived guilds), small, medium, and large
-containers with their actual CPU, memory, and PID limits and prints one JSON
-metrics report per profile. For a quick harness
-check, use `GOBARD_BENCH_DURATION=10s make docker-bench`. Optional
-`GOBARD_BENCH_BASELINE_SMALL_MS`, `GOBARD_BENCH_BASELINE_MEDIUM_MS`, and
-`GOBARD_BENCH_BASELINE_LARGE_MS` values enforce the 10% first-frame regression
-budget against a captured pre-change baseline.
+See [DEVELOPMENT.md](DEVELOPMENT.md) and [CONTRIBUTING.md](CONTRIBUTING.md) for
+the full workflow, benchmarks and CI details.
 
-`docker-compose.yml` is the production-image definition. `docker-compose.local.yml` is an explicit override for building this checkout. See [DEVELOPMENT.md](DEVELOPMENT.md) and [CONTRIBUTING.md](CONTRIBUTING.md) for contributor workflow and CI details.
+## License
+
+GoBard is released under the [0BSD license](LICENSE).
