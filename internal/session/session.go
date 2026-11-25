@@ -82,6 +82,8 @@ type Session struct {
 	// so A→B→A before a drain still reconciles the intervening move.
 	priorVoice   string
 	priorPending bool
+	// The bot's voice transport was lost without leaving its channel.
+	voiceLossPending bool
 	// Set when a member observation overflowed the pending bound; the
 	// coordinator then drops all speaker state rather than keep a stale one.
 	speakersReset bool
@@ -308,6 +310,18 @@ func (s *Session) ObserveVoice(channel string) error {
 	return nil
 }
 
+// ObserveVoiceLoss records that the bot's voice transport was lost while it
+// was not removed from its channel (for example a voice socket network
+// failure). It never blocks; repeated losses before the coordinator drains
+// them coalesce into one. The coordinator applies a loss before any channel
+// observation pending with it, so a later move or removal still decides.
+func (s *Session) ObserveVoiceLoss() {
+	s.observeMu.Lock()
+	s.voiceLossPending = true
+	s.observeMu.Unlock()
+	s.notifyObserved()
+}
+
 // memberObservation coalesces one member's observations between coordinator
 // drains: the latest speaking state, the latest voice channel, and the most
 // recent overwritten channel when it differs (a leave that a quick rejoin
@@ -400,6 +414,7 @@ func (s *Session) notifyObserved() {
 type observations struct {
 	prior, voice       string
 	hasPrior, hasVoice bool
+	voiceLoss          bool
 	resetSpeakers      bool
 	speakers           []Operation
 	audienceChannel    string
@@ -412,10 +427,10 @@ type observations struct {
 func (s *Session) takeObserved(speakers []Operation) observations {
 	s.observeMu.Lock()
 	defer s.observeMu.Unlock()
-	o := observations{prior: s.priorVoice, voice: s.observedVoice, hasPrior: s.priorPending, hasVoice: s.voicePending, resetSpeakers: s.speakersReset}
+	o := observations{prior: s.priorVoice, voice: s.observedVoice, hasPrior: s.priorPending, hasVoice: s.voicePending, voiceLoss: s.voiceLossPending, resetSpeakers: s.speakersReset}
 	o.audienceChannel, o.audienceAlone, o.hasAudience, o.audienceInterrupt = s.audienceChannel, s.audienceAlone, s.audiencePending, s.audienceInterrupted
 	s.audienceInterrupted = false
-	s.voicePending, s.priorPending, s.speakersReset, s.audiencePending = false, false, false, false
+	s.voicePending, s.priorPending, s.voiceLossPending, s.speakersReset, s.audiencePending = false, false, false, false, false
 	for _, m := range s.memberUpdates {
 		speakers = m.replay(speakers)
 	}
@@ -570,14 +585,19 @@ func (c *coordinator) applyObserved() {
 			c.aloneIdle = armTimer(&c.aloneTimer, c.aloneIdle, 0, false)
 		}
 	}
-	if o.hasVoice {
+	if o.hasVoice || o.voiceLoss {
 		// Speaker state is not in snapshots; only a transport change is
 		// worth waking observers for. ObserveVoice validated both channels.
 		connected, current, generation := c.connected(), c.channel, c.generation
+		if o.voiceLoss {
+			c.voiceEvent(voiceEvent{kind: voiceTransportLost})
+		}
 		if o.hasPrior {
 			c.voiceLost(o.prior)
 		}
-		c.voiceLost(o.voice)
+		if o.hasVoice {
+			c.voiceLost(o.voice)
+		}
 		if c.connected() != connected || c.channel != current || c.generation != generation {
 			c.dirty = true
 		}

@@ -267,3 +267,53 @@ func TestRuntimeQueuePaginationPreservesOneBasedPositions(t *testing.T) {
 		t.Fatal("incorrect next page")
 	}
 }
+
+func TestOwnVoiceStateAndTransportLossReachTheSession(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		apply func(*Runtime)
+	}{
+		{name: "removal by someone else", apply: func(r *Runtime) {
+			r.voiceState(&discordgo.VoiceStateUpdate{VoiceState: &discordgo.VoiceState{GuildID: "guild", UserID: "bot"}})
+		}},
+		{name: "transport loss", apply: func(r *Runtime) { r.transportLost("guild") }},
+	} {
+		r := runtimeFixture(t)
+		r.discord.State.User = &discordgo.User{ID: "bot"}
+		target, err := r.sessions.CreateVoice("guild", fakeVoice{}, log.New(io.Discard))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := target.Join(context.Background(), "voice"); err != nil {
+			t.Fatal(err)
+		}
+		// Another member leaving is not the bot's own state.
+		r.voiceState(&discordgo.VoiceStateUpdate{VoiceState: &discordgo.VoiceState{GuildID: "guild", UserID: "member"}})
+		r.transportLost("other-guild")
+		if snap, err := target.Apply(context.Background(), session.Operation{Action: session.Inspect}); err != nil || !snap.Connected {
+			t.Fatalf("%s: unrelated event changed the session: %+v, %v", tc.name, snap, err)
+		}
+		tc.apply(r)
+		deadline := time.Now().Add(time.Second)
+		for {
+			snap, err := target.Apply(context.Background(), session.Operation{Action: session.Inspect})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !snap.Connected {
+				break
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("%s: not applied to the session", tc.name)
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+	}
+}
+
+type fakeVoice struct{}
+
+func (fakeVoice) Connect(context.Context, string) (playback.Output, error) {
+	return mappingOutput{}, nil
+}
+func (fakeVoice) Disconnect(context.Context) error { return nil }
